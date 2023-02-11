@@ -8,6 +8,7 @@
 #define HEIGHT 480
 
 SDL_Surface *window;
+char name_window[255];
 
 // Image.draw method
 static duk_ret_t duk_image_draw(duk_context *ctx) {
@@ -74,18 +75,79 @@ static duk_ret_t duk_document_constructor(duk_context *ctx) {
     return 1;
 }
 
-// Document.getElementById method
 static duk_ret_t duk_document_getElementById(duk_context *ctx) {
     const char *id = duk_require_string(ctx, 0);
-    duk_push_undefined(ctx);  // dummy return value
+    snprintf(name_window, 255, "%s", id);
+    duk_push_object(ctx);
+    duk_push_string(ctx, name_window);
+    duk_put_prop_string(ctx, -2, "id");
     return 1;
 }
 
-// Canvas.getContext method
 static duk_ret_t duk_canvas_getContext(duk_context *ctx) {
-    const char *type = duk_require_string(ctx, 0);
-    duk_push_undefined(ctx);  // dummy return value
-    return 1;
+    SDL_Surface *surface;
+    const char *id = duk_require_string(ctx, 0);
+    const char *type = duk_require_string(ctx, 1);
+
+    if (strcmp(type, "2d") == 0) {
+        surface = SDL_CreateRGBSurface(SDL_HWSURFACE, WIDTH, HEIGHT, 32, 0, 0, 0, 0);
+        if (!surface) {
+            duk_type_error(ctx, "Failed to create RGB surface: %s", SDL_GetError());
+        }
+
+        // Create a plain object for the context
+        duk_push_object(ctx);
+
+        // Set the 'canvas' property to the name of the canvas
+        duk_push_string(ctx, name_window);
+        duk_put_prop_string(ctx, -2, "canvas");
+
+        // Set the 'drawImage' method to draw an image to the canvas
+        duk_push_c_function(ctx, duk_canvas_drawImage, 3);
+        duk_put_prop_string(ctx, -2, "drawImage");
+
+        // Set the 'getImageData' method to get the pixel data of a rectangle
+        duk_push_c_function(ctx, duk_canvas_getImageData, 4);
+        duk_put_prop_string(ctx, -2, "getImageData");
+
+        // Set the 'putImageData' method to put the pixel data into a rectangle
+        duk_push_c_function(ctx, duk_canvas_putImageData, 3);
+        duk_put_prop_string(ctx, -2, "putImageData");
+
+        // Set the 'fillRect' method to fill a rectangle with a color
+        duk_push_c_function(ctx, duk_canvas_fillRect, 4);
+        duk_put_prop_string(ctx, -2, "fillRect");
+
+        // Set the 'clearRect' method to clear a rectangle to transparent black
+        duk_push_c_function(ctx, duk_canvas_clearRect, 4);
+        duk_put_prop_string(ctx, -2, "clearRect");
+
+        // Set the 'fillStyle' property to the default fill style (black)
+        duk_push_string(ctx, "#000000");
+        duk_put_prop_string(ctx, -2, "fillStyle");
+
+        // Set the 'strokeStyle' property to the default stroke style (black)
+        duk_push_string(ctx, "#000000");
+        duk_put_prop_string(ctx, -2, "strokeStyle");
+
+        // Set the 'lineWidth' property to the default line width (1)
+        duk_push_number(ctx, 1);
+        duk_put_prop_string(ctx, -2, "lineWidth");
+
+        // Set the 'textAlign' property to the default text alignment (start)
+        duk_push_string(ctx, "start");
+        duk_put_prop_string(ctx, -2, "textAlign");
+
+        // Set the 'textBaseline' property to the default text baseline (alphabetic)
+        duk_push_string(ctx, "alphabetic");
+        duk_put_prop_string(ctx, -2, "textBaseline");
+
+        return 1;
+    } else {
+        duk_type_error(ctx, "Context type not supported: %s", type);
+    }
+
+    return 0;
 }
 
 
