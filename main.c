@@ -1,121 +1,151 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <SDL/SDL.h>
+#include "duktape.h"
 
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_image.h>
-#include <duktape.h>
-#include <duk_v1_compat.h>
+#define WIDTH 640
+#define HEIGHT 480
 
-SDL_Renderer* renderer;
+SDL_Surface *window;
 
-// Load an image into a texture using SDL_Image
-SDL_Texture* loadTexture(const char* file, SDL_Renderer* renderer) {
-    SDL_Surface* surface = IMG_Load(file);
-    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-    SDL_FreeSurface(surface);
-    return texture;
-}
-
-// Implementation of the drawImage function for the canvas
-duk_ret_t canvas_drawImage(duk_context *ctx) {
-    // Get the arguments
-    const char* file = duk_get_string(ctx, 0);
-    int x = duk_get_int(ctx, 1);
-    int y = duk_get_int(ctx, 2);
-
-    // Load the image
-    SDL_Texture* texture = loadTexture(file, renderer);
-
-    // Render the image to the screen
-    SDL_Rect dest = {x, y, 0, 0};
-    SDL_QueryTexture(texture, NULL, NULL, &dest.w, &dest.h);
-    SDL_RenderCopy(renderer, texture, NULL, &dest);
-
-    // Clean up
-    SDL_DestroyTexture(texture);
-
+// Image.draw method
+static duk_ret_t duk_image_draw(duk_context *ctx) {
+    SDL_Surface *image = duk_require_pointer(ctx, 0);
+    SDL_Rect rect = {0, 0, image->w, image->h};
+    SDL_BlitSurface(image, NULL, window, &rect);
+    SDL_Flip(window);
     return 0;
 }
 
-duk_ret_t canvas_fillRect(duk_context *ctx) {
-	int x = duk_to_int(ctx, 0);
-	int y = duk_to_int(ctx, 1);
-	int w = duk_to_int(ctx, 2);
-	int h = duk_to_int(ctx, 3);
-	SDL_Rect rect = {x, y, w, h};
-	SDL_RenderFillRect(renderer, &rect);
-	return 0;
+// Image constructor
+static duk_ret_t duk_image_constructor(duk_context *ctx) {
+    SDL_Surface *image;
+    const char *filename = duk_require_string(ctx, 0);
+
+    // Load the BMP file
+    image = SDL_LoadBMP(filename);
+    if (!image) {
+        duk_type_error(ctx, "Failed to load image: %s", SDL_GetError());
+    }
+
+    // Get the canvas element and its 2D context
+    duk_get_global_string(ctx, "document");
+    duk_get_prop_string(ctx, -1, "getElementById");
+    duk_push_string(ctx, "canvas");
+    duk_call(ctx, 1);
+    duk_get_prop_string(ctx, -1, "getContext");
+    duk_push_string(ctx, "2d");
+    duk_call(ctx, 1);
+    duk_put_global_string(ctx, "context");
+
+    // Create a plain object for the image
+    duk_push_object(ctx);
+
+    // Set the 'src' property to the filename
+    duk_push_string(ctx, filename);
+    duk_put_prop_string(ctx, -2, "src");
+
+    // Set the 'draw' method to draw the image to the canvas
+    duk_push_c_function(ctx, duk_image_draw, 1);
+    duk_put_prop_string(ctx, -2, "draw");
+
+    // Set the 'surface' property to the SDL_Surface pointer
+    duk_push_pointer(ctx, image);
+    duk_put_prop_string(ctx, -2, "surface");
+
+    return 1;
 }
 
-duk_ret_t canvas_setFillStyle(duk_context *ctx) {
-#if 0
-    // Check if this is a direct property assignment
-    if (duk_is_string(ctx, 0)) {
-        const char *fill_style = duk_to_string(ctx, 0);
-        int r, g, b;
-        sscanf(fill_style, "#%2x%2x%2x", &r, &g, &b);
-        SDL_SetRenderDrawColor(renderer, r, g, b, 255);
-        return 0;
-    }
-    // If not, assume this is a function call
-    else {
-        duk_dup(ctx, 0);
-        duk_call(ctx, 0);
+
+static duk_ret_t duk_document_get_element_by_id(duk_context *ctx) {
+    const char *id = duk_require_string(ctx, 0);
+    // Return an empty object for now
+    duk_push_object(ctx);
+    return 1;
+}
+
+static duk_ret_t duk_document_constructor(duk_context *ctx) {
+    // Create a plain object for the document
+    duk_push_object(ctx);
+    // Set the 'getElementById' method to the implementation above
+    duk_push_c_function(ctx, duk_document_get_element_by_id, 1);
+    duk_put_prop_string(ctx, -2, "getElementById");
+    return 1;
+}
+
+// Document.getElementById method
+static duk_ret_t duk_document_getElementById(duk_context *ctx) {
+    const char *id = duk_require_string(ctx, 0);
+    duk_push_undefined(ctx);  // dummy return value
+    return 1;
+}
+
+// Canvas.getContext method
+static duk_ret_t duk_canvas_getContext(duk_context *ctx) {
+    const char *type = duk_require_string(ctx, 0);
+    duk_push_undefined(ctx);  // dummy return value
+    return 1;
+}
+
+
+int main(int argc, char *argv[]) {
+    // Initialize SDL 1.2
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        printf("Failed to initialize SDL 1.2: %s\n", SDL_GetError());
         return 1;
     }
-#else
-	const char *fill_style = duk_to_string(ctx, 0);
-    int r, g, b;
-    sscanf(fill_style, "#%2x%2x%2x", &r, &g, &b);
-    SDL_SetRenderDrawColor(renderer, r, g, b, 255);
-    return 0;
-#endif
-}
 
-
-int main(int argc, char* argv[]) {
-    // Initialize SDL
-    SDL_Init(SDL_INIT_VIDEO);
-    SDL_Window* window = SDL_CreateWindow("Canvas in SDL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 640, 480, 0);
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    // Create the window
+    window = SDL_SetVideoMode(WIDTH, HEIGHT, 32, SDL_HWSURFACE | SDL_DOUBLEBUF);
+    if (!window) {
+        printf("Failed to create window: %s\n", SDL_GetError());
+        return 1;
+    }
 
     // Initialize Duktape
     duk_context *ctx = duk_create_heap_default();
-
-    // Create the native object
-    duk_push_object(ctx);
-
-    // FillRect, setFillStyle, fillStyle
-    duk_push_c_function(ctx, canvas_fillRect, 4);
-    duk_put_prop_string(ctx, -2, "fillRect");
-    duk_push_c_function(ctx, canvas_setFillStyle, 1);
-    duk_put_prop_string(ctx, -2, "setFillStyle");
-    duk_push_c_function(ctx, canvas_setFillStyle, 1);
-    duk_put_prop_string(ctx, -2, "fillStyle");
-
-    // Add the native object to the global context
-    duk_put_global_string(ctx, "native");
-
-    // Push the drawImage function onto the Duktape context
-    duk_push_c_function(ctx, canvas_drawImage, 3 /*nargs*/);
-    duk_put_global_string(ctx, "drawImage");
-
-    // Load the JavaScript code that uses the canvas
-    duk_eval_string(ctx, "var canvas = {}; canvas.drawImage = drawImage; canvas.fillRect = function(x, y, w, h) { native.fillRect(x, y, w, h); }; canvas.setFillStyle = function(color) { native.setFillStyle(color); };");
-    duk_eval_string(ctx, "Object.defineProperty(canvas, 'fillStyle', { set: function(color) { native.fillStyle(color); } });");
-    
-    duk_eval_file(ctx, "canvas.js");
-    SDL_RenderPresent(renderer);
-
-    // Wait for a key press
-    SDL_Event event;
-    while (SDL_WaitEvent(&event) && event.type != SDL_QUIT) {
+    if (!ctx) {
+        printf("Failed to create Duktape heap\n");
+        return 1;
     }
 
-    // Clean up
-    duk_destroy_heap(ctx);
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+    // Register the Image constructor
+    duk_push_c_function(ctx, duk_image_constructor, 0);
+    duk_put_global_string(ctx, "Image");
 
+    // Set up the 'document' object
+    duk_push_object(ctx);
+
+    // Set up the 'getElementById' function
+    duk_push_c_function(ctx, duk_document_getElementById, 1);
+    duk_put_prop_string(ctx, -2, "getElementById");
+
+    // Set up the 'canvas' object
+    duk_push_object(ctx);
+
+    // Set the 'id' property to 'canvas'
+    duk_push_string(ctx, "canvas");
+    duk_put_prop_string(ctx, -2, "id");
+
+    // Set the 'getContext' method to return a plain object
+    duk_push_c_function(ctx, duk_canvas_getContext, 1);
+    duk_push_object(ctx);
+    duk_put_prop_string(ctx, -2, "canvas");
+
+    // Put the 'canvas' object into the 'document'
+    duk_put_prop_string(ctx, -2, "canvas");
+    duk_put_global_string(ctx, "document");
+
+    // Load and evaluate the JavaScript code
+    if (duk_peval_file(ctx, "canvas.js") != 0) {
+        printf("Error: %s\n", duk_safe_to_string(ctx, -1));
+        return 1;
+    }
+
+    // Destroy the Duktape heap and quit SDL
+    duk_destroy_heap(ctx);
+    SDL_Quit();
     return 0;
 }
 
