@@ -75,13 +75,89 @@ static duk_ret_t duk_document_constructor(duk_context *ctx) {
     return 1;
 }
 
+// Document.getElementById method
 static duk_ret_t duk_document_getElementById(duk_context *ctx) {
     const char *id = duk_require_string(ctx, 0);
-    snprintf(name_window, 255, "%s", id);
+    snprintf(name_window, sizeof(name_window), "%s", id);
     duk_push_object(ctx);
-    duk_push_string(ctx, name_window);
-    duk_put_prop_string(ctx, -2, "id");
+    duk_push_c_function(ctx, duk_canvas_getContext, 1);
+    duk_put_prop_string(ctx, -2, "getContext");
     return 1;
+}
+
+static duk_ret_t duk_canvas_drawImage(duk_context *ctx) {
+    SDL_Surface *image = duk_require_pointer(ctx, 0);
+    int x = duk_require_int(ctx, 1);
+    int y = duk_require_int(ctx, 2);
+
+    SDL_Rect dest_rect = { x, y, image->w, image->h };
+    SDL_BlitSurface(image, NULL, window, &dest_rect);
+    SDL_Flip(window);
+
+    return 0;
+}
+
+static duk_ret_t duk_canvas_getImageData(duk_context *ctx) {
+    SDL_Surface *surface = duk_require_pointer(ctx, 0);
+    SDL_Rect rect = {0, 0, surface->w, surface->h};
+    SDL_LockSurface(surface);
+
+    SDL_Surface *image = SDL_CreateRGBSurface(0, surface->w, surface->h, 32, 0, 0, 0, 0);
+    SDL_BlitSurface(surface, &rect, image, &rect);
+
+    duk_idx_t arr_idx = duk_push_array(ctx);
+
+    for (int y = 0; y < image->h; y++) {
+        for (int x = 0; x < image->w; x++) {
+            Uint8 *pixel = (Uint8 *) image->pixels + y * image->pitch + x * 4;
+
+            duk_idx_t rgba_idx = duk_push_array(ctx);
+            duk_push_int(ctx, pixel[0]);
+            duk_put_prop_index(ctx, rgba_idx, 0);
+            duk_push_int(ctx, pixel[1]);
+            duk_put_prop_index(ctx, rgba_idx, 1);
+            duk_push_int(ctx, pixel[2]);
+            duk_put_prop_index(ctx, rgba_idx, 2);
+            duk_push_int(ctx, pixel[3]);
+            duk_put_prop_index(ctx, rgba_idx, 3);
+
+            duk_put_prop_index(ctx, arr_idx, y * image->w + x);
+        }
+    }
+
+    SDL_UnlockSurface(surface);
+    SDL_FreeSurface(image);
+
+    return 1;
+}
+
+static duk_ret_t duk_canvas_putImageData(duk_context *ctx) {
+    // Parse arguments
+    SDL_Surface *surface = duk_require_pointer(ctx, 0);
+    int x = duk_require_int(ctx, 1);
+    int y = duk_require_int(ctx, 2);
+    int width = duk_require_int(ctx, 3);
+    int height = duk_require_int(ctx, 4);
+    const void *data = duk_require_buffer(ctx, 5, NULL);
+
+    // Calculate pitch (bytes per row)
+    int bpp = surface->format->BytesPerPixel;
+    int pitch = surface->pitch / bpp;
+
+    // Get pointer to pixel data
+    uint8_t *pixels = (uint8_t *) surface->pixels + y * pitch * bpp + x * bpp;
+
+    // Copy pixel data from buffer to surface
+    int i, j;
+    for (i = 0; i < height; i++) {
+        for (j = 0; j < width; j++) {
+            memcpy(pixels + j * bpp, data + (i * width + j) * bpp, bpp);
+        }
+        pixels += pitch * bpp;
+    }
+
+    // Return nothing
+    return 0;
 }
 
 static duk_ret_t duk_canvas_getContext(duk_context *ctx) {
@@ -107,7 +183,7 @@ static duk_ret_t duk_canvas_getContext(duk_context *ctx) {
         duk_put_prop_string(ctx, -2, "drawImage");
 
         // Set the 'getImageData' method to get the pixel data of a rectangle
-        duk_push_c_function(ctx, duk_canvas_getImageData, 4);
+       /* duk_push_c_function(ctx, duk_canvas_getImageData, 4);
         duk_put_prop_string(ctx, -2, "getImageData");
 
         // Set the 'putImageData' method to put the pixel data into a rectangle
@@ -140,7 +216,7 @@ static duk_ret_t duk_canvas_getContext(duk_context *ctx) {
 
         // Set the 'textBaseline' property to the default text baseline (alphabetic)
         duk_push_string(ctx, "alphabetic");
-        duk_put_prop_string(ctx, -2, "textBaseline");
+        duk_put_prop_string(ctx, -2, "textBaseline");*/
 
         return 1;
     } else {
