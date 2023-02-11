@@ -198,7 +198,6 @@ duk_ret_t duk_canvas_clearRect(duk_context *ctx) {
 }
 
 duk_ret_t duk_canvas_getContext(duk_context *ctx) {
-    SDL_Surface *surface;
     const char *id = duk_require_string(ctx, 0);
     const char *type = duk_require_string(ctx, 1);
 
@@ -255,6 +254,11 @@ duk_ret_t duk_canvas_getContext(duk_context *ctx) {
         // Set the 'textBaseline' property to the default text baseline (alphabetic)
         duk_push_string(ctx, "alphabetic");
         duk_put_prop_string(ctx, -2, "textBaseline");
+        
+        // Set the 'getContext' method to return the context object
+        duk_push_c_function(ctx, duk_canvas_getContext, 1);
+        duk_push_string(ctx, "2d");
+        duk_put_prop_string(ctx, -2, "getContext");
 
         return 1;
     } else {
@@ -297,6 +301,7 @@ int main(int argc, char *argv[]) {
     duk_push_c_function(ctx, duk_document_getElementById, 1);
     duk_put_prop_string(ctx, -2, "getElementById");
 
+
     // Set up the 'canvas' object
     duk_push_object(ctx);
 
@@ -306,6 +311,7 @@ int main(int argc, char *argv[]) {
 
     // Set the 'getContext' method to return a plain object
     duk_push_c_function(ctx, duk_canvas_getContext, 1);
+	duk_put_global_string(ctx, "getContext");
     duk_push_object(ctx);
     duk_put_prop_string(ctx, -2, "canvas");
 
