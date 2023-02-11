@@ -7,11 +7,23 @@
 #define WIDTH 640
 #define HEIGHT 480
 
-SDL_Surface *window;
+SDL_Surface *window, *canvas;
 char name_window[255];
 
+duk_ret_t duk_image_draw(duk_context *ctx);
+duk_ret_t duk_image_constructor(duk_context *ctx);
+duk_ret_t duk_document_get_element_by_id(duk_context *ctx);
+duk_ret_t duk_document_constructor(duk_context *ctx);
+duk_ret_t duk_document_getElementById(duk_context *ctx);
+duk_ret_t duk_canvas_drawImage(duk_context *ctx);
+duk_ret_t duk_canvas_getImageData(duk_context *ctx);
+duk_ret_t duk_canvas_putImageData(duk_context *ctx);
+duk_ret_t duk_canvas_fillRect(duk_context *ctx);
+duk_ret_t duk_canvas_clearRect(duk_context *ctx);
+duk_ret_t duk_canvas_getContext(duk_context *ctx);
+
 // Image.draw method
-static duk_ret_t duk_image_draw(duk_context *ctx) {
+duk_ret_t duk_image_draw(duk_context *ctx) {
     SDL_Surface *image = duk_require_pointer(ctx, 0);
     SDL_Rect rect = {0, 0, image->w, image->h};
     SDL_BlitSurface(image, NULL, window, &rect);
@@ -20,7 +32,7 @@ static duk_ret_t duk_image_draw(duk_context *ctx) {
 }
 
 // Image constructor
-static duk_ret_t duk_image_constructor(duk_context *ctx) {
+duk_ret_t duk_image_constructor(duk_context *ctx) {
     SDL_Surface *image;
     const char *filename = duk_require_string(ctx, 0);
 
@@ -58,15 +70,14 @@ static duk_ret_t duk_image_constructor(duk_context *ctx) {
     return 1;
 }
 
-
-static duk_ret_t duk_document_get_element_by_id(duk_context *ctx) {
+duk_ret_t duk_document_get_element_by_id(duk_context *ctx) {
     const char *id = duk_require_string(ctx, 0);
     // Return an empty object for now
     duk_push_object(ctx);
     return 1;
 }
 
-static duk_ret_t duk_document_constructor(duk_context *ctx) {
+duk_ret_t duk_document_constructor(duk_context *ctx) {
     // Create a plain object for the document
     duk_push_object(ctx);
     // Set the 'getElementById' method to the implementation above
@@ -76,7 +87,7 @@ static duk_ret_t duk_document_constructor(duk_context *ctx) {
 }
 
 // Document.getElementById method
-static duk_ret_t duk_document_getElementById(duk_context *ctx) {
+duk_ret_t duk_document_getElementById(duk_context *ctx) {
     const char *id = duk_require_string(ctx, 0);
     snprintf(name_window, sizeof(name_window), "%s", id);
     duk_push_object(ctx);
@@ -85,7 +96,7 @@ static duk_ret_t duk_document_getElementById(duk_context *ctx) {
     return 1;
 }
 
-static duk_ret_t duk_canvas_drawImage(duk_context *ctx) {
+duk_ret_t duk_canvas_drawImage(duk_context *ctx) {
     SDL_Surface *image = duk_require_pointer(ctx, 0);
     int x = duk_require_int(ctx, 1);
     int y = duk_require_int(ctx, 2);
@@ -97,7 +108,7 @@ static duk_ret_t duk_canvas_drawImage(duk_context *ctx) {
     return 0;
 }
 
-static duk_ret_t duk_canvas_getImageData(duk_context *ctx) {
+duk_ret_t duk_canvas_getImageData(duk_context *ctx) {
     SDL_Surface *surface = duk_require_pointer(ctx, 0);
     SDL_Rect rect = {0, 0, surface->w, surface->h};
     SDL_LockSurface(surface);
@@ -131,7 +142,7 @@ static duk_ret_t duk_canvas_getImageData(duk_context *ctx) {
     return 1;
 }
 
-static duk_ret_t duk_canvas_putImageData(duk_context *ctx) {
+duk_ret_t duk_canvas_putImageData(duk_context *ctx) {
     // Parse arguments
     SDL_Surface *surface = duk_require_pointer(ctx, 0);
     int x = duk_require_int(ctx, 1);
@@ -160,16 +171,43 @@ static duk_ret_t duk_canvas_putImageData(duk_context *ctx) {
     return 0;
 }
 
-static duk_ret_t duk_canvas_getContext(duk_context *ctx) {
+duk_ret_t duk_canvas_fillRect(duk_context *ctx) {
+    SDL_Surface *canvas = duk_require_pointer(ctx, 0);
+    int x = duk_require_int(ctx, 1);
+    int y = duk_require_int(ctx, 2);
+    int w = duk_require_int(ctx, 3);
+    int h = duk_require_int(ctx, 4);
+    Uint32 color = duk_require_uint(ctx, 5);
+
+    SDL_Rect rect = { x, y, w, h };
+    SDL_FillRect(canvas, &rect, color);
+
+    return 0;
+}
+
+duk_ret_t duk_canvas_clearRect(duk_context *ctx) {
+    int x = duk_require_int(ctx, 0);
+    int y = duk_require_int(ctx, 1);
+    int w = duk_require_int(ctx, 2);
+    int h = duk_require_int(ctx, 3);
+
+    SDL_Rect rect = { x, y, w, h };
+    SDL_FillRect(canvas, &rect, 0x000000);
+
+    return 0;
+}
+
+duk_ret_t duk_canvas_getContext(duk_context *ctx) {
     SDL_Surface *surface;
     const char *id = duk_require_string(ctx, 0);
     const char *type = duk_require_string(ctx, 1);
 
     if (strcmp(type, "2d") == 0) {
-        surface = SDL_CreateRGBSurface(SDL_HWSURFACE, WIDTH, HEIGHT, 32, 0, 0, 0, 0);
-        if (!surface) {
-            duk_type_error(ctx, "Failed to create RGB surface: %s", SDL_GetError());
-        }
+		// Create a new RGB surface for the canvas
+		canvas = SDL_CreateRGBSurface(SDL_HWSURFACE, WIDTH, HEIGHT, 32, 0, 0, 0, 0);
+		if (!canvas) {
+			duk_error(ctx, DUK_ERR_ERROR, "Failed to create canvas surface: %s", SDL_GetError());
+		}
 
         // Create a plain object for the context
         duk_push_object(ctx);
@@ -183,7 +221,7 @@ static duk_ret_t duk_canvas_getContext(duk_context *ctx) {
         duk_put_prop_string(ctx, -2, "drawImage");
 
         // Set the 'getImageData' method to get the pixel data of a rectangle
-       /* duk_push_c_function(ctx, duk_canvas_getImageData, 4);
+		duk_push_c_function(ctx, duk_canvas_getImageData, 4);
         duk_put_prop_string(ctx, -2, "getImageData");
 
         // Set the 'putImageData' method to put the pixel data into a rectangle
@@ -216,7 +254,7 @@ static duk_ret_t duk_canvas_getContext(duk_context *ctx) {
 
         // Set the 'textBaseline' property to the default text baseline (alphabetic)
         duk_push_string(ctx, "alphabetic");
-        duk_put_prop_string(ctx, -2, "textBaseline");*/
+        duk_put_prop_string(ctx, -2, "textBaseline");
 
         return 1;
     } else {
@@ -271,8 +309,8 @@ int main(int argc, char *argv[]) {
     duk_push_object(ctx);
     duk_put_prop_string(ctx, -2, "canvas");
 
-    // Put the 'canvas' object into the 'document'
-    duk_put_prop_string(ctx, -2, "canvas");
+    // Create an instance of the Document object and set the global variable to point to it
+    duk_document_constructor(ctx);
     duk_put_global_string(ctx, "document");
 
     // Load and evaluate the JavaScript code
@@ -280,6 +318,11 @@ int main(int argc, char *argv[]) {
         printf("Error: %s\n", duk_safe_to_string(ctx, -1));
         return 1;
     }
+    
+    // Blit Canvas surface onto main display surface
+    SDL_BlitSurface(canvas, NULL, window, NULL);
+    // Refresh window
+    SDL_Flip(window);
 
     // Destroy the Duktape heap and quit SDL
     duk_destroy_heap(ctx);

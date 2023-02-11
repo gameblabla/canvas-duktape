@@ -1,4 +1,7 @@
-canvas.drawImage("image.png", 0, 0);
-//canvas.setFillStyle("#FF0000");
-canvas.fillStyle = "#FF0000";
-canvas.fillRect(0,0,100,100);
+var first_layer = document.getElementById('canvas');
+/*var MyC = first_layer.getContext('2d');
+var img;
+img = new Image();
+img.src = 'image.bmp';
+MyC.drawImage(img, 0, 0)
+*/
