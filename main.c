@@ -3,6 +3,7 @@
 #include <string.h>
 #include <SDL/SDL.h>
 #include "duktape.h"
+#include "duk_console.h"
 
 #define WIDTH 640
 #define HEIGHT 480
@@ -88,13 +89,19 @@ duk_ret_t duk_document_constructor(duk_context *ctx) {
 
 // Document.getElementById method
 duk_ret_t duk_document_getElementById(duk_context *ctx) {
-    const char *id = duk_require_string(ctx, 0);
-    snprintf(name_window, sizeof(name_window), "%s", id);
-    duk_push_object(ctx);
-    duk_push_c_function(ctx, duk_canvas_getContext, 1);
-    duk_put_prop_string(ctx, -2, "getContext");
+    const char *id = NULL;
+    const char *default_id = "string";
+        printf("id %s\n", id);
+    id = duk_is_string(ctx, 0) ? duk_require_string(ctx, 0) : default_id;
+    duk_push_global_stash(ctx);
+    duk_get_prop_string(ctx, -1, "window_object");
+    duk_get_prop_string(ctx, -1, "document_object");
+    duk_get_prop_string(ctx, -1, "elements");
+    duk_get_prop_string(ctx, -1, id);
+    duk_remove(ctx, -2);
     return 1;
 }
+
 
 duk_ret_t duk_canvas_drawImage(duk_context *ctx) {
     SDL_Surface *image = duk_require_pointer(ctx, 0);
@@ -210,9 +217,11 @@ duk_ret_t duk_canvas_getContext(duk_context *ctx) {
 
         // Create a plain object for the context
         duk_push_object(ctx);
+        
+		snprintf(name_window, sizeof(name_window), "%s", id);
 
         // Set the 'canvas' property to the name of the canvas
-        duk_push_string(ctx, name_window);
+        duk_push_string(ctx, id);
         duk_put_prop_string(ctx, -2, "canvas");
 
         // Set the 'drawImage' method to draw an image to the canvas
@@ -289,6 +298,8 @@ int main(int argc, char *argv[]) {
         printf("Failed to create Duktape heap\n");
         return 1;
     }
+    
+    duk_console_init(ctx, DUK_CONSOLE_PROXY_WRAPPER );
 
     // Register the Image constructor
     duk_push_c_function(ctx, duk_image_constructor, 0);
@@ -309,8 +320,8 @@ int main(int argc, char *argv[]) {
     duk_push_string(ctx, "canvas");
     duk_put_prop_string(ctx, -2, "id");
 
-    // Set the 'getContext' method to return a plain object
-    duk_push_c_function(ctx, duk_canvas_getContext, 1);
+	// Push the duk_canvas_getContext function onto the stack
+	duk_push_c_function(ctx, duk_canvas_getContext, DUK_VARARGS);
 	duk_put_global_string(ctx, "getContext");
     duk_push_object(ctx);
     duk_put_prop_string(ctx, -2, "canvas");
