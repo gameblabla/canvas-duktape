@@ -1,349 +1,437 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <SDL/SDL.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
 #include "duktape.h"
-#include "duk_console.h"
+#include "duktape/extras/console/duk_console.h"
 
-#define WIDTH 640
-#define HEIGHT 480
+static SDL_Window* g_window = NULL;
+static SDL_Renderer* g_renderer = NULL;
+static int g_win_w = 1280, g_win_h = 720;
 
-SDL_Surface *window, *canvas;
-char name_window[255];
+typedef struct {
+    SDL_Texture* tex;
+    int w, h;
+    char fname[512];
+} MyImage;
 
-duk_ret_t duk_image_draw(duk_context *ctx);
-duk_ret_t duk_image_constructor(duk_context *ctx);
-duk_ret_t duk_document_get_element_by_id(duk_context *ctx);
-duk_ret_t duk_document_constructor(duk_context *ctx);
-duk_ret_t duk_document_getElementById(duk_context *ctx);
-duk_ret_t duk_canvas_drawImage(duk_context *ctx);
-duk_ret_t duk_canvas_getImageData(duk_context *ctx);
-duk_ret_t duk_canvas_putImageData(duk_context *ctx);
-duk_ret_t duk_canvas_fillRect(duk_context *ctx);
-duk_ret_t duk_canvas_clearRect(duk_context *ctx);
-duk_ret_t duk_canvas_getContext(duk_context *ctx);
-
-// Image.draw method
-duk_ret_t duk_image_draw(duk_context *ctx) {
-    SDL_Surface *image = duk_require_pointer(ctx, 0);
-    SDL_Rect rect = {0, 0, image->w, image->h};
-    SDL_BlitSurface(image, NULL, window, &rect);
-    SDL_Flip(window);
-    return 0;
+static MyImage* get_image_ptr(duk_context* ctx, int idx) {
+    duk_get_prop_string(ctx, idx, "\xFF""ptr");
+    MyImage* p = (MyImage*)duk_get_pointer(ctx, -1);
+    duk_pop(ctx);
+    return p;
 }
 
-// Image constructor
-duk_ret_t duk_image_constructor(duk_context *ctx) {
-    SDL_Surface *image;
-    const char *filename = duk_require_string(ctx, 0);
-
-    // Load the BMP file
-    image = SDL_LoadBMP(filename);
-    if (!image) {
-        duk_type_error(ctx, "Failed to load image: %s", SDL_GetError());
+static void load_sync(MyImage* img) {
+    if (img->tex || !img->fname[0]) return;
+    SDL_Surface* sf = IMG_Load(img->fname);
+    if (!sf) {
+        fprintf(stderr, "[load_sync] Could not load '%s'\n", img->fname);
+        return;
     }
-
-    // Get the canvas element and its 2D context
-    duk_get_global_string(ctx, "document");
-    duk_get_prop_string(ctx, -1, "getElementById");
-    duk_push_string(ctx, "canvas");
-    duk_call(ctx, 1);
-    duk_get_prop_string(ctx, -1, "getContext");
-    duk_push_string(ctx, "2d");
-    duk_call(ctx, 1);
-    duk_put_global_string(ctx, "context");
-
-    // Create a plain object for the image
-    duk_push_object(ctx);
-
-    // Set the 'src' property to the filename
-    duk_push_string(ctx, filename);
-    duk_put_prop_string(ctx, -2, "src");
-
-    // Set the 'draw' method to draw the image to the canvas
-    duk_push_c_function(ctx, duk_image_draw, 1);
-    duk_put_prop_string(ctx, -2, "draw");
-
-    // Set the 'surface' property to the SDL_Surface pointer
-    duk_push_pointer(ctx, image);
-    duk_put_prop_string(ctx, -2, "surface");
-
-    return 1;
+    img->tex = SDL_CreateTextureFromSurface(g_renderer, sf);
+    img->w   = sf->w;
+    img->h   = sf->h;
+    SDL_FreeSurface(sf);
 }
 
-duk_ret_t duk_document_get_element_by_id(duk_context *ctx) {
-    const char *id = duk_require_string(ctx, 0);
-    // Return an empty object for now
-    duk_push_object(ctx);
-    return 1;
-}
-
-duk_ret_t duk_document_constructor(duk_context *ctx) {
-    // Create a plain object for the document
-    duk_push_object(ctx);
-    // Set the 'getElementById' method to the implementation above
-    duk_push_c_function(ctx, duk_document_get_element_by_id, 1);
-    duk_put_prop_string(ctx, -2, "getElementById");
-    return 1;
-}
-
-// Document.getElementById method
-duk_ret_t duk_document_getElementById(duk_context *ctx) {
-    const char *id = NULL;
-    const char *default_id = "string";
-        printf("id %s\n", id);
-    id = duk_is_string(ctx, 0) ? duk_require_string(ctx, 0) : default_id;
-    duk_push_global_stash(ctx);
-    duk_get_prop_string(ctx, -1, "window_object");
-    duk_get_prop_string(ctx, -1, "document_object");
-    duk_get_prop_string(ctx, -1, "elements");
-    duk_get_prop_string(ctx, -1, id);
-    duk_remove(ctx, -2);
-    return 1;
-}
-
-
-duk_ret_t duk_canvas_drawImage(duk_context *ctx) {
-    SDL_Surface *image = duk_require_pointer(ctx, 0);
-    int x = duk_require_int(ctx, 1);
-    int y = duk_require_int(ctx, 2);
-
-    SDL_Rect dest_rect = { x, y, image->w, image->h };
-    SDL_BlitSurface(image, NULL, window, &dest_rect);
-    SDL_Flip(window);
-
-    return 0;
-}
-
-duk_ret_t duk_canvas_getImageData(duk_context *ctx) {
-    SDL_Surface *surface = duk_require_pointer(ctx, 0);
-    SDL_Rect rect = {0, 0, surface->w, surface->h};
-    SDL_LockSurface(surface);
-
-    SDL_Surface *image = SDL_CreateRGBSurface(0, surface->w, surface->h, 32, 0, 0, 0, 0);
-    SDL_BlitSurface(surface, &rect, image, &rect);
-
-    duk_idx_t arr_idx = duk_push_array(ctx);
-
-    for (int y = 0; y < image->h; y++) {
-        for (int x = 0; x < image->w; x++) {
-            Uint8 *pixel = (Uint8 *) image->pixels + y * image->pitch + x * 4;
-
-            duk_idx_t rgba_idx = duk_push_array(ctx);
-            duk_push_int(ctx, pixel[0]);
-            duk_put_prop_index(ctx, rgba_idx, 0);
-            duk_push_int(ctx, pixel[1]);
-            duk_put_prop_index(ctx, rgba_idx, 1);
-            duk_push_int(ctx, pixel[2]);
-            duk_put_prop_index(ctx, rgba_idx, 2);
-            duk_push_int(ctx, pixel[3]);
-            duk_put_prop_index(ctx, rgba_idx, 3);
-
-            duk_put_prop_index(ctx, arr_idx, y * image->w + x);
+/* ---------------------------
+   AddEventListener for MyImage
+   --------------------------- */
+static void call_img_listeners(duk_context* ctx, int obj_idx, const char* evName) {
+    duk_get_prop_string(ctx, obj_idx, "listeners");
+    if (!duk_is_object(ctx, -1)) {
+        duk_pop(ctx);
+        return;
+    }
+    duk_get_prop_string(ctx, -1, evName);
+    if (!duk_is_array(ctx, -1)) {
+        duk_pop_2(ctx);
+        return;
+    }
+    duk_uarridx_t n = (duk_uarridx_t)duk_get_length(ctx, -1);
+    for (duk_uarridx_t i=0; i<n; i++){
+        duk_get_prop_index(ctx, -1, i);
+        if (duk_is_callable(ctx, -1)){
+            duk_dup(ctx, obj_idx);
+            if (duk_pcall_method(ctx,0)!=0){
+                fprintf(stderr,"[call_img_listeners] Error in '%s' callback: %s\n",
+                        evName, duk_safe_to_string(ctx,-1));
+            }
         }
+        duk_pop(ctx);
     }
-
-    SDL_UnlockSurface(surface);
-    SDL_FreeSurface(image);
-
-    return 1;
+    duk_pop_2(ctx);
 }
 
-duk_ret_t duk_canvas_putImageData(duk_context *ctx) {
-    // Parse arguments
-    SDL_Surface *surface = duk_require_pointer(ctx, 0);
-    int x = duk_require_int(ctx, 1);
-    int y = duk_require_int(ctx, 2);
-    int width = duk_require_int(ctx, 3);
-    int height = duk_require_int(ctx, 4);
-    const void *data = duk_require_buffer(ctx, 5, NULL);
+static duk_ret_t js_img_addEventListener(duk_context* ctx) {
+    duk_push_this(ctx);
+    const char* evName = duk_require_string(ctx, 0);
+    duk_require_callable(ctx, 1);
 
-    // Calculate pitch (bytes per row)
-    int bpp = surface->format->BytesPerPixel;
-    int pitch = surface->pitch / bpp;
-
-    // Get pointer to pixel data
-    uint8_t *pixels = (uint8_t *) surface->pixels + y * pitch * bpp + x * bpp;
-
-    // Copy pixel data from buffer to surface
-    int i, j;
-    for (i = 0; i < height; i++) {
-        for (j = 0; j < width; j++) {
-            memcpy(pixels + j * bpp, data + (i * width + j) * bpp, bpp);
-        }
-        pixels += pitch * bpp;
-    }
-
-    // Return nothing
-    return 0;
-}
-
-duk_ret_t duk_canvas_fillRect(duk_context *ctx) {
-    SDL_Surface *canvas = duk_require_pointer(ctx, 0);
-    int x = duk_require_int(ctx, 1);
-    int y = duk_require_int(ctx, 2);
-    int w = duk_require_int(ctx, 3);
-    int h = duk_require_int(ctx, 4);
-    Uint32 color = duk_require_uint(ctx, 5);
-
-    SDL_Rect rect = { x, y, w, h };
-    SDL_FillRect(canvas, &rect, color);
-
-    return 0;
-}
-
-duk_ret_t duk_canvas_clearRect(duk_context *ctx) {
-    int x = duk_require_int(ctx, 0);
-    int y = duk_require_int(ctx, 1);
-    int w = duk_require_int(ctx, 2);
-    int h = duk_require_int(ctx, 3);
-
-    SDL_Rect rect = { x, y, w, h };
-    SDL_FillRect(canvas, &rect, 0x000000);
-
-    return 0;
-}
-
-duk_ret_t duk_canvas_getContext(duk_context *ctx) {
-    const char *id = duk_require_string(ctx, 0);
-    const char *type = duk_require_string(ctx, 1);
-
-    if (strcmp(type, "2d") == 0) {
-		// Create a new RGB surface for the canvas
-		canvas = SDL_CreateRGBSurface(SDL_HWSURFACE, WIDTH, HEIGHT, 32, 0, 0, 0, 0);
-		if (!canvas) {
-			duk_error(ctx, DUK_ERR_ERROR, "Failed to create canvas surface: %s", SDL_GetError());
-		}
-
-        // Create a plain object for the context
+    duk_get_prop_string(ctx, -1, "listeners");
+    if (!duk_is_object(ctx, -1)){
+        duk_pop(ctx);
         duk_push_object(ctx);
-        
-		snprintf(name_window, sizeof(name_window), "%s", id);
-
-        // Set the 'canvas' property to the name of the canvas
-        duk_push_string(ctx, id);
-        duk_put_prop_string(ctx, -2, "canvas");
-
-        // Set the 'drawImage' method to draw an image to the canvas
-        duk_push_c_function(ctx, duk_canvas_drawImage, 3);
-        duk_put_prop_string(ctx, -2, "drawImage");
-
-        // Set the 'getImageData' method to get the pixel data of a rectangle
-		duk_push_c_function(ctx, duk_canvas_getImageData, 4);
-        duk_put_prop_string(ctx, -2, "getImageData");
-
-        // Set the 'putImageData' method to put the pixel data into a rectangle
-        duk_push_c_function(ctx, duk_canvas_putImageData, 3);
-        duk_put_prop_string(ctx, -2, "putImageData");
-
-        // Set the 'fillRect' method to fill a rectangle with a color
-        duk_push_c_function(ctx, duk_canvas_fillRect, 4);
-        duk_put_prop_string(ctx, -2, "fillRect");
-
-        // Set the 'clearRect' method to clear a rectangle to transparent black
-        duk_push_c_function(ctx, duk_canvas_clearRect, 4);
-        duk_put_prop_string(ctx, -2, "clearRect");
-
-        // Set the 'fillStyle' property to the default fill style (black)
-        duk_push_string(ctx, "#000000");
-        duk_put_prop_string(ctx, -2, "fillStyle");
-
-        // Set the 'strokeStyle' property to the default stroke style (black)
-        duk_push_string(ctx, "#000000");
-        duk_put_prop_string(ctx, -2, "strokeStyle");
-
-        // Set the 'lineWidth' property to the default line width (1)
-        duk_push_number(ctx, 1);
-        duk_put_prop_string(ctx, -2, "lineWidth");
-
-        // Set the 'textAlign' property to the default text alignment (start)
-        duk_push_string(ctx, "start");
-        duk_put_prop_string(ctx, -2, "textAlign");
-
-        // Set the 'textBaseline' property to the default text baseline (alphabetic)
-        duk_push_string(ctx, "alphabetic");
-        duk_put_prop_string(ctx, -2, "textBaseline");
-        
-        // Set the 'getContext' method to return the context object
-        duk_push_c_function(ctx, duk_canvas_getContext, 1);
-        duk_push_string(ctx, "2d");
-        duk_put_prop_string(ctx, -2, "getContext");
-
-        return 1;
-    } else {
-        duk_type_error(ctx, "Context type not supported: %s", type);
+        duk_put_prop_string(ctx, -2, "listeners");
+        duk_get_prop_string(ctx, -1, "listeners");
     }
-
+    duk_get_prop_string(ctx, -1, evName);
+    if (!duk_is_array(ctx, -1)){
+        duk_pop(ctx);
+        duk_push_array(ctx);
+        duk_put_prop_string(ctx, -2, evName);
+        duk_get_prop_string(ctx, -1, evName);
+    }
+    duk_uarridx_t len = (duk_uarridx_t)duk_get_length(ctx, -1);
+    duk_dup(ctx, 1);
+    duk_put_prop_index(ctx, -2, len);
+    duk_pop_3(ctx);
     return 0;
 }
 
-
-int main(int argc, char *argv[]) {
-    // Initialize SDL 1.2
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-        printf("Failed to initialize SDL 1.2: %s\n", SDL_GetError());
-        return 1;
+/* image.src = "..." setter */
+static duk_ret_t js_img_src_setter(duk_context* ctx){
+    duk_push_this(ctx);
+    MyImage* img = get_image_ptr(ctx, -1);
+    if (!img){
+        duk_pop(ctx);
+        return 0;
     }
+    const char* fn = duk_require_string(ctx, 0);
+    memset(img->fname,0,sizeof(img->fname));
+    strncpy(img->fname, fn, sizeof(img->fname)-1);
 
-    // Create the window
-    window = SDL_SetVideoMode(WIDTH, HEIGHT, 32, SDL_HWSURFACE | SDL_DOUBLEBUF);
-    if (!window) {
-        printf("Failed to create window: %s\n", SDL_GetError());
-        return 1;
+    if(img->tex){
+        SDL_DestroyTexture(img->tex);
+        img->tex=NULL;
     }
+    load_sync(img);
 
-    // Initialize Duktape
-    duk_context *ctx = duk_create_heap_default();
-    if (!ctx) {
-        printf("Failed to create Duktape heap\n");
-        return 1;
+    if(img->tex){
+        /* Fire 'load' event */
+        call_img_listeners(ctx, -1, "load");
     }
-    
-    duk_console_init(ctx, DUK_CONSOLE_PROXY_WRAPPER );
+    duk_pop(ctx);
+    return 0;
+}
 
-    // Register the Image constructor
-    duk_push_c_function(ctx, duk_image_constructor, 0);
+/* new Image() */
+static duk_ret_t ImageCtor(duk_context* ctx){
+    duk_push_object(ctx);
+    MyImage* i = (MyImage*)calloc(1,sizeof(MyImage));
+    duk_push_pointer(ctx,(void*)i);
+    duk_put_prop_string(ctx, -2, "\xFF""ptr");
+
+    duk_push_c_function(ctx, js_img_addEventListener, 2);
+    duk_put_prop_string(ctx, -2, "addEventListener");
+
+    duk_push_string(ctx, "src");
+    duk_push_c_function(ctx, js_img_src_setter, 1);
+    duk_def_prop(ctx, -3, DUK_DEFPROP_HAVE_SETTER | DUK_DEFPROP_ENUMERABLE);
+
+    return 1;
+}
+
+static void create_image(duk_context* ctx){
+    duk_push_c_function(ctx, ImageCtor, 0);
     duk_put_global_string(ctx, "Image");
+}
 
-    // Set up the 'document' object
+/* ---------------------------
+   Canvas 2D context
+   --------------------------- */
+static duk_ret_t js_drawImage(duk_context* ctx) {
+    MyImage* im = get_image_ptr(ctx, 0);
+    if(!im){
+        fprintf(stderr, "[drawImage] No image ptr\n");
+        return 0;
+    }
+    load_sync(im);
+    if(!im->tex){
+        fprintf(stderr, "[drawImage] No texture loaded\n");
+        return 0;
+    }
+    int x=duk_require_int(ctx,1);
+    int y=duk_require_int(ctx,2);
+    SDL_Rect dst={ x, y, im->w, im->h };
+    SDL_RenderCopy(g_renderer, im->tex, NULL, &dst);
+    SDL_RenderPresent(g_renderer);
+    return 0;
+}
+
+static duk_ret_t js_getContext(duk_context* ctx){
+    const char* mode = duk_require_string(ctx, 0);
+    if(strcmp(mode,"2d")){
+        return duk_error(ctx, DUK_ERR_TYPE_ERROR, "Only '2d' supported");
+    }
     duk_push_object(ctx);
+    duk_push_c_function(ctx, js_drawImage, 3);
+    duk_put_prop_string(ctx, -2, "drawImage");
+    return 1;
+}
 
-    // Set up the 'getElementById' function
-    duk_push_c_function(ctx, duk_document_getElementById, 1);
-    duk_put_prop_string(ctx, -2, "getElementById");
-
-
-    // Set up the 'canvas' object
-    duk_push_object(ctx);
-
-    // Set the 'id' property to 'canvas'
-    duk_push_string(ctx, "canvas");
-    duk_put_prop_string(ctx, -2, "id");
-
-	// Push the duk_canvas_getContext function onto the stack
-	duk_push_c_function(ctx, duk_canvas_getContext, DUK_VARARGS);
-	duk_put_global_string(ctx, "getContext");
-    duk_push_object(ctx);
-    duk_put_prop_string(ctx, -2, "canvas");
-
-    // Create an instance of the Document object and set the global variable to point to it
-    duk_document_constructor(ctx);
-    duk_put_global_string(ctx, "document");
-
-    // Load and evaluate the JavaScript code
-    if (duk_peval_file(ctx, "canvas.js") != 0) {
-        printf("Error: %s\n", duk_safe_to_string(ctx, -1));
+/* document.getElementById("canvas") */
+static duk_ret_t js_getElementById(duk_context* ctx){
+    const char* id=duk_require_string(ctx,0);
+    if(!strcmp(id,"canvas")){
+        duk_push_object(ctx);
+        duk_push_int(ctx, g_win_w);
+        duk_put_prop_string(ctx, -2, "width");
+        duk_push_int(ctx, g_win_h);
+        duk_put_prop_string(ctx, -2, "height");
+        duk_push_c_function(ctx, js_getContext, 1);
+        duk_put_prop_string(ctx, -2, "getContext");
+        /* If user sets first_layer.height = first_layer.height to 'clear', we do nothing special. */
         return 1;
     }
-    
-    // Blit Canvas surface onto main display surface
-    SDL_BlitSurface(canvas, NULL, window, NULL);
-    // Refresh window
-    SDL_Flip(window);
+    duk_push_undefined(ctx);
+    return 1;
+}
 
-    // Destroy the Duktape heap and quit SDL
+static void create_document(duk_context* ctx){
+    duk_push_object(ctx);
+    duk_push_c_function(ctx, js_getElementById, 1);
+    duk_put_prop_string(ctx, -2, "getElementById");
+    duk_put_global_string(ctx, "document");
+}
+
+/* ---------------------------
+   "window" object:
+    - onload
+    - setInterval
+----------------------------*/
+#define MAX_INTERVALS 64
+typedef struct {
+    int active;
+    double intervalMs;
+    double nextTime;
+    int funcId;
+} IntervalInfo;
+static IntervalInfo g_intervals[MAX_INTERVALS];
+static int g_func_id_gen=0;
+static int g_window_onload_id=-1;
+
+static double nowMs(void){ return (double)SDL_GetTicks(); }
+
+static int store_func(duk_context* ctx, int funcIndex){
+    duk_push_heap_stash(ctx);
+    duk_get_prop_string(ctx, -1, "g_funcStore");
+    if(duk_is_undefined(ctx, -1)){
+        duk_pop(ctx);
+        duk_push_object(ctx);
+        duk_dup(ctx, -1);
+        duk_put_prop_string(ctx, -3, "g_funcStore");
+    }
+    int fid=++g_func_id_gen;
+    duk_push_int(ctx, fid);
+    duk_dup(ctx, funcIndex);
+    duk_put_prop(ctx, -3);
+    duk_pop_2(ctx);
+    return fid;
+}
+
+static void push_stored_func(duk_context* ctx, int fid){
+    duk_push_heap_stash(ctx);
+    duk_get_prop_string(ctx, -1, "g_funcStore");
+    if(duk_is_undefined(ctx, -1)){
+        duk_pop_2(ctx);
+        duk_push_undefined(ctx);
+        return;
+    }
+    duk_push_int(ctx, fid);
+    duk_get_prop(ctx, -2);
+    duk_remove(ctx, -2);
+    duk_remove(ctx, -2);
+}
+
+static duk_ret_t js_setInterval(duk_context* ctx){
+    duk_require_callable(ctx, 0);
+    double ms=duk_require_number(ctx,1);
+    int fid=store_func(ctx, 0);
+    for(int i=0;i<MAX_INTERVALS;i++){
+        if(!g_intervals[i].active){
+            g_intervals[i].active=1;
+            g_intervals[i].intervalMs=ms;
+            g_intervals[i].nextTime=nowMs()+ms;
+            g_intervals[i].funcId=fid;
+            duk_push_int(ctx, i);
+            return 1;
+        }
+    }
+    duk_push_int(ctx, -1);
+    return 1;
+}
+
+static duk_ret_t js_onload_set(duk_context* ctx){
+    duk_require_callable(ctx,0);
+    g_window_onload_id=store_func(ctx, 0);
+    return 0;
+}
+
+static duk_ret_t js_onload_get(duk_context* ctx){
+    if(g_window_onload_id<0){
+        duk_push_undefined(ctx);
+    } else {
+        push_stored_func(ctx, g_window_onload_id);
+    }
+    return 1;
+}
+
+static void call_window_onload(duk_context* ctx){
+    if(g_window_onload_id<0)return;
+    push_stored_func(ctx, g_window_onload_id);
+    if(duk_is_callable(ctx, -1)){
+        duk_get_global_string(ctx, "window");
+        if(duk_pcall_method(ctx,0)!=0){
+            fprintf(stderr,"[onload] error: %s\n", duk_safe_to_string(ctx,-1));
+        }
+        duk_pop(ctx);
+    } else {
+        duk_pop(ctx);
+    }
+}
+
+static void check_intervals(duk_context* ctx){
+    double t=nowMs();
+    for(int i=0;i<MAX_INTERVALS;i++){
+        if(!g_intervals[i].active) continue;
+        if(t>=g_intervals[i].nextTime){
+            g_intervals[i].nextTime+=g_intervals[i].intervalMs;
+            push_stored_func(ctx, g_intervals[i].funcId);
+            if(duk_is_callable(ctx, -1)){
+                duk_get_global_string(ctx, "window");
+                if(duk_pcall_method(ctx,0)!=0){
+                    fprintf(stderr,"[setInterval] error: %s\n",
+                            duk_safe_to_string(ctx,-1));
+                }
+                duk_pop(ctx);
+            } else {
+                duk_pop(ctx);
+            }
+        }
+    }
+}
+
+static duk_ret_t js_alert(duk_context* ctx){
+    const char* msg=duk_require_string(ctx,0);
+    printf("[alert] %s\n", msg);
+    return 0;
+}
+
+static void create_window(duk_context* ctx){
+    duk_push_object(ctx);
+    duk_push_c_function(ctx, js_setInterval, 2);
+    duk_put_prop_string(ctx, -2, "setInterval");
+
+    /* onload property */
+    duk_push_string(ctx, "onload");
+    duk_push_c_function(ctx, js_onload_get, 0);
+    duk_push_c_function(ctx, js_onload_set, 1);
+    duk_def_prop(ctx, -4, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_HAVE_SETTER);
+
+    duk_put_global_string(ctx, "window");
+}
+
+/* optional global alert() */
+static void create_alert(duk_context* ctx){
+    duk_push_c_function(ctx, js_alert, 1);
+    duk_put_global_string(ctx, "alert");
+}
+
+/* Evaluate file from argv[1]. Return DUK_EXEC_SUCCESS or error code. */
+static duk_int_t eval_file(duk_context* ctx, const char* path){
+    FILE* f=fopen(path, "rb");
+    if(!f){
+        duk_push_error_object(ctx, DUK_ERR_ERROR, "No file: %s", path);
+        return DUK_EXEC_ERROR;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz=ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* buf=(char*)malloc(sz+1);
+    if(!buf){
+        fclose(f);
+        duk_push_error_object(ctx, DUK_ERR_ERROR,"OOM reading: %s", path);
+        return DUK_EXEC_ERROR;
+    }
+    size_t rd=fread(buf,1,sz,f);
+    fclose(f);
+    if(rd!=(size_t)sz){
+        free(buf);
+        duk_push_error_object(ctx,DUK_ERR_ERROR,"Bad read: %s", path);
+        return DUK_EXEC_ERROR;
+    }
+    buf[sz]=0;
+    duk_int_t rc=duk_peval_string(ctx,buf);
+    free(buf);
+    return rc;
+}
+
+int main(int argc, char** argv){
+    if(argc<2){
+        fprintf(stderr,"Usage: %s <script.js>\n", argv[0]);
+        return 1;
+    }
+    if(SDL_Init(SDL_INIT_VIDEO)<0){
+        fprintf(stderr,"SDL_Init error: %s\n", SDL_GetError());
+        return 1;
+    }
+    IMG_Init(IMG_INIT_PNG|IMG_INIT_JPG);
+
+    g_window = SDL_CreateWindow("Canvas Demo", SDL_WINDOWPOS_UNDEFINED,SDL_WINDOWPOS_UNDEFINED,
+                                g_win_w, g_win_h, 0);
+    if(!g_window){
+        fprintf(stderr,"Failed SDL_CreateWindow\n");
+        return 1;
+    }
+    g_renderer = SDL_CreateRenderer(g_window, -1,
+                    SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
+    if(!g_renderer){
+        fprintf(stderr,"Failed SDL_CreateRenderer\n");
+        return 1;
+    }
+
+    /* Clear once at start. If user wants repeated clearing, they'd do so in JS. */
+    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+    SDL_RenderClear(g_renderer);
+    SDL_RenderPresent(g_renderer);
+
+    duk_context* ctx = duk_create_heap_default();
+    duk_console_init(ctx, DUK_CONSOLE_PROXY_WRAPPER);
+
+    create_document(ctx);
+    create_image(ctx);
+    create_window(ctx);
+    create_alert(ctx);
+
+    /* Load user's script, e.g. "canvas_loop.js" or "canvas.js" */
+    duk_int_t rc=eval_file(ctx, argv[1]);
+    if(rc==DUK_EXEC_SUCCESS){
+        duk_pop(ctx);
+        /* If window.onload is set, call it once */
+        call_window_onload(ctx);
+    } else {
+        fprintf(stderr,"Script error: %s\n", duk_safe_to_string(ctx,-1));
+        duk_pop(ctx);
+    }
+
+    int running=1;
+    while(running){
+        SDL_Event e;
+        while(SDL_PollEvent(&e)){
+            if(e.type==SDL_QUIT) running=0;
+        }
+        /* check setInterval timers each loop */
+        check_intervals(ctx);
+        SDL_Delay(10);
+    }
+
     duk_destroy_heap(ctx);
+    SDL_DestroyRenderer(g_renderer);
+    SDL_DestroyWindow(g_window);
+    IMG_Quit();
     SDL_Quit();
     return 0;
 }
-

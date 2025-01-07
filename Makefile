@@ -1,6 +1,6 @@
 CC := gcc
-SDL_INC := $(shell sdl-config --cflags)
-SDL_LIB := $(shell sdl-config --libs) 
+SDL_INC := $(shell sdl2-config --cflags)
+SDL_LIB := $(shell sdl2-config --libs) -lSDL2_image
 DUKTAPE_INC := -Iduktape/src -Iduktape/extras -Iduktape/extras/duk-v1-compat -Iduktape/extras/console
 DUKTAPE_SRC := duktape/src/duktape.c duktape/extras/console/duk_console.c duktape/extras/module-node/duk_module_node.c duktape/extras/duk-v1-compat/duk_v1_compat.c 
 GIT_DESCRIBE := $(shell git describe --always --dirty)
