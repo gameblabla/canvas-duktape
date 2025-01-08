@@ -9,6 +9,7 @@
 /* Global Variables */
 static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
+static SDL_Texture* g_offscreen_texture = NULL; // New off-screen texture
 static int g_win_w = 120, g_win_h = 160; // Updated based on test HTML
 
 /* Structures */
@@ -271,9 +272,17 @@ static duk_ret_t js_canvas_height_setter(duk_context* ctx){
     printf("[js_canvas_height_setter] Setting height to %d\n", newH);
     cinfo->height = newH;
 
-    /* Emulate "clearing" the canvas by clearing the renderer */
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
-    SDL_RenderClear(g_renderer);
+    /* Emulate "clearing" the canvas by clearing the off-screen texture */
+    if (g_offscreen_texture) {
+        // Set render target to off-screen texture
+        if (SDL_SetRenderTarget(g_renderer, g_offscreen_texture) != 0) {
+            fprintf(stderr, "Failed to set render target: %s\n", SDL_GetError());
+        } else {
+            SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+            SDL_RenderClear(g_renderer);
+            SDL_SetRenderTarget(g_renderer, NULL); // Reset to default
+        }
+    }
 
     duk_pop(ctx);
     return 0;
@@ -299,9 +308,17 @@ static duk_ret_t js_canvas_width_setter(duk_context* ctx){
     printf("[js_canvas_width_setter] Setting width to %d\n", newW);
     cinfo->width = newW;
 
-    /* Emulate "clearing" the canvas by clearing the renderer */
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
-    SDL_RenderClear(g_renderer);
+    /* Emulate "clearing" the canvas by clearing the off-screen texture */
+    if (g_offscreen_texture) {
+        // Set render target to off-screen texture
+        if (SDL_SetRenderTarget(g_renderer, g_offscreen_texture) != 0) {
+            fprintf(stderr, "Failed to set render target: %s\n", SDL_GetError());
+        } else {
+            SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+            SDL_RenderClear(g_renderer);
+            SDL_SetRenderTarget(g_renderer, NULL); // Reset to default
+        }
+    }
 
     duk_pop(ctx);
     return 0;
@@ -387,13 +404,23 @@ static duk_ret_t js_drawImage(duk_context* ctx){
     SDL_Rect srcRect = { sx, sy, sw, sh };
     SDL_Rect dstRect = { dx, dy, dw, dh };
 
-    /* Perform the rendering */
-    if(SDL_RenderCopy(g_renderer, im->tex, &srcRect, &dstRect) !=0 ){
-        fprintf(stderr, "[js_drawImage] SDL_RenderCopy failed: %s\n", SDL_GetError());
-    }
-    else{
-
-        printf("[js_drawImage] Rendered successfully.\n");
+    /* Perform the rendering to the off-screen texture */
+    if (g_offscreen_texture) {
+        // Set render target to off-screen texture
+        if (SDL_SetRenderTarget(g_renderer, g_offscreen_texture) != 0) {
+            fprintf(stderr, "Failed to set render target: %s\n", SDL_GetError());
+        } else {
+            if(SDL_RenderCopy(g_renderer, im->tex, &srcRect, &dstRect) !=0 ){
+                fprintf(stderr, "[js_drawImage] SDL_RenderCopy failed: %s\n", SDL_GetError());
+            }
+            else{
+                printf("[js_drawImage] Rendered successfully to off-screen texture.\n");
+            }
+            // Reset to default render target
+            SDL_SetRenderTarget(g_renderer, NULL);
+        }
+    } else {
+        fprintf(stderr, "[js_drawImage] Off-screen texture not initialized.\n");
     }
 
     return 0;
@@ -414,7 +441,7 @@ static duk_ret_t js_getContext(duk_context* ctx){
 /* document.getElementById Implementation */
 static duk_ret_t js_getElementById(duk_context* ctx){
     const char* id = duk_require_string(ctx,0);
-    
+
     // Search for canvas
     if(!strcmp(id, g_canvas_info.id)){
         duk_push_object(ctx);
@@ -463,7 +490,7 @@ static duk_ret_t js_getElementById(duk_context* ctx){
                 return 1;
             }
             duk_pop(ctx);
-            
+
             // Create new image object and store it
             duk_pop(ctx); // Pop heap stash
 
@@ -1001,17 +1028,39 @@ int main(int argc, char** argv){
         return 1;
     }
     
-	SDL_RenderSetLogicalSize(g_renderer, g_win_w, g_win_h);
+    SDL_RenderSetLogicalSize(g_renderer, g_win_w, g_win_h);
 
-    /* Clear the screen once at startup */
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
-    SDL_RenderClear(g_renderer);
-    SDL_RenderPresent(g_renderer);
+    /* Create Off-Screen Texture for Rendering */
+    g_offscreen_texture = SDL_CreateTexture(g_renderer,
+                                           SDL_PIXELFORMAT_RGBA8888,
+                                           SDL_TEXTUREACCESS_TARGET,
+                                           g_win_w, g_win_h);
+    if(!g_offscreen_texture){
+        fprintf(stderr, "Failed to create off-screen texture: %s\n", SDL_GetError());
+        SDL_DestroyRenderer(g_renderer);
+        SDL_DestroyWindow(g_window);
+        IMG_Quit();
+        SDL_Quit();
+        return 1;
+    }
+
+    /* Clear the off-screen texture once at startup */
+    if (SDL_SetRenderTarget(g_renderer, g_offscreen_texture) != 0) {
+        fprintf(stderr, "Failed to set render target: %s\n", SDL_GetError());
+    } else {
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+        SDL_RenderClear(g_renderer);
+        SDL_SetRenderTarget(g_renderer, NULL); // Reset to default
+    }
+
+    /* Create SDL Window */
+    // Note: The window has already been created above.
 
     /* Create Duktape Context */
     duk_context* ctx = duk_create_heap_default();
     if(!ctx){
         fprintf(stderr, "Failed to create Duktape heap.\n");
+        SDL_DestroyTexture(g_offscreen_texture);
         SDL_DestroyRenderer(g_renderer);
         SDL_DestroyWindow(g_window);
         IMG_Quit();
@@ -1152,12 +1201,55 @@ int main(int argc, char** argv){
         /* Check and Execute setInterval Callbacks */
         check_intervals(ctx);
         
-		SDL_RenderPresent(g_renderer);
+        /* Render the off-screen texture to the main renderer */
+        if (g_offscreen_texture) {
+            // Clear the main renderer
+            SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+            SDL_RenderClear(g_renderer);
+
+            // Copy the off-screen texture to the main renderer
+            if(SDL_RenderCopy(g_renderer, g_offscreen_texture, NULL, NULL) !=0 ){
+                fprintf(stderr, "SDL_RenderCopy to main renderer failed: %s\n", SDL_GetError());
+            }
+        }
+
+        SDL_RenderPresent(g_renderer);
 
         SDL_Delay(10);
     }
 
     /* Cleanup */
+    // Destroy off-screen texture
+    if (g_offscreen_texture) {
+        SDL_DestroyTexture(g_offscreen_texture);
+    }
+
+    // Free all loaded images
+    duk_push_global_object(ctx);
+    duk_get_prop_string(ctx, -1, "document");
+    duk_get_prop_string(ctx, -1, "images");
+    if(duk_is_array(ctx, -1)){
+        duk_uarridx_t len = (duk_uarridx_t)duk_get_length(ctx, -1);
+        for(duk_uarridx_t i=0; i<len; i++){
+            duk_get_prop_index(ctx, -1, i);
+            if(duk_is_object(ctx, -1)){
+                duk_get_prop_string(ctx, -1, "\xFF""ptr");
+                MyImage* im = (MyImage*)duk_get_pointer(ctx, -1);
+                if(im){
+                    if(im->tex){
+                        SDL_DestroyTexture(im->tex);
+                    }
+                    free(im);
+                }
+                duk_pop(ctx);
+            }
+            else{
+                duk_pop(ctx);
+            }
+        }
+    }
+    duk_pop_3(ctx); // Pop images array, document, and global object
+
     duk_destroy_heap(ctx);
     SDL_DestroyRenderer(g_renderer);
     SDL_DestroyWindow(g_window);
@@ -1165,4 +1257,3 @@ int main(int argc, char** argv){
     SDL_Quit();
     return 0;
 }
-
