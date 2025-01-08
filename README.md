@@ -10,11 +10,14 @@ This means some Game Maker studio games as well as older HTML5 games. (and newer
 
 # Current status
 
-Works for test.html and test2.html.
+Works for test.html, test2.html and game.html.
+game.html is Rubby Bird 1 HTML5 stripped down without the touch libraries and sound support.
+
 No input, sound support.
 
 # Roadmap
 
+- This renders to intermediate texture right now to avoid flickering, this may have to be possibly tweaked later.
 - Add support for more functions
 - Add basic keyboard and mouse support
 - Support Localstorage
