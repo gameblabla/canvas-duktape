@@ -32,11 +32,38 @@ typedef struct {
 
 /* Constants */
 #define MAX_INTERVALS 64
+#define MAX_SCRIPTS 32
+#define MAX_IMAGES 32
+
+/* Parsed HTML Information */
+typedef struct {
+    char id[256];
+    int width;
+    int height;
+    char style[512];
+} CanvasInfo;
+
+typedef struct {
+    char id[256];
+    char src[512];
+    int width;
+    int height;
+} ImageInfo;
+
+typedef struct {
+    char src[512];
+} ScriptInfo;
 
 /* Global State */
 static IntervalInfo g_intervals[MAX_INTERVALS];
 static int g_func_id_gen = 0;
 static int g_window_onload_funcId = -1;
+
+static CanvasInfo g_canvas_info;
+static ImageInfo g_image_info[MAX_IMAGES];
+static int g_image_count = 0;
+static ScriptInfo g_script_info[MAX_SCRIPTS];
+static int g_script_count = 0;
 
 /* Utility Functions to Store and Retrieve Functions */
 static int store_func(duk_context* ctx, int funcIndex){
@@ -175,6 +202,20 @@ static duk_ret_t js_img_src_setter(duk_context* ctx){
     return 0;
 }
 
+/* Image.src Getter Implementation */
+static duk_ret_t js_img_src_getter(duk_context* ctx){
+    duk_push_this(ctx);
+    MyImage* img = get_image_ptr(ctx, -1);
+    duk_pop(ctx);
+    if(img && img->fname[0]){
+        duk_push_string(ctx, img->fname);
+    }
+    else{
+        duk_push_string(ctx, ""); // Return empty string if src not set
+    }
+    return 1;
+}
+
 /* Image Constructor */
 static duk_ret_t ImageCtor(duk_context* ctx){
     duk_push_object(ctx);
@@ -186,10 +227,11 @@ static duk_ret_t ImageCtor(duk_context* ctx){
     duk_push_c_function(ctx, js_img_addEventListener, 2);
     duk_put_prop_string(ctx, -2, "addEventListener");
 
-    /* src property with setter */
+    /* src property with getter and setter */
     duk_push_string(ctx, "src");
+    duk_push_c_function(ctx, js_img_src_getter, 0);
     duk_push_c_function(ctx, js_img_src_setter, 1);
-    duk_def_prop(ctx, -3, DUK_DEFPROP_HAVE_SETTER | DUK_DEFPROP_ENUMERABLE);
+    duk_def_prop(ctx, -4, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_HAVE_SETTER | DUK_DEFPROP_ENUMERABLE);
 
     return 1;
 }
@@ -219,9 +261,10 @@ static duk_ret_t js_canvas_height_setter(duk_context* ctx){
     printf("[js_canvas_height_setter] Setting height to %d\n", newH);
     cinfo->height = newH;
 
-    /* Emulate "clearing" the canvas by clearing the renderer (trick used by a few games) */
+    /* Emulate "clearing" the canvas by clearing the renderer */
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_renderer);
+	// Explicitely don't call RenderPresent here after to avoid flickering
 
     duk_pop(ctx);
     return 0;
@@ -250,7 +293,8 @@ static duk_ret_t js_canvas_width_setter(duk_context* ctx){
     /* Emulate "clearing" the canvas by clearing the renderer */
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_renderer);
-
+    // Explicitely don't call RenderPresent here after to avoid flickering
+    
     duk_pop(ctx);
     return 0;
 }
@@ -362,7 +406,9 @@ static duk_ret_t js_getContext(duk_context* ctx){
 /* document.getElementById Implementation */
 static duk_ret_t js_getElementById(duk_context* ctx){
     const char* id = duk_require_string(ctx,0);
-    if(!strcmp(id, "canvas")){
+    
+    // Search for canvas
+    if(!strcmp(id, g_canvas_info.id)){
         duk_push_object(ctx);
 
         /* Allocate and store MyCanvas */
@@ -371,8 +417,8 @@ static duk_ret_t js_getElementById(duk_context* ctx){
             duk_push_error_object(ctx, DUK_ERR_ERROR, "Failed to allocate MyCanvas");
             return duk_throw(ctx);
         }
-        c->width = g_win_w;
-        c->height = g_win_h;
+        c->width = g_canvas_info.width >0 ? g_canvas_info.width : g_win_w;
+        c->height = g_canvas_info.height >0 ? g_canvas_info.height : g_win_h;
 
         duk_push_pointer(ctx, (void*)c);
         duk_put_prop_string(ctx, -2, "\xFF""canvasPtr");
@@ -393,9 +439,54 @@ static duk_ret_t js_getElementById(duk_context* ctx){
         duk_push_c_function(ctx, js_getContext, 1);
         duk_put_prop_string(ctx, -2, "getContext");
 
-        printf("[js_getElementById] Created canvas object.\n");
+        printf("[js_getElementById] Created canvas object with id='%s', width=%d, height=%d.\n",
+               id, c->width, c->height);
         return 1;
     }
+
+    // Search for images by ID
+    for(int i=0; i<g_image_count; i++){
+        if(!strcmp(id, g_image_info[i].id)){
+            // Push the existing image object using the stored reference
+            duk_push_heap_stash(ctx);
+            duk_get_prop_index(ctx, -1, i);
+            if(duk_is_object(ctx, -1)){
+                // Image object exists
+                return 1;
+            }
+            duk_pop(ctx);
+            
+            // Create new image object and store it
+            duk_pop(ctx); // Pop heap stash
+
+            duk_push_global_object(ctx);
+            duk_get_prop_string(ctx, -1, "Image");
+            duk_new(ctx, 0); // Create new Image instance
+            duk_remove(ctx, -2); // Remove global object
+
+            MyImage* im = (MyImage*)calloc(1, sizeof(MyImage));
+            if(!im){
+                duk_push_error_object(ctx, DUK_ERR_ERROR, "Failed to allocate MyImage");
+                return duk_throw(ctx);
+            }
+            strncpy(im->fname, g_image_info[i].src, sizeof(im->fname)-1);
+            duk_push_pointer(ctx, (void*)im);
+            duk_put_prop_string(ctx, -2, "\xFF""ptr");
+
+            /* Do NOT call load_sync here. We'll preload images after scripts have run */
+
+            // Store the image object in heap stash for reuse
+            duk_push_heap_stash(ctx);
+            duk_dup(ctx, -2); // Duplicate image object
+            duk_put_prop_index(ctx, -2, i); // Store with index as key
+            duk_pop(ctx); // Pop heap stash
+
+            printf("[js_getElementById] Created image object with id='%s', src='%s'.\n",
+                   id, im->fname);
+            return 1;
+        }
+    }
+
     duk_push_undefined(ctx);
     return 1;
 }
@@ -403,14 +494,57 @@ static duk_ret_t js_getElementById(duk_context* ctx){
 /* Create Document Object in Duktape */
 static void create_document(duk_context* ctx){
     duk_push_object(ctx);
+
+    /* Implement getElementById */
     duk_push_c_function(ctx, js_getElementById, 1);
     duk_put_prop_string(ctx, -2, "getElementById");
+
+    /* Implement images collection */
+    duk_push_array(ctx);
+    for(int i=0; i<g_image_count; i++){
+        duk_push_heap_stash(ctx);
+        // Check if image object already exists
+        duk_get_prop_index(ctx, -1, i);
+        if(!duk_is_object(ctx, -1)){
+            duk_pop(ctx);
+            // Create new image object
+            duk_push_global_object(ctx);
+            duk_get_prop_string(ctx, -1, "Image");
+            duk_new(ctx, 0); // Create new Image instance
+            duk_remove(ctx, -2); // Remove global object
+
+            MyImage* im = (MyImage*)calloc(1, sizeof(MyImage));
+            if(!im){
+                duk_push_error_object(ctx, DUK_ERR_ERROR, "Failed to allocate MyImage");
+                duk_throw(ctx);
+            }
+            strncpy(im->fname, g_image_info[i].src, sizeof(im->fname)-1);
+            duk_push_pointer(ctx, (void*)im);
+            duk_put_prop_string(ctx, -2, "\xFF""ptr");
+
+            /* Do NOT call load_sync here. We'll preload images after scripts have run */
+
+            // Store the image object in heap stash for reuse
+            duk_push_heap_stash(ctx);
+            duk_dup(ctx, -2); // Duplicate image object
+            duk_put_prop_index(ctx, -2, i); // Store with index as key
+            duk_pop(ctx); // Pop heap stash
+
+            printf("[create_document] Created image object with id='%s', src='%s'.\n",
+                   g_image_info[i].id, im->fname);
+        }
+        duk_remove(ctx, -2); // Remove image object if it exists
+
+        duk_put_prop_index(ctx, -2, i); // Set array element
+    }
+    duk_put_prop_string(ctx, -2, "images");
+
     duk_put_global_string(ctx, "document");
 }
 
+/* Window Functions: onload, setInterval */
 static double nowMs(void){ return (double)SDL_GetTicks(); }
 
-/* Window Functions: onload, setInterval */
 static duk_ret_t js_setInterval(duk_context* ctx){
     duk_require_callable(ctx,0);
     double ms = duk_require_number(ctx,1);
@@ -516,6 +650,166 @@ static void create_alert_obj(duk_context* ctx){
     duk_put_global_string(ctx, "alert");
 }
 
+/* Helper Function to Extract Attribute Values */
+static int extract_attribute(const char* tag, const char* attr, char* value, size_t size){
+    char pattern[256];
+    snprintf(pattern, sizeof(pattern), "%s=\"", attr);
+    const char* start = strstr(tag, pattern);
+    if(!start) return 0;
+    start += strlen(pattern);
+    const char* end = strchr(start, '"');
+    if(!end) return 0;
+    size_t len = end - start;
+    if(len >= size) len = size -1;
+    strncpy(value, start, len);
+    value[len] = '\0';
+    return 1;
+}
+
+/* HTML Parsing Function (Enhanced to Handle Multi-line Tags) */
+static int parse_html(const char* path){
+    FILE* f = fopen(path, "r");
+    if(!f){
+        fprintf(stderr, "Failed to open HTML file: %s\n", path);
+        return 0;
+    }
+
+    char line[1024];
+    int inside_tag = 0;
+    char tag_buffer[4096];
+    tag_buffer[0] = '\0';
+
+    while(fgets(line, sizeof(line), f)){
+        if(!inside_tag){
+            // Check for <canvas, <img, <script
+            if(strstr(line, "<canvas") != NULL ||
+               strstr(line, "<img") != NULL ||
+               strstr(line, "<script") != NULL){
+                inside_tag = 1;
+                strcpy(tag_buffer, line);
+                // Check if the tag ends on the same line
+                if(strchr(line, '>') != NULL){
+                    inside_tag = 0;
+                    // Process the tag
+                    // Remove newline characters
+                    size_t len = strlen(tag_buffer);
+                    if(len >0 && tag_buffer[len-1] == '\n') tag_buffer[len-1] = '\0';
+
+                    // Identify tag type
+                    if(strstr(tag_buffer, "<canvas") != NULL){
+                        // Extract id
+                        extract_attribute(tag_buffer, "id", g_canvas_info.id, sizeof(g_canvas_info.id));
+                        // Extract width
+                        char width_str[32], height_str[32];
+                        if(extract_attribute(tag_buffer, "width", width_str, sizeof(width_str))){
+                            g_canvas_info.width = atoi(width_str);
+                        }
+                        if(extract_attribute(tag_buffer, "height", height_str, sizeof(height_str))){
+                            g_canvas_info.height = atoi(height_str);
+                        }
+                        // Extract style if needed
+                        extract_attribute(tag_buffer, "style", g_canvas_info.style, sizeof(g_canvas_info.style));
+                    }
+                    else if(strstr(tag_buffer, "<img") != NULL){
+                        if(g_image_count >= MAX_IMAGES){
+                            fprintf(stderr, "Maximum number of images exceeded.\n");
+                            continue;
+                        }
+                        ImageInfo* img = &g_image_info[g_image_count];
+                        extract_attribute(tag_buffer, "id", img->id, sizeof(img->id));
+                        extract_attribute(tag_buffer, "src", img->src, sizeof(img->src));
+                        char width_str[32], height_str[32];
+                        if(extract_attribute(tag_buffer, "width", width_str, sizeof(width_str))){
+                            img->width = atoi(width_str);
+                        }
+                        if(extract_attribute(tag_buffer, "height", height_str, sizeof(height_str))){
+                            img->height = atoi(height_str);
+                        }
+                        g_image_count++;
+                    }
+                    else if(strstr(tag_buffer, "<script") != NULL){
+                        if(g_script_count >= MAX_SCRIPTS){
+                            fprintf(stderr, "Maximum number of scripts exceeded.\n");
+                            continue;
+                        }
+                        ScriptInfo* script = &g_script_info[g_script_count];
+                        extract_attribute(tag_buffer, "src", script->src, sizeof(script->src));
+                        g_script_count++;
+                    }
+                    tag_buffer[0] = '\0';
+                }
+            }
+        }
+        else{
+            // Accumulate tag lines
+            strcat(tag_buffer, line);
+            // Check if the tag ends
+            if(strchr(line, '>') != NULL){
+                inside_tag = 0;
+                // Process the tag
+                // Remove newline characters
+                size_t len = strlen(tag_buffer);
+                if(len >0 && tag_buffer[len-1] == '\n') tag_buffer[len-1] = '\0';
+
+                // Identify tag type
+                if(strstr(tag_buffer, "<canvas") != NULL){
+                    // Extract id
+                    extract_attribute(tag_buffer, "id", g_canvas_info.id, sizeof(g_canvas_info.id));
+                    // Extract width
+                    char width_str[32], height_str[32];
+                    if(extract_attribute(tag_buffer, "width", width_str, sizeof(width_str))){
+                        g_canvas_info.width = atoi(width_str);
+                    }
+                    if(extract_attribute(tag_buffer, "height", height_str, sizeof(height_str))){
+                        g_canvas_info.height = atoi(height_str);
+                    }
+                    // Extract style if needed
+                    extract_attribute(tag_buffer, "style", g_canvas_info.style, sizeof(g_canvas_info.style));
+                }
+                else if(strstr(tag_buffer, "<img") != NULL){
+                    if(g_image_count >= MAX_IMAGES){
+                        fprintf(stderr, "Maximum number of images exceeded.\n");
+                        continue;
+                    }
+                    ImageInfo* img = &g_image_info[g_image_count];
+                    extract_attribute(tag_buffer, "id", img->id, sizeof(img->id));
+                    extract_attribute(tag_buffer, "src", img->src, sizeof(img->src));
+                    char width_str[32], height_str[32];
+                    if(extract_attribute(tag_buffer, "width", width_str, sizeof(width_str))){
+                        img->width = atoi(width_str);
+                    }
+                    if(extract_attribute(tag_buffer, "height", height_str, sizeof(height_str))){
+                        img->height = atoi(height_str);
+                    }
+                    g_image_count++;
+                }
+                else if(strstr(tag_buffer, "<script") != NULL){
+                    if(g_script_count >= MAX_SCRIPTS){
+                        fprintf(stderr, "Maximum number of scripts exceeded.\n");
+                        continue;
+                    }
+                    ScriptInfo* script = &g_script_info[g_script_count];
+                    extract_attribute(tag_buffer, "src", script->src, sizeof(script->src));
+                    g_script_count++;
+                }
+                tag_buffer[0] = '\0';
+            }
+        }
+    }
+
+    fclose(f);
+
+    // List all images with their IDs
+    printf("Parsed Images:\n");
+    for(int i=0; i<g_image_count; i++){
+        printf("  Image %d: id='%s', src='%s', width=%d, height=%d\n",
+               i, g_image_info[i].id, g_image_info[i].src,
+               g_image_info[i].width, g_image_info[i].height);
+    }
+
+    return 1;
+}
+
 /* Evaluate a JavaScript File */
 static duk_int_t eval_file(duk_context* ctx, const char* path){
     FILE* f = fopen(path, "rb");
@@ -548,7 +842,18 @@ static duk_int_t eval_file(duk_context* ctx, const char* path){
 /* MAIN Function */
 int main(int argc, char** argv){
     if(argc <2){
-        fprintf(stderr, "Usage: %s <script.js>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <file.html>\n", argv[0]);
+        return 1;
+    }
+
+    const char* html_path = argv[1];
+
+    /* Parse HTML */
+    memset(&g_canvas_info, 0, sizeof(g_canvas_info));
+    g_image_count =0;
+    g_script_count =0;
+    if(!parse_html(html_path)){
+        fprintf(stderr, "Failed to parse HTML file.\n");
         return 1;
     }
 
@@ -561,6 +866,14 @@ int main(int argc, char** argv){
         fprintf(stderr, "IMG_Init error: %s\n", IMG_GetError());
         SDL_Quit();
         return 1;
+    }
+
+    /* Set window size based on canvas if specified */
+    if(g_canvas_info.width >0){
+        g_win_w = g_canvas_info.width;
+    }
+    if(g_canvas_info.height >0){
+        g_win_h = g_canvas_info.height;
     }
 
     /* Create SDL Window */
@@ -603,22 +916,119 @@ int main(int argc, char** argv){
     duk_console_init(ctx, DUK_CONSOLE_PROXY_WRAPPER);
 
     /* Create Mock Browser Objects */
-    create_document(ctx);
     create_image(ctx);
+    create_document(ctx);
     create_window_obj(ctx);
     create_alert_obj(ctx);
 
-    /* Evaluate the User's Script */
-    duk_int_t rc = eval_file(ctx, argv[1]);
-    if(rc == DUK_EXEC_SUCCESS){
+    /* Implement document.images as an array */
+    duk_push_global_object(ctx);
+    duk_get_prop_string(ctx, -1, "document");
+    duk_get_prop_string(ctx, -1, "images");
+    if(!duk_is_array(ctx, -1)){
         duk_pop(ctx);
-        /* Call window.onload if set */
-        call_window_onload(ctx);
+        duk_push_array(ctx);
+        duk_put_prop_string(ctx, -3, "images");
+        duk_get_prop_string(ctx, -1, "images");
     }
-    else{
-        fprintf(stderr, "Script error: %s\n", duk_safe_to_string(ctx, -1));
-        duk_pop(ctx);
+
+    for(int i=0; i<g_image_count; i++){
+        duk_push_heap_stash(ctx);
+        // Check if image object already exists
+        duk_get_prop_index(ctx, -1, i);
+        if(!duk_is_object(ctx, -1)){
+            duk_pop(ctx);
+            // Create new image object
+            duk_push_global_object(ctx);
+            duk_get_prop_string(ctx, -1, "Image");
+            duk_new(ctx, 0); // Create new Image instance
+            duk_remove(ctx, -2); // Remove global object
+
+            MyImage* im = (MyImage*)calloc(1, sizeof(MyImage));
+            if(!im){
+                duk_push_error_object(ctx, DUK_ERR_ERROR, "Failed to allocate MyImage");
+                duk_throw(ctx);
+            }
+            strncpy(im->fname, g_image_info[i].src, sizeof(im->fname)-1);
+            duk_push_pointer(ctx, (void*)im);
+            duk_put_prop_string(ctx, -2, "\xFF""ptr");
+
+            /* Do NOT call load_sync here. We'll preload images after scripts have run */
+
+            // Store the image object in heap stash for reuse
+            duk_push_heap_stash(ctx);
+            duk_dup(ctx, -2); // Duplicate image object
+            duk_put_prop_index(ctx, -2, i); // Store with index as key
+            duk_pop(ctx); // Pop heap stash
+
+            printf("[create_document] Created image object with id='%s', src='%s'.\n",
+                   g_image_info[i].id, im->fname);
+        }
+        duk_remove(ctx, -2); // Remove image object if it exists
+
+        duk_put_prop_index(ctx, -2, i); // Set array element
     }
+    duk_pop_2(ctx); // Pop images array and global object
+
+    /* Execute scripts in order */
+    for(int i=0; i<g_script_count; i++){
+        const char* script_path = g_script_info[i].src;
+        // Assuming scripts are in the same directory as HTML.
+        duk_int_t rc = eval_file(ctx, script_path);
+        if(rc == DUK_EXEC_SUCCESS){
+            duk_pop(ctx);
+        }
+        else{
+            fprintf(stderr, "Script '%s' error: %s\n", script_path, duk_safe_to_string(ctx, -1));
+            duk_pop(ctx);
+        }
+    }
+
+    /* Preload images by setting their src AFTER scripts have run */
+    for(int i=0; i<g_image_count; i++){
+        duk_push_global_object(ctx);
+        duk_get_prop_string(ctx, -1, "document");
+        duk_get_prop_string(ctx, -1, "getElementById");
+        duk_push_string(ctx, g_image_info[i].id);
+        if(duk_pcall(ctx, 1) != DUK_EXEC_SUCCESS){
+            fprintf(stderr, "Error getting image by id: %s\n", duk_safe_to_string(ctx, -1));
+            duk_pop(ctx);
+            continue;
+        }
+        // Now, set src
+        duk_push_string(ctx, "src");
+        duk_push_string(ctx, g_image_info[i].src);
+        if(duk_put_prop(ctx, -3) !=1){
+            fprintf(stderr, "Error setting image src.\n");
+        }
+        duk_pop_3(ctx); // Pop document and global object
+    }
+
+    /* Call window.onload if set */
+    call_window_onload(ctx);
+
+    /* List all images with their IDs and confirm correct parsing */
+    printf("\nFinal Image List in document.images:\n");
+    duk_push_global_object(ctx);
+    duk_get_prop_string(ctx, -1, "document");
+    duk_get_prop_string(ctx, -1, "images");
+    if(duk_is_array(ctx, -1)){
+        duk_uarridx_t len = (duk_uarridx_t)duk_get_length(ctx, -1);
+        for(duk_uarridx_t i=0; i<len; i++){
+            duk_get_prop_index(ctx, -1, i);
+            if(duk_is_object(ctx, -1)){
+                duk_get_prop_string(ctx, -1, "src");
+                const char* src = duk_safe_to_string(ctx, -1);
+                duk_pop(ctx);
+                printf("  document.images[%d]: src='%s'\n", (int)i, src);
+            }
+            else{
+                duk_pop(ctx);
+                printf("  document.images[%d]: undefined\n", (int)i);
+            }
+        }
+    }
+    duk_pop_3(ctx); // Pop images array, document, and global object
 
     /* Main Loop */
     int running =1;
