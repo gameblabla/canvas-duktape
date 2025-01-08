@@ -9,7 +9,7 @@
 /* Global Variables */
 static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
-static int g_win_w = 1280, g_win_h = 720;
+static int g_win_w = 120, g_win_h = 160; // Updated based on test HTML
 
 /* Structures */
 typedef struct {
@@ -34,6 +34,7 @@ typedef struct {
 #define MAX_INTERVALS 64
 #define MAX_SCRIPTS 32
 #define MAX_IMAGES 32
+#define MAX_STORAGE_ITEMS 256
 
 /* Parsed HTML Information */
 typedef struct {
@@ -64,6 +65,15 @@ static ImageInfo g_image_info[MAX_IMAGES];
 static int g_image_count = 0;
 static ScriptInfo g_script_info[MAX_SCRIPTS];
 static int g_script_count = 0;
+
+/* Storage for localStorage */
+typedef struct {
+    char key[256];
+    char value[1024];
+} StorageItem;
+
+static StorageItem g_storage[MAX_STORAGE_ITEMS];
+static int g_storage_count = 0;
 
 /* Utility Functions to Store and Retrieve Functions */
 static int store_func(duk_context* ctx, int funcIndex){
@@ -264,7 +274,6 @@ static duk_ret_t js_canvas_height_setter(duk_context* ctx){
     /* Emulate "clearing" the canvas by clearing the renderer */
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_renderer);
-	// Explicitely don't call RenderPresent here after to avoid flickering
 
     duk_pop(ctx);
     return 0;
@@ -293,8 +302,7 @@ static duk_ret_t js_canvas_width_setter(duk_context* ctx){
     /* Emulate "clearing" the canvas by clearing the renderer */
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_renderer);
-    // Explicitely don't call RenderPresent here after to avoid flickering
-    
+
     duk_pop(ctx);
     return 0;
 }
@@ -384,7 +392,7 @@ static duk_ret_t js_drawImage(duk_context* ctx){
         fprintf(stderr, "[js_drawImage] SDL_RenderCopy failed: %s\n", SDL_GetError());
     }
     else{
-        SDL_RenderPresent(g_renderer);
+
         printf("[js_drawImage] Rendered successfully.\n");
     }
 
@@ -650,6 +658,99 @@ static void create_alert_obj(duk_context* ctx){
     duk_put_global_string(ctx, "alert");
 }
 
+/* Implementations for localStorage methods */
+
+/* setItem */
+static duk_ret_t js_localStorage_setItem(duk_context* ctx){
+    const char* key = duk_require_string(ctx,0);
+    const char* value = duk_require_string(ctx,1);
+
+    // Check if key exists
+    for(int i=0; i<g_storage_count; i++){
+        if(strcmp(g_storage[i].key, key) == 0){
+            strncpy(g_storage[i].value, value, sizeof(g_storage[i].value)-1);
+            return 0;
+        }
+    }
+
+    // Add new key-value pair
+    if(g_storage_count < MAX_STORAGE_ITEMS){
+        strncpy(g_storage[g_storage_count].key, key, sizeof(g_storage[g_storage_count].key)-1);
+        strncpy(g_storage[g_storage_count].value, value, sizeof(g_storage[g_storage_count].value)-1);
+        g_storage_count++;
+    }
+    else{
+        fprintf(stderr, "[localStorage] Storage limit reached.\n");
+    }
+
+    return 0;
+}
+
+/* getItem */
+static duk_ret_t js_localStorage_getItem(duk_context* ctx){
+    const char* key = duk_require_string(ctx,0);
+
+    for(int i=0; i<g_storage_count; i++){
+        if(strcmp(g_storage[i].key, key) == 0){
+            duk_push_string(ctx, g_storage[i].value);
+            return 1;
+        }
+    }
+
+    duk_push_null(ctx); // Return null if key not found
+    return 1;
+}
+
+/* removeItem */
+static duk_ret_t js_localStorage_removeItem(duk_context* ctx){
+    const char* key = duk_require_string(ctx,0);
+
+    for(int i=0; i<g_storage_count; i++){
+        if(strcmp(g_storage[i].key, key) == 0){
+            // Shift remaining items
+            for(int j=i; j<g_storage_count-1; j++){
+                strcpy(g_storage[j].key, g_storage[j+1].key);
+                strcpy(g_storage[j].value, g_storage[j+1].value);
+            }
+            g_storage_count--;
+            break;
+        }
+    }
+
+    return 0;
+}
+
+/* clear */
+static duk_ret_t js_localStorage_clear(duk_context* ctx){
+    g_storage_count = 0;
+    return 0;
+}
+
+
+/* Create localStorage Object in Duktape */
+static void create_localStorage_obj(duk_context* ctx){
+    duk_push_object(ctx);
+    
+    // Define setItem
+    duk_push_c_function(ctx, js_localStorage_setItem, 2);
+    duk_put_prop_string(ctx, -2, "setItem");
+    
+    // Define getItem
+    duk_push_c_function(ctx, js_localStorage_getItem, 1);
+    duk_put_prop_string(ctx, -2, "getItem");
+    
+    // Define removeItem
+    duk_push_c_function(ctx, js_localStorage_removeItem, 1);
+    duk_put_prop_string(ctx, -2, "removeItem");
+    
+    // Define clear
+    duk_push_c_function(ctx, js_localStorage_clear, 0);
+    duk_put_prop_string(ctx, -2, "clear");
+    
+    // Assign to global object
+    duk_put_global_string(ctx, "localStorage");
+}
+
 /* Helper Function to Extract Attribute Values */
 static int extract_attribute(const char* tag, const char* attr, char* value, size_t size){
     char pattern[256];
@@ -880,6 +981,8 @@ int main(int argc, char** argv){
     g_window = SDL_CreateWindow("Canvas Demo",
                                 SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                                 g_win_w, g_win_h, 0);
+                                
+
     if(!g_window){
         fprintf(stderr, "Failed SDL_CreateWindow: %s\n", SDL_GetError());
         IMG_Quit();
@@ -897,6 +1000,8 @@ int main(int argc, char** argv){
         SDL_Quit();
         return 1;
     }
+    
+	SDL_RenderSetLogicalSize(g_renderer, g_win_w, g_win_h);
 
     /* Clear the screen once at startup */
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
@@ -920,6 +1025,7 @@ int main(int argc, char** argv){
     create_document(ctx);
     create_window_obj(ctx);
     create_alert_obj(ctx);
+    create_localStorage_obj(ctx); // Added localStorage
 
     /* Implement document.images as an array */
     duk_push_global_object(ctx);
@@ -988,20 +1094,22 @@ int main(int argc, char** argv){
     for(int i=0; i<g_image_count; i++){
         duk_push_global_object(ctx);
         duk_get_prop_string(ctx, -1, "document");
-        duk_get_prop_string(ctx, -1, "getElementById");
-        duk_push_string(ctx, g_image_info[i].id);
-        if(duk_pcall(ctx, 1) != DUK_EXEC_SUCCESS){
-            fprintf(stderr, "Error getting image by id: %s\n", duk_safe_to_string(ctx, -1));
-            duk_pop(ctx);
-            continue;
+        duk_get_prop_string(ctx, -1, "images");
+        duk_get_prop_index(ctx, -1, i);
+        if(duk_is_object(ctx, -1)){
+            duk_push_string(ctx, "src");
+            duk_push_string(ctx, g_image_info[i].src);
+            if(duk_put_prop(ctx, -3) !=1){
+                fprintf(stderr, "Error setting document.images[%d].src.\n", i);
+            }
+            else{
+                printf("[Preload] Set document.images[%d].src = '%s'\n", i, g_image_info[i].src);
+            }
         }
-        // Now, set src
-        duk_push_string(ctx, "src");
-        duk_push_string(ctx, g_image_info[i].src);
-        if(duk_put_prop(ctx, -3) !=1){
-            fprintf(stderr, "Error setting image src.\n");
+        else{
+            fprintf(stderr, "document.images[%d] is not an object.\n", i);
         }
-        duk_pop_3(ctx); // Pop document and global object
+        duk_pop_3(ctx); // Pop images[x], images array, document, global
     }
 
     /* Call window.onload if set */
@@ -1043,6 +1151,8 @@ int main(int argc, char** argv){
 
         /* Check and Execute setInterval Callbacks */
         check_intervals(ctx);
+        
+		SDL_RenderPresent(g_renderer);
 
         SDL_Delay(10);
     }
@@ -1055,3 +1165,4 @@ int main(int argc, char** argv){
     SDL_Quit();
     return 0;
 }
+
