@@ -10,16 +10,16 @@ This means some Game Maker studio games as well as older HTML5 games. (and newer
 
 # Current status
 
-Works for canvas_loop.js, canvas_variant2.js, rhino.js and canvas.js.
+Works for test.html and test2.html.
 No input, sound support.
-No support for loading from HTML file or references.
-No support for changing resolution from HTML.
 
 # Roadmap
 
+- Add support for more functions
+- Add basic keyboard and mouse support
 - Support Localstorage
 - Support sound libraries directly such as buzz.js/howl.js through SDL_mixer
-- SDL 1.2 backend (right now, SDL2)
+- SDL 1.2 backend for Opendingux handhelds (right now, SDL2 because its currently the best middleground)
 
 
 # Far future
