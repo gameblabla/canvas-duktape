@@ -10,15 +10,19 @@ This means some Game Maker studio games as well as older HTML5 games. (and newer
 
 # Current status
 
-Works for test.html, test2.html and game.html.
-game.html is Rubby Bird 1 HTML5 stripped down without the touch libraries and sound support.
+Boots to BioLab's titlescreen and Derp Puncher's titlescreen.
 
-No input, sound support.
+# TODO
+
+- Input (keyboard and mouse)
+- Touchscreen
+- Game controller API
+- HTML5 Audio support (MP3 support done through minimp3, ogg vorbis through stb_vorbis.h)
+- WebAudio
+- LocalStorage
 
 # Roadmap
 
-- This renders to intermediate texture right now to avoid flickering, this may have to be possibly tweaked later.
-- Add support for more functions
 - Add basic keyboard and mouse support
 - Support Localstorage
 - Support sound libraries directly such as buzz.js/howl.js through SDL_mixer
