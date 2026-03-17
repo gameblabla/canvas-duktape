@@ -184,6 +184,8 @@ static duk_ret_t js_audio_volume_getter(duk_context* ctx);
 static duk_ret_t js_audio_volume_setter(duk_context* ctx);
 static duk_ret_t js_audio_loop_getter(duk_context* ctx);
 static duk_ret_t js_audio_loop_setter(duk_context* ctx);
+static duk_ret_t js_audio_paused_getter(duk_context* ctx);
+static duk_ret_t js_audio_ended_getter(duk_context* ctx);
 static duk_ret_t js_requestAnimationFrame(duk_context* ctx);
 static duk_ret_t js_cancelAnimationFrame(duk_context* ctx);
 static duk_ret_t js_html_element_ctor(duk_context* ctx);
@@ -1376,6 +1378,13 @@ static duk_ret_t js_createElement(duk_context* ctx) {
         attach_canvas_element(ctx, c);
         return 1;
     }
+    if (strcmp(tag,"audio")==0) {
+        /* Delegate to the Audio constructor so canPlayType etc. are present */
+        duk_get_global_string(ctx, "Audio");
+        duk_push_undefined(ctx); /* no src argument */
+        duk_new(ctx, 1);
+        return 1;
+    }
     duk_push_object(ctx);
     return 1;
 }
@@ -1630,22 +1639,16 @@ static duk_ret_t js_audio_play(duk_context* ctx) {
 
     if (native_index >= 0) {
         sound_play(native_index);
-        
+
         /* Update element state */
         duk_get_prop_string(ctx, -1, "_audioIndex");
         int elem_idx = duk_get_int(ctx, -1);
         duk_pop(ctx);
-        
+
         if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
             g_audio_elements[elem_idx].paused = 0;
             g_audio_elements[elem_idx].ended = 0;
         }
-        
-        duk_push_false(ctx);
-        duk_put_prop_string(ctx, -2, "paused");
-    } else {
-        duk_push_true(ctx);
-        duk_put_prop_string(ctx, -2, "paused");
     }
 
     duk_push_undefined(ctx); /* Audio.play() returns undefined (Promise not implemented) */
@@ -1669,9 +1672,6 @@ static duk_ret_t js_audio_pause(duk_context* ctx) {
         if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
             g_audio_elements[elem_idx].paused = 1;
         }
-
-        duk_push_true(ctx);
-        duk_put_prop_string(ctx, -2, "paused");
     }
 
     duk_push_this(ctx);
@@ -1777,6 +1777,25 @@ static duk_ret_t js_audio_loop_setter(duk_context* ctx) {
     return 1;
 }
 
+static duk_ret_t js_audio_paused_getter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_nativeIndex");
+    int native_index = duk_get_int(ctx, -1);
+    duk_pop_2(ctx);
+    /* paused = not actively playing (covers: not-loaded, paused, ended) */
+    duk_push_boolean(ctx, native_index < 0 || !sound_is_playing(native_index));
+    return 1;
+}
+
+static duk_ret_t js_audio_ended_getter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_nativeIndex");
+    int native_index = duk_get_int(ctx, -1);
+    duk_pop_2(ctx);
+    duk_push_boolean(ctx, native_index >= 0 && sound_has_ended(native_index));
+    return 1;
+}
+
 static duk_ret_t js_audio_canPlayType(duk_context* ctx) {
     const char* t = duk_get_string(ctx, 0);
     if (t && (strstr(t, "ogg") || strstr(t, "mp3") || strstr(t, "wav") || strstr(t, "mpeg"))) {
@@ -1873,12 +1892,15 @@ static duk_ret_t js_html5_audio(duk_context* ctx) {
     duk_push_c_function(ctx, js_audio_addEventListener, 2); duk_put_prop_string(ctx, -2, "addEventListener");
     duk_push_c_function(ctx, js_noop, DUK_VARARGS);    duk_put_prop_string(ctx, -2, "removeEventListener");
 
-    /* Properties - using simple values for now, getters/setters handled in js_audio_load */
-    /* Note: loop, volume, currentTime need special handling via defineProperty */
-    /* paused (read-only) */
-    duk_push_true(ctx);  duk_put_prop_string(ctx, -2, "paused");
-    /* ended (read-only) */
-    duk_push_false(ctx); duk_put_prop_string(ctx, -2, "ended");
+    /* paused / ended: live getters so Impact.js pool selection works correctly.
+     * this is at index 1 (index 0 = src constructor arg). */
+    duk_push_string(ctx, "paused");
+    duk_push_c_function(ctx, js_audio_paused_getter, 0);
+    duk_def_prop(ctx, 1, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_FORCE);
+
+    duk_push_string(ctx, "ended");
+    duk_push_c_function(ctx, js_audio_ended_getter, 0);
+    duk_def_prop(ctx, 1, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_FORCE);
     /* duration (read-only, updated on load) */
     duk_push_number(ctx, 0); duk_put_prop_string(ctx, -2, "duration");
     /* currentTime (will be updated via getter) */
