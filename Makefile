@@ -24,6 +24,32 @@ INCLUDES += -Iduktape/src -Iduktape/extras -Iduktape/extras/duk-v1-compat -Idukt
 INCLUDES += -Isrc
 
 # ============================================================================
+# Feature Detection
+# ============================================================================
+# Check for realpath and getcwd availability
+HAVE_REALPATH := $(shell printf '#include <stdlib.h>\nint main(void) { char* p = realpath("/tmp", NULL); (void)p; return 0; }\n' | $(CC) -o /dev/null -x c - 2>/dev/null && echo 1 || echo 0)
+HAVE_GETCWD := $(shell printf '#include <unistd.h>\nint main(void) { char buf[256]; getcwd(buf, 256); return 0; }\n' | $(CC) -o /dev/null -x c - 2>/dev/null && echo 1 || echo 0)
+
+ifeq ($(HAVE_REALPATH),1)
+CFLAGS += -DHAVE_REALPATH
+endif
+ifeq ($(HAVE_GETCWD),1)
+CFLAGS += -DHAVE_GETCWD
+endif
+
+# ============================================================================
+# Duktape Source Check
+# ============================================================================
+# The duktape/src directory must exist (from release tarball or submodule)
+DUKTAPE_SRC := duktape/src
+
+ifeq ($(wildcard $(DUKTAPE_SRC)),)
+$(error Duktape source not found. Please either:
+  1. Clone duktape as submodule: git submodule add https://github.com/svaarala/duktape.git duktape
+  2. Or download a release: wget https://github.com/svaarala/duktape/releases/download/v2.7.0/duktape-2.7.0.tar.xz && tar xf duktape-2.7.0.tar.xz && mv duktape-2.7.0 duktape)
+endif
+
+# ============================================================================
 # Object Files by Module
 # ============================================================================
 
@@ -136,25 +162,100 @@ clean:
 # Tests
 # ============================================================================
 
+# Test output directory
+TEST_OUTPUT_DIR = test_results
+$(shell mkdir -p $(TEST_OUTPUT_DIR))
+
+# Run a test from the testsuite folder, capturing console output
+# Usage: $(call run_test,test_file.html,output_file.log)
+define run_test
+	@echo "Running test: $(1)"
+	@(cd testsuite && timeout 60 ../$(TARGET) $(1) 2>&1) | tee $(TEST_OUTPUT_DIR)/$(2)
+endef
+
 test-biolab: $(TARGET)
-	./$(TARGET) biolab_impact_test.html
+	$(call run_test,biolab_impact_test.html,biolab.log)
 
 test-ultra: $(TARGET)
-	./$(TARGET) ultra.html
+	$(call run_test,ultra.html,ultra.log)
 
 test-tapi2: $(TARGET)
-	./$(TARGET) tapi2.html
+	$(call run_test,tapi2.html,tapi2.log)
 
 test-ultra-more: $(TARGET)
-	./$(TARGET) ultra_more.html
+	$(call run_test,ultra_more.html,ultra_more.log)
 
-test-all: test-biolab test-ultra test-tapi2 test-ultra-more
+test-api: $(TARGET)
+	$(call run_test,test_api.html,test_api.log)
 
-# ============================================================================
-# Phony Targets
-# ============================================================================
+test-alpha: $(TARGET)
+	$(call run_test,testalpha.html,testalpha.log)
 
-.PHONY: all clean test-biolab test-ultra test-tapi2 test-ultra-more test-all
+test-all: $(TARGET)
+	@mkdir -p $(TEST_OUTPUT_DIR)
+	@echo "========================================="
+	@echo "Running all tests from testsuite/"
+	@echo "========================================="
+	@for test in testsuite/*.html; do \
+		testname=$$(basename $$test); \
+		logname=$${testname%.html}.log; \
+		echo ""; \
+		echo "-----------------------------------------"; \
+		echo "Running: $$testname"; \
+		echo "-----------------------------------------"; \
+		(cd testsuite && timeout 60 ../$(TARGET) $$testname 2>&1) | tee $(TEST_OUTPUT_DIR)/$$logname || true; \
+	done
+	@echo ""
+	@echo "========================================="
+	@echo "Test run complete. Logs in $(TEST_OUTPUT_DIR)/"
+	@echo "========================================="
+
+# Regression check: compare test output against baseline
+# Usage: make check-regressions [BASELINE_DIR=test_results_baseline]
+BASELINE_DIR ?= test_results_baseline
+check-regressions: $(TEST_OUTPUT_DIR)
+	@echo "========================================="
+	@echo "Checking for regressions..."
+	@echo "Comparing $(TEST_OUTPUT_DIR)/ against $(BASELINE_DIR)/"
+	@echo "========================================="
+	@regressions=0; \
+	for log in $(TEST_OUTPUT_DIR)/*.log; do \
+		logname=$$(basename $$log); \
+		baseline=$(BASELINE_DIR)/$$logname; \
+		if [ -f "$$baseline" ]; then \
+			if diff -q "$$log" "$$baseline" > /dev/null 2>&1; then \
+				echo "[PASS] $$logname"; \
+			else \
+				echo "[FAIL] $$logname - differences found:"; \
+				diff "$$log" "$$baseline" | head -20; \
+				regressions=$$((regressions + 1)); \
+			fi; \
+		else \
+			echo "[WARN] $$logname - no baseline found at $$baseline"; \
+		fi; \
+	done; \
+	echo ""; \
+	echo "========================================="; \
+	if [ $$regressions -gt 0 ]; then \
+		echo "REGRESSIONS DETECTED: $$regressions test(s) failed"; \
+		exit 1; \
+	else \
+		echo "NO REGRESSIONS: All tests passed"; \
+	fi
+
+# Save current test results as baseline for future regression checks
+save-baseline: $(TEST_OUTPUT_DIR)
+	@echo "Saving baseline to $(BASELINE_DIR)/"
+	@mkdir -p $(BASELINE_DIR)
+	@cp $(TEST_OUTPUT_DIR)/*.log $(BASELINE_DIR)/ 2>/dev/null || echo "No test results to save"
+	@echo "Baseline saved"
+
+# Run tests from testsuite directory directly (for manual testing)
+test-run: $(TARGET)
+	@echo "Running tests from testsuite/ directory..."
+	@(cd testsuite && ../$(TARGET))
+
+.PHONY: all clean test-biolab test-ultra test-tapi2 test-ultra-more test-api test-alpha test-all check-regressions save-baseline test-run
 
 # ============================================================================
 # Module Interface Documentation

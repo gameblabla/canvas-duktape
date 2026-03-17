@@ -1,0 +1,87 @@
+[parse_html] Found inline script (23758 bytes)
+Parsed Images:
+[main] Total scripts: 1
+[main] Script 0: src='', is_inline=1
+[main] Before inline scripts, g_canvas_count=1
+[main] Executing inline script 0...
+[main] Inline script 0 executed successfully
+Canvas Alpha Transparency Test Suite
+=====================================
+ECMAScript 3 Compatible
+Testing canvas alpha transparency for game RGBA surfaces
+
+
+=== Test 1: Canvas Support ===
+[PASS] Canvas element exists
+[PASS] getContext method exists
+[PASS] 2D context obtainable
+
+=== Test 2: Stub Implementation Detection ===
+[PASS] Method fillRect exists
+[PASS] Method clearRect exists
+[PASS] Method getImageData exists
+[PASS] Method putImageData exists
+[PASS] Method createImageData exists
+[PASS] Method drawImage exists
+[PASS] fillStyle property functional
+[PASS] globalAlpha property exists
+[PASS] globalAlpha property functional
+
+=== Test 3: RGBA Color Support ===
+[PASS] getImageData accessible
+[PASS] ImageData has data property - Length: 4
+  Pixel values: R=127 G=0 B=0 A=127
+[PASS] RGBA red channel rendered - R=127
+[PASS] RGBA alpha channel rendered - A=127
+
+=== Test 4: Alpha Blending / Compositing ===
+  Blended pixel: R=127 G=0 B=128 A=255
+[PASS] Alpha blending produces mixed colors - Red and blue should both be present in blended pixel
+[PASS] Blended result is opaque - A=255
+
+=== Test 5: Color Key Transparency (Game RGBA Surfaces) ===
+  Sprite center: R=255 G=0 B=0 A=255
+[PASS] Sprite center rendered correctly (red)
+  Sprite edge (colorkey): R=0 G=0 B=0 A=0
+[PASS] Color key area has zero alpha
+
+=== Test 6: globalAlpha for Sprite Transparency ===
+  Blended with globalAlpha: R=127 G=127 B=128 A=255
+[PASS] globalAlpha blending works - Yellow and blue should be blended
+
+=== Test 7: Multi-Layer Transparency (Game Layers) ===
+  Three layers blended: R=89 G=25 B=152 A=255
+[PASS] Multi-layer blending works
+  Two layers (gray+red): R=177 G=50 B=50 A=255
+[PASS] Two-layer area correct
+
+=== Test 8: Framebuffer Read/Write Consistency ===
+  Written: R=123 G=45 B=67 A=255
+  Read back: R=123 G=45 B=67 A=255
+[PASS] Framebuffer read/write consistency
+  Semi-transparent written: R=200 G=100 B=50 A=128
+  Semi-transparent read: R=200 G=100 B=50 A=128
+[PASS] Semi-transparent read/write consistency
+
+=== Test 9: drawImage with Alpha Channel ===
+[PASS] Offscreen canvas creation
+  drawImage blended result: R=114 G=146 B=93 A=255
+[PASS] drawImage preserves alpha blending
+
+=== Test 10: Visual Verification Pattern ===
+  Alpha 0.1 over black - R=25 (expected ~26)
+  Alpha 0.9 over black - R=229 (expected ~230)
+[PASS] Alpha gradient rendering works - Difference: 204 (expected >100)
+[PASS] Alpha 0.1 value accurate - Got 25, expected ~26
+[PASS] Alpha 0.9 value accurate - Got 229, expected ~230
+
+=====================================
+TEST SUMMARY
+=====================================
+Tests Passed: 30
+Tests Failed: 0
+Total Tests: 30
+
+*** ALL TESTS PASSED ***
+Canvas alpha transparency is fully functional.
+RGBA surfaces with color key transparency should work correctly.

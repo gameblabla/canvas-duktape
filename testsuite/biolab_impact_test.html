@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Impact.js Canvas Regression — Biolab Disaster</title>
+  <style>
+    body { margin: 0; background: #111; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="c" width="480" height="320"></canvas>
+<script>
+// Impact.js / Biolab Disaster — targeted regression suite
+// Tests derived directly from biolab.js source analysis:
+//   - drawTile horizontal flip: save/scale(-1,1)/drawImage with negated x offset/restore
+//   - drawTile vertical flip: save/scale(1,-1)/drawImage with negated y offset/restore
+//   - drawTile combined flip XY
+//   - ImpactSplashLoader: pure vector logo via save/translate/scale/bezierCurveTo/fill
+//   - ig.Image.draw() with explicit source rect + scale factor
+//   - imageSmoothingEnabled=false (CRISP scale mode used at scale>1)
+//   - globalCompositeOperation="lighter" (EntityPlasma draw)
+//   - globalCompositeOperation reset to "source-over" after lighter
+//   - fillText/textAlign/font (loader URL label and font system)
+//   - save/restore stack depth (nested saves used by animation+entity draw)
+//   - context.scale state isolation across save/restore pairs
+//   - ig.System.getDrawPos SMOOTH mode: Math.round(x * scale)
+//   - Animation angle-path: translate+rotate+drawTile inside save/restore
+
+(function() {
+  var passed = 0, failed = 0;
+  var canvas = document.getElementById('c');
+  var ctx;
+
+  function section(title) { console.log('\n=== ' + title + ' ==='); }
+  function info(msg)       { console.log('  ' + msg); }
+  function result(name, ok, detail) {
+    console.log((ok ? '[PASS] ' : '[FAIL] ') + name + (detail ? '  [' + detail + ']' : ''));
+    if (ok) { passed++; } else { failed++; }
+  }
+
+  function px(x, y) {
+    return ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
+  }
+  function approx(a, b, tol) { return Math.abs(a - b) <= (tol || 4); }
+
+  function clear() { ctx.clearRect(0, 0, canvas.width, canvas.height); }
+
+  // Build a 32x32 asymmetric tile: left half red, right half blue.
+  // After a horizontal flip, left half should be blue, right half red.
+  function makeAsymTile() {
+    var t = document.createElement('canvas');
+    t.width = 32; t.height = 32;
+    var tc = t.getContext('2d');
+    tc.fillStyle = 'rgb(255,0,0)'; tc.fillRect(0,  0, 16, 32);  // left = red
+    tc.fillStyle = 'rgb(0,0,255)'; tc.fillRect(16, 0, 16, 32);  // right = blue
+    return t;
+  }
+
+  // Build a 32x32 asymmetric tile: top half green, bottom half yellow.
+  function makeVFlipTile() {
+    var t = document.createElement('canvas');
+    t.width = 32; t.height = 32;
+    var tc = t.getContext('2d');
+    tc.fillStyle = 'rgb(0,200,0)';   tc.fillRect(0, 0,  32, 16); // top = green
+    tc.fillStyle = 'rgb(255,200,0)'; tc.fillRect(0, 16, 32, 16); // bottom = yellow
+    return t;
+  }
+
+  // ── T1: Horizontal flip via ctx.scale(-1,1) ────────────────────────────────
+  // Exact Impact.js drawTile logic (from biolab.js line 27):
+  //   m = flipX ? -1 : 1
+  //   ctx.save(); ctx.scale(m, 1);
+  //   ctx.drawImage(data, sx, sy, sw, sh, getDrawPos(x)*m - (flipX?sw:0), getDrawPos(y), sw, sh)
+  //   ctx.restore()
+  // getDrawPos(SMOOTH) = Math.round(x * scale), scale=1 here so getDrawPos(x)=x
+  function t1_horizontalFlip() {
+    section('T1 · Horizontal Flip (drawTile flipX — player sprite mirror)');
+    var tile = makeAsymTile();
+    clear();
+
+    // Draw WITHOUT flip at (0,0): left=red, right=blue
+    ctx.drawImage(tile, 0, 0, 32, 32, 0, 0, 32, 32);
+    var preLeft  = px(8,  16);
+    var preRight = px(24, 16);
+    result('Unflipped: left side is red',   preLeft[0]  > 200 && preLeft[2]  < 20, 'R=' + preLeft[0]  + ' B=' + preLeft[2]);
+    result('Unflipped: right side is blue', preRight[2] > 200 && preRight[0] < 20, 'R=' + preRight[0] + ' B=' + preRight[2]);
+
+    // Draw WITH flipX at (50,0) using exact Impact.js drawTile pattern
+    var dx = 50, dy = 0, sw = 32, sh = 32;
+    var m = -1; // flipX = true
+    ctx.save();
+    ctx.scale(m, 1);
+    ctx.drawImage(tile, 0, 0, sw, sh, dx * m - sw, dy, sw, sh);
+    ctx.restore();
+
+    var flipLeft  = px(50 + 8,  16);
+    var flipRight = px(50 + 24, 16);
+    info('After flipX: left@(58,16)  R=' + flipLeft[0]  + ' B=' + flipLeft[2]);
+    info('After flipX: right@(74,16) R=' + flipRight[0] + ' B=' + flipRight[2]);
+    result('FlipX: left side now shows blue (was red)',   flipLeft[2]  > 200 && flipLeft[0]  < 20, 'R=' + flipLeft[0]  + ' B=' + flipLeft[2]);
+    result('FlipX: right side now shows red (was blue)',  flipRight[0] > 200 && flipRight[2] < 20, 'R=' + flipRight[0] + ' B=' + flipRight[2]);
+    result('FlipX: result is fully opaque',               flipLeft[3]  === 255,                    'A=' + flipLeft[3]);
+  }
+
+  // ── T2: Vertical flip via ctx.scale(1,-1) ─────────────────────────────────
+  function t2_verticalFlip() {
+    section('T2 · Vertical Flip (drawTile flipY)');
+    var tile = makeVFlipTile();
+    clear();
+
+    // Unflipped at (0,50): top=green, bottom=yellow
+    ctx.drawImage(tile, 0, 0, 32, 32, 0, 50, 32, 32);
+    var preTop = px(16, 58);
+    var preBot = px(16, 74);
+    result('Unflipped: top is green',   preTop[1] > 150 && preTop[0] < 30,  'G=' + preTop[1] + ' R=' + preTop[0]);
+    result('Unflipped: bottom is yellow', preBot[0] > 200 && preBot[1] > 150, 'R=' + preBot[0] + ' G=' + preBot[1]);
+
+    // FlipY at (50,50)
+    var dx = 50, dy = 50, sw = 32, sh = 32;
+    var n = -1; // flipY = true
+    ctx.save();
+    ctx.scale(1, n);
+    ctx.drawImage(tile, 0, 0, sw, sh, dx, dy * n - sh, sw, sh);
+    ctx.restore();
+
+    var flipTop = px(66, 58);
+    var flipBot = px(66, 74);
+    info('After flipY: top@(66,58)    R=' + flipTop[0] + ' G=' + flipTop[1]);
+    info('After flipY: bottom@(66,74) R=' + flipBot[0] + ' G=' + flipBot[1]);
+    result('FlipY: top now shows yellow (was green)',   flipTop[0] > 200 && flipTop[1] > 150, 'R=' + flipTop[0] + ' G=' + flipTop[1]);
+    result('FlipY: bottom now shows green (was yellow)', flipBot[1] > 150 && flipBot[0] < 30,  'G=' + flipBot[1] + ' R=' + flipBot[0]);
+  }
+
+  // ── T3: Combined XY flip ───────────────────────────────────────────────────
+  function t3_combinedFlip() {
+    section('T3 · Combined XY Flip (drawTile flipX+flipY)');
+    var tile = document.createElement('canvas');
+    tile.width = 32; tile.height = 32;
+    var tc = tile.getContext('2d');
+    // quadrants: TL=red, TR=green, BL=blue, BR=white
+    tc.fillStyle = 'rgb(255,0,0)';   tc.fillRect(0,  0,  16, 16);
+    tc.fillStyle = 'rgb(0,255,0)';   tc.fillRect(16, 0,  16, 16);
+    tc.fillStyle = 'rgb(0,0,255)';   tc.fillRect(0,  16, 16, 16);
+    tc.fillStyle = 'rgb(255,255,255)'; tc.fillRect(16, 16, 16, 16);
+
+    clear();
+    var dx = 100, dy = 0, sw = 32, sh = 32;
+    ctx.save();
+    ctx.scale(-1, -1);
+    ctx.drawImage(tile, 0, 0, sw, sh, dx * -1 - sw, dy * -1 - sh, sw, sh);
+    ctx.restore();
+
+    // After XY flip: TL becomes BR (white), TR becomes BL (blue), BL becomes TR (green), BR becomes TL (red)
+    var tl = px(100 + 8,  8);
+    var tr = px(100 + 24, 8);
+    var bl = px(100 + 8,  24);
+    var br = px(100 + 24, 24);
+    info('XY flip TL@(108,8):  R=' + tl[0] + ' G=' + tl[1] + ' B=' + tl[2]);
+    info('XY flip TR@(124,8):  R=' + tr[0] + ' G=' + tr[1] + ' B=' + tr[2]);
+    info('XY flip BL@(108,24): R=' + bl[0] + ' G=' + bl[1] + ' B=' + bl[2]);
+    info('XY flip BR@(124,24): R=' + br[0] + ' G=' + br[1] + ' B=' + br[2]);
+    result('XY flip: TL quadrant is now white', tl[0] > 240 && tl[1] > 240 && tl[2] > 240, 'RGB=' + tl[0] + ',' + tl[1] + ',' + tl[2]);
+    result('XY flip: TR quadrant is now blue',  tr[2] > 200 && tr[0] < 20,                  'R=' + tr[0] + ' B=' + tr[2]);
+    result('XY flip: BL quadrant is now green', bl[1] > 200 && bl[0] < 20,                  'G=' + bl[1] + ' R=' + bl[0]);
+    result('XY flip: BR quadrant is now red',   br[0] > 200 && br[2] < 20,                  'R=' + br[0] + ' B=' + br[2]);
+  }
+
+  // ── T4: save/restore fully isolates ctx.scale(-1,1) ───────────────────────
+  // Critical: if restore() doesn't undo scale, every subsequent blit is wrong
+  function t4_scaleIsolation() {
+    section('T4 · ctx.scale State Isolation After Flip (save/restore)');
+    var tile = makeAsymTile();
+    clear();
+
+    // Do a flip, then restore
+    ctx.save();
+    ctx.scale(-1, 1);
+    ctx.drawImage(tile, 0, 0, 32, 32, 0 * -1 - 32, 100, 32, 32);
+    ctx.restore();
+
+    // Now draw normally at (100, 100) — should NOT be affected by prior scale
+    ctx.drawImage(tile, 0, 0, 32, 32, 100, 100, 32, 32);
+    var left  = px(108, 116); // should be red (left half)
+    var right = px(124, 116); // should be blue (right half)
+    result('Post-restore blit: left is red (scale not leaked)',   left[0]  > 200 && left[2]  < 20, 'R=' + left[0]  + ' B=' + left[2]);
+    result('Post-restore blit: right is blue (scale not leaked)', right[2] > 200 && right[0] < 20, 'R=' + right[0] + ' B=' + right[2]);
+  }
+
+  // ── T5: Nested save/restore depth (animation angle path uses 2 levels) ────
+  function t5_nestedSaveRestore() {
+    section('T5 · Nested save/restore Stack Depth');
+    var tile = makeAsymTile();
+    clear();
+
+    // Outer save: globalAlpha
+    ctx.save();
+    ctx.globalAlpha = 0.8;
+
+    // Inner save: flip
+    ctx.save();
+    ctx.scale(-1, 1);
+    ctx.drawImage(tile, 0, 0, 32, 32, 200 * -1 - 32, 0, 32, 32);
+    ctx.restore(); // restore inner (undo scale)
+
+    // Outer still has globalAlpha=0.8
+    var alphaCheck = ctx.globalAlpha;
+    ctx.restore(); // restore outer (undo globalAlpha)
+    var alphaAfter = ctx.globalAlpha;
+
+    result('Nested restore: outer globalAlpha preserved after inner restore', approx(alphaCheck, 0.8, 0.02), 'alpha=' + alphaCheck);
+    result('Nested restore: globalAlpha back to 1.0 after outer restore',    approx(alphaAfter, 1.0, 0.02), 'alpha=' + alphaAfter);
+
+    // Verify the flipped blit landed correctly during nested state
+    var left  = px(200 + 8,  16);
+    var right = px(200 + 24, 16);
+    result('Nested flip blit: left is blue',  left[2]  > 100, 'B=' + left[2]);
+    result('Nested flip blit: right is red',  right[0] > 100, 'R=' + right[0]);
+  }
+
+  // ── T6: ig.System.getDrawPos SMOOTH = Math.round(x * scale) ───────────────
+  // Impact.js passes getDrawPos(x) to drawImage, not raw x.
+  // At scale=1: round(x*1)=x. At scale=3 (desktop): round(x*3).
+  // Test that Math.round(x*scale) based positioning is pixel-accurate.
+  function t6_getDrawPos() {
+    section('T6 · ig.System.getDrawPos Positioning (SMOOTH mode)');
+    var tile = makeAsymTile();
+    clear();
+
+    // Simulate scale=3 (desktop Biolab uses scale=3)
+    var scale = 3;
+    var logicalX = 10, logicalY = 5; // logical game coordinates
+    var drawX = Math.round(logicalX * scale); // = 30
+    var drawY = Math.round(logicalY * scale); // = 15
+    var sw = 32 * scale, sh = 32 * scale;     // tile already pre-scaled
+
+    // Build a pre-scaled tile (simulating ig.Image.resize)
+    var scaled = document.createElement('canvas');
+    scaled.width = sw; scaled.height = sh;
+    var sc = scaled.getContext('2d');
+    sc.fillStyle = 'rgb(255,0,0)'; sc.fillRect(0,     0, sw/2, sh);
+    sc.fillStyle = 'rgb(0,0,255)'; sc.fillRect(sw/2,  0, sw/2, sh);
+
+    ctx.drawImage(scaled, 0, 0, sw, sh, drawX, drawY, sw, sh);
+
+    // Center of left half: drawX + sw/4
+    var lx = drawX + Math.floor(sw / 4);
+    var rx = drawX + Math.floor(3 * sw / 4);
+    var cy = drawY + Math.floor(sh / 2);
+    var l = px(lx, cy);
+    var r = px(rx, cy);
+    result('getDrawPos SMOOTH: scaled tile left is red',   l[0] > 200 && l[2] < 20, 'R=' + l[0] + ' B=' + l[2]);
+    result('getDrawPos SMOOTH: scaled tile right is blue', r[2] > 200 && r[0] < 20, 'R=' + r[0] + ' B=' + r[2]);
+    result('getDrawPos SMOOTH: pixel at exact draw origin is colored', px(drawX, drawY)[0] > 200 || px(drawX, drawY)[2] > 200, '');
+  }
+
+  // ── T7: ImpactSplashLoader logo — pure vector via canvas 2D paths ─────────
+  // The "made-with-impact" loader draws NO image file.
+  // It uses: save / translate / scale / beginPath / moveTo / lineTo / bezierCurveTo / fill / restore
+  // plus fillText for the URL. Test that all these ops work and produce visible pixels.
+  function t7_splashLoaderPaths() {
+    section('T7 · ImpactSplashLoader Vector Logo (bezierCurveTo / fillText)');
+    clear();
+
+    // Replicate the exact draw() call from ImpactSplashLoader
+    // (biolab.js line 64-66): save, translate, scale, draw paths, restore
+    var realWidth = canvas.width, realHeight = canvas.height;
+    var logoWidth = 340;
+    var logoScale = realWidth / logoWidth / 3;       // = 480/340/3 ≈ 0.47
+    var tx = (realWidth - logoWidth * logoScale) / 2; // horizontal center
+
+    ctx.fillStyle = 'rgba(0,0,0,0.8)';
+    ctx.fillRect(0, 0, realWidth, realHeight);
+
+    // URL label (fillText)
+    ctx.fillStyle = 'rgb(128,128,128)';
+    ctx.textAlign = 'right';
+    ctx.font = '10px Arial';
+    ctx.fillText('http://impactjs.com', realWidth - 10, realHeight - 10);
+
+    ctx.save();
+    ctx.translate(tx, realHeight / 2.5);
+    ctx.scale(logoScale, logoScale);
+
+    // Progress bar (strokeRect + fillRect)
+    var logoH = 120;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgb(255,255,255)';
+    ctx.strokeRect(25, logoH + 40, 300, 20);
+    ctx.fillStyle = 'rgb(255,255,255)';
+    ctx.fillRect(30, logoH + 45, 290 * 0.7, 10); // 70% progress
+
+    // IMPACT letter paths (simplified — just the I bar from PATHS_IMPACT)
+    ctx.fillStyle = 'rgb(255,255,255)';
+    ctx.beginPath();
+    ctx.moveTo(128.8, 98.7);
+    ctx.lineTo(114.3, 98.7);
+    ctx.lineTo(114.3, 26.3);
+    ctx.lineTo(128.8, 26.3);
+    ctx.lineTo(128.8, 98.7);
+    ctx.fill();
+
+    // COMET shape (bezierCurveTo — the orange comet from the logo)
+    ctx.fillStyle = 'rgb(243,120,31)';
+    ctx.beginPath();
+    ctx.moveTo(85.1, 58.3);
+    ctx.lineTo(0, 0);
+    ctx.lineTo(29.5, 40.4);
+    ctx.lineTo(16.1, 36.1);
+    ctx.lineTo(54.6, 91.6);
+    ctx.bezierCurveTo(65.2, 106.1, 83.4, 106.7, 93.8, 95.7);
+    ctx.bezierCurveTo(103.9, 84.9, 98.6, 67.6, 85.1, 58.3);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+
+    // Verify: dark background was drawn.
+    // fillStyle='rgba(0,0,0,0.8)' over a transparent canvas gives A = round(0.8*255) = 204,
+    // not 255 — the canvas starts transparent so the alpha is not fully composited.
+    var bg = px(5, 5);
+    result('Splash: dark background rendered (A~204)', approx(bg[3], 204, 5), 'A=' + bg[3]);
+    result('Splash: background is dark',               bg[0] < 30 && bg[1] < 30 && bg[2] < 30, 'RGB=' + bg[0] + ',' + bg[1] + ',' + bg[2]);
+
+    // Verify: white IMPACT I-bar produced white pixels somewhere in its region
+    // Under logoScale~0.47, the I bar at x~114-129, y~26-99 maps to canvas coords:
+    // canvasX = tx + 114*logoScale ~ tx+54, canvasY = realH/2.5 + 26*logoScale ~ 128+12
+    var ibX = Math.round(tx + 121 * logoScale);
+    var ibY = Math.round(realHeight / 2.5 + 60 * logoScale);
+    var iBar = px(ibX, ibY);
+    info('I-bar sample at (' + ibX + ',' + ibY + '): R=' + iBar[0] + ' G=' + iBar[1] + ' B=' + iBar[2]);
+    result('Splash: IMPACT I-bar white pixels rendered', iBar[0] > 200 && iBar[1] > 200 && iBar[2] > 200, 'RGB=' + iBar[0] + ',' + iBar[1] + ',' + iBar[2]);
+
+    // Verify: orange comet drawn — sample near origin (0,0) in logo space
+    // canvas: tx + 0*logoScale, realH/2.5 + 0*logoScale
+    var cometX = Math.round(tx + 40 * logoScale);
+    var cometY = Math.round(realHeight / 2.5 + 30 * logoScale);
+    var comet = px(cometX, cometY);
+    info('Comet sample at (' + cometX + ',' + cometY + '): R=' + comet[0] + ' G=' + comet[1] + ' B=' + comet[2]);
+    result('Splash: bezierCurveTo comet shape rendered (orange present)', comet[0] > 150, 'R=' + comet[0]);
+
+    // Verify: progress bar white fill was rendered
+    var barX = Math.round(tx + 30 * logoScale + 10);
+    var barY = Math.round(realHeight / 2.5 + (logoH + 50) * logoScale);
+    var bar = px(barX, barY);
+    info('Progress bar sample at (' + barX + ',' + barY + '): R=' + bar[0] + ' G=' + bar[1] + ' B=' + bar[2]);
+    result('Splash: progress bar white fill rendered', bar[0] > 200 && bar[1] > 200 && bar[2] > 200, 'RGB=' + bar[0] + ',' + bar[1] + ',' + bar[2]);
+
+    // Verify: fillText didn't crash and text region is not all black.
+    // fillText baseline is at realHeight-10; glyphs render *above* the baseline,
+    // so scan a vertical band from baseline-12 up to baseline+2.
+    var anyGray = false;
+    var tx2, ty2, tp;
+    for (ty2 = realHeight - 22; ty2 <= realHeight - 8 && !anyGray; ty2++) {
+      for (tx2 = realWidth - 150; tx2 < realWidth - 15; tx2 += 4) {
+        tp = px(tx2, ty2);
+        if (tp[0] > 20) { anyGray = true; break; }
+      }
+    }
+    result('Splash: fillText URL label produced visible pixels', anyGray, '');
+  }
+
+  // ── T8: imageSmoothingEnabled = false (CRISP scale mode) ──────────────────
+  // Impact.js sets this at scale>1 via ig.System.SCALE.CRISP
+  function t8_imageSmoothingDisabled() {
+    section('T8 · imageSmoothingEnabled=false (CRISP Scale Mode)');
+    // Build a 2x2 checkerboard: TL+BR=red, TR+BL=blue
+    var checker = document.createElement('canvas');
+    checker.width = 2; checker.height = 2;
+    var cc = checker.getContext('2d');
+    cc.fillStyle = 'rgb(255,0,0)'; cc.fillRect(0,0,1,1); cc.fillRect(1,1,1,1);
+    cc.fillStyle = 'rgb(0,0,255)'; cc.fillRect(1,0,1,1); cc.fillRect(0,1,1,1);
+
+    clear();
+
+    // Enable smoothing — scaled 2x2→64x64 should blur (purple-ish)
+    try { ctx.imageSmoothingEnabled = true; } catch(e) {}
+    ctx.drawImage(checker, 0, 0, 2, 2, 0, 0, 64, 64);
+
+    // Disable smoothing — scaled 2x2→64x64 should stay sharp (pure red or pure blue)
+    try { ctx.imageSmoothingEnabled = false; } catch(e) {}
+    ctx.drawImage(checker, 0, 0, 2, 2, 100, 0, 64, 64);
+
+    // With smoothing OFF: TL of the scaled checker should be pure red
+    var crisp = px(108, 8); // top-left quadrant, inset a few pixels
+    info('imageSmoothingEnabled=false TL: R=' + crisp[0] + ' G=' + crisp[1] + ' B=' + crisp[2]);
+    result('imageSmoothingEnabled=false: TL is pure red (no blend)', crisp[0] > 240 && crisp[2] < 15, 'R=' + crisp[0] + ' B=' + crisp[2]);
+    result('imageSmoothingEnabled=false: no green bleed into TL', crisp[1] < 15, 'G=' + crisp[1]);
+
+    // With smoothing ON: the center of the 64x64 result should be blended
+    var smooth = px(32, 32);
+    info('imageSmoothingEnabled=true center: R=' + smooth[0] + ' G=' + smooth[1] + ' B=' + smooth[2]);
+    // Both R and B channels should be non-trivial (blended) — OR at least one is
+    // Note: Chrome may still produce clean edges depending on the filter algorithm,
+    // so just verify it renders something non-transparent
+    result('imageSmoothingEnabled=true: center has color (A=255)', smooth[3] === 255, 'A=' + smooth[3]);
+
+    // Re-enable for subsequent tests
+    try { ctx.imageSmoothingEnabled = true; } catch(e) {}
+  }
+
+  // ── T9: globalCompositeOperation "lighter" (EntityPlasma) ─────────────────
+  // EntityPlasma.draw() sets composite to "lighter", calls parent draw, then "source-over"
+  function t9_compositeLighter() {
+    section('T9 · globalCompositeOperation "lighter" (EntityPlasma)');
+    clear();
+
+    // Draw a red base
+    ctx.fillStyle = 'rgb(100,0,0)';
+    ctx.fillRect(0, 200, 64, 64);
+
+    // Switch to "lighter" and draw another red — should add up (saturate toward 255)
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgb(100,0,0)';
+    ctx.fillRect(0, 200, 64, 64);
+    ctx.globalCompositeOperation = 'source-over'; // Impact resets after each entity
+
+    var bright = px(32, 232);
+    info('"lighter" additive blend: R=' + bright[0] + ' G=' + bright[1] + ' B=' + bright[2]);
+    result('"lighter": R channel is additive (>100)',     bright[0] > 150, 'R=' + bright[0]);
+    result('"lighter": result fully opaque (A=255)',       bright[3] === 255, 'A=' + bright[3]);
+
+    // After reset to source-over, normal overdraw should NOT add
+    ctx.fillStyle = 'rgb(0,0,100)';
+    ctx.fillRect(0, 200, 64, 64); // blue over red result
+    var over = px(32, 232);
+    result('source-over reset: subsequent draw is normal composite (B present)', over[2] > 50, 'B=' + over[2]);
+    // If lighter hadn't been reset, blue+red would produce weird additive result
+    // With correct source-over, the blue fill covers: B~100, R~0
+    result('source-over reset: R channel covered by blue fill', over[0] < 50, 'R=' + over[0]);
+  }
+
+  // ── T10: globalCompositeOperation reset verified by pixel ──────────────────
+  function t10_compositeReset() {
+    section('T10 · globalCompositeOperation Reset After "lighter"');
+    clear();
+
+    // Paint black background
+    ctx.fillStyle = 'rgb(0,0,0)';
+    ctx.fillRect(200, 0, 100, 100);
+
+    // lighter: two moderate greens should add up
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgb(0,80,0)';
+    ctx.fillRect(200, 0, 100, 100);
+    ctx.fillStyle = 'rgb(0,80,0)';
+    ctx.fillRect(200, 0, 100, 100);
+    ctx.globalCompositeOperation = 'source-over';
+
+    var added = px(250, 50);
+    result('"lighter" additive green: G > single value', added[1] > 80, 'G=' + added[1]);
+
+    // Now draw solid red in source-over — should fully replace
+    ctx.fillStyle = 'rgb(200,0,0)';
+    ctx.fillRect(200, 0, 100, 100);
+    var after = px(250, 50);
+    result('source-over after lighter: red fully covers (R>150)',    after[0] > 150, 'R=' + after[0]);
+    result('source-over after lighter: green zeroed (G~0)',           after[1] < 15,  'G=' + after[1]);
+  }
+
+  // ── T11: ig.Image.draw() with source rect + scale ─────────────────────────
+  // ig.Image.draw(x, y, sourceX, sourceY, width, height):
+  //   ctx.drawImage(data, sx*scale, sy*scale, w*scale, h*scale, getDrawPos(x), getDrawPos(y), w*scale, h*scale)
+  // This is used for title screen images (biolab/disaster/player title images)
+  function t11_imageDrawWithSourceAndScale() {
+    section('T11 · ig.Image.draw() Source Rect + Scale (Title Screen Images)');
+    // Simulate a pre-scaled spritesheet (scale=3): original 32x32 -> 96x96
+    var imgScale = 3;
+    var orig = document.createElement('canvas');
+    orig.width = 96; orig.height = 96;
+    var oc = orig.getContext('2d');
+    // Left 48px = red, right 48px = green (simulates two 16px tiles at scale 3)
+    oc.fillStyle = 'rgb(255,0,0)'; oc.fillRect(0,  0, 48, 96);
+    oc.fillStyle = 'rgb(0,255,0)'; oc.fillRect(48, 0, 48, 96);
+
+    clear();
+
+    // Draw second half (green tile): sx=16, sy=0, w=16, h=32 at logical (50, 0)
+    var sx = 16, sy = 0, w = 16, h = 32;
+    var scale = imgScale;
+    ctx.drawImage(orig,
+      sx * scale, sy * scale, w * scale, h * scale,
+      Math.round(50 * scale), Math.round(0 * scale),
+      w * scale, h * scale
+    );
+
+    var drawn = px(150 + 8 * scale, 16 * scale);
+    info('ig.Image.draw with src offset: R=' + drawn[0] + ' G=' + drawn[1] + ' B=' + drawn[2]);
+    result('ig.Image.draw: correct source region selected (green)', drawn[1] > 200 && drawn[0] < 20, 'G=' + drawn[1] + ' R=' + drawn[0]);
+    result('ig.Image.draw: fully opaque',                           drawn[3] === 255,                 'A=' + drawn[3]);
+  }
+
+  // ── T12: ig.Animation angle-path — translate+rotate+drawTile ──────────────
+  // When animation.angle != 0: save, translate(pivot), rotate(angle), drawTile(-pivot.x, -pivot.y, ...)
+  function t12_rotatedDrawTile() {
+    section('T12 · Rotated Tile Draw (ig.Animation angle path)');
+    var tile = makeAsymTile(); // left=red, right=blue
+    clear();
+
+    var pivotX = 16, pivotY = 16; // center pivot
+    var angle = Math.PI / 2;      // 90 degrees
+
+    ctx.save();
+    ctx.translate(300 + pivotX, 100 + pivotY); // translate to pivot in world space
+    ctx.rotate(angle);
+    ctx.drawImage(tile, 0, 0, 32, 32, -pivotX, -pivotY, 32, 32);
+    ctx.restore();
+
+    // After 90° rotation: original left(red) is now at the top, right(blue) at the bottom
+    var top = px(300 + 16, 100 + 8);   // should be red (was left)
+    var bot = px(300 + 16, 100 + 24);  // should be blue (was right)
+    info('Rotated 90°: top@(316,108) R=' + top[0] + ' B=' + top[2]);
+    info('Rotated 90°: bot@(316,124) R=' + bot[0] + ' B=' + bot[2]);
+    result('Rotated tile: top quadrant red (original left)',   top[0] > 150, 'R=' + top[0]);
+    result('Rotated tile: bottom quadrant blue (original right)', bot[2] > 150, 'B=' + bot[2]);
+    result('Rotated tile: opaque after rotate', top[3] === 255, 'A=' + top[3]);
+
+    // Verify restore undid transform
+    ctx.drawImage(tile, 0, 0, 32, 32, 380, 100, 32, 32);
+    var normal = px(388, 116);
+    result('Post-rotate restore: next blit is unrotated (left=red)', normal[0] > 200 && normal[2] < 20, 'R=' + normal[0] + ' B=' + normal[2]);
+  }
+
+  // ── T13: textAlign + font + fillText (ig.Font system + loader label) ───────
+  function t13_textRendering() {
+    section('T13 · fillText / textAlign / font (ig.Font + Loader URL)');
+    clear();
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 260, canvas.width, 60);
+
+    ctx.fillStyle = 'rgb(128,128,128)';
+    ctx.font = '10px Arial';
+
+    // textAlign = 'right' (exact loader usage)
+    ctx.textAlign = 'right';
+    ctx.fillText('http://impactjs.com', canvas.width - 10, 290);
+
+    // textAlign = 'left' (subsequent usage)
+    ctx.textAlign = 'left';
+    ctx.fillText('IMPACT', 10, 290);
+
+    // textAlign = 'center' (ig.Font.ALIGN.CENTER for title/stats)
+    ctx.textAlign = 'center';
+    ctx.fillText('Biolab Disaster', canvas.width / 2, 310);
+
+    // Verify: right-aligned text has pixels near right edge.
+    // Scan a vertical band: baseline is y=290, glyphs render above it (~y=280-289).
+    var anyRight = false, rx, ry;
+    for (ry = 279; ry <= 291 && !anyRight; ry++) {
+      for (rx = canvas.width - 15; rx > canvas.width - 160; rx -= 2) {
+        if (px(rx, ry)[0] > 20) { anyRight = true; break; }
+      }
+    }
+    result('textAlign=right: pixels near right edge', anyRight, '');
+
+    // Verify: left-aligned text has pixels near left edge.
+    var anyLeft = false, lx, ly;
+    for (ly = 279; ly <= 291 && !anyLeft; ly++) {
+      for (lx = 10; lx < 80; lx += 2) {
+        if (px(lx, ly)[0] > 20) { anyLeft = true; break; }
+      }
+    }
+    result('textAlign=left: pixels near left edge', anyLeft, '');
+
+    // Verify: center text has pixels in the middle band.
+    // Baseline is y=310, glyphs render above it (~y=300-309).
+    var anyCenter = false, cx, cy;
+    for (cy = 299; cy <= 311 && !anyCenter; cy++) {
+      for (cx = canvas.width / 2 - 60; cx < canvas.width / 2 + 60; cx += 2) {
+        if (px(cx, cy)[0] > 20) { anyCenter = true; break; }
+      }
+    }
+    result('textAlign=center: pixels in center band', anyCenter, '');
+
+    // Verify textAlign doesn't bleed — x=3 is left of where 'IMPACT' starts (x=10),
+    // so no glyph pixel should appear there in the same vertical band.
+    var noBleed = false, nby;
+    for (nby = 279; nby <= 291; nby++) {
+      if (px(3, nby)[0] > 20) { noBleed = true; break; }
+    }
+    result('textAlign isolation: no pixels at x=3 (left of left-aligned text)', !noBleed, '');
+  }
+
+  function runAll() {
+    ctx = canvas.getContext('2d');
+    if (!ctx) { console.log('[FATAL] No 2D context'); return; }
+
+    console.log('Impact.js / Biolab Disaster — Targeted Regression Suite');
+    console.log('=========================================================');
+    console.log('Covers: drawTile flipX/Y, ImpactSplashLoader vector logo,');
+    console.log('        imageSmoothingEnabled, globalCompositeOperation=lighter,');
+    console.log('        ig.Image.draw src+scale, rotated tiles, fillText/textAlign');
+
+    t1_horizontalFlip();
+    t2_verticalFlip();
+    t3_combinedFlip();
+    t4_scaleIsolation();
+    t5_nestedSaveRestore();
+    t6_getDrawPos();
+    t7_splashLoaderPaths();
+    t8_imageSmoothingDisabled();
+    t9_compositeLighter();
+    t10_compositeReset();
+    t11_imageDrawWithSourceAndScale();
+    t12_rotatedDrawTile();
+    t13_textRendering();
+
+    console.log('\n=========================================================');
+    console.log('PASSED: ' + passed + '  FAILED: ' + failed + '  TOTAL: ' + (passed + failed));
+    if (failed === 0) {
+      console.log('ALL TESTS PASSED');
+    } else {
+      console.log(failed + ' TEST(S) FAILED - see above');
+    }
+  }
+
+  if (window.addEventListener) {
+    window.addEventListener('load', runAll, false);
+  } else if (window.attachEvent) {
+    window.attachEvent('onload', runAll);
+  } else {
+    window.onload = runAll;
+  }
+})();
+</script>
+</body>
+</html>

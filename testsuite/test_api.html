@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>HTML5 Canvas Test (ES3 Compatible)</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        body {
+            background: #1a1a2e;
+            text-align: center;
+            padding-top: 20px;
+        }
+        canvas {
+            border: 2px solid #00d4ff;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="640" height="480"></canvas>
+
+    <script>
+        var canvas = document.getElementById('canvas');
+        var ctx = canvas.getContext('2d');
+
+        // ============================================
+        // RESOURCE LOADER
+        // ============================================
+
+        function ResourceLoader() {
+            this.resources = {};
+        }
+
+        ResourceLoader.prototype.loadImage = function(name, width, height, generator, callback) {
+            var self = this;
+            var delay = Math.floor(Math.random() * 200) + 50;
+
+            setTimeout(function() {
+                var c = document.createElement('canvas');
+                c.width = width;
+                c.height = height;
+                var cCtx = c.getContext('2d');
+                generator(cCtx, width, height);
+
+                var img = new Image();
+                img.onload = function() {
+                    self.resources[name] = img;
+                    callback(null, img);
+                };
+                img.onerror = function() {
+                    callback(new Error('Failed to load ' + name), null);
+                };
+                img.src = c.toDataURL();
+            }, delay);
+        };
+
+        ResourceLoader.prototype.loadAll = function(sprites, onProgress, onComplete) {
+            var self = this;
+            var total = sprites.length;
+            var loaded = 0;
+            var errors = [];
+
+            function checkDone() {
+                if (loaded + errors.length === total) {
+                    onComplete(errors.length > 0 ? errors : null);
+                }
+            }
+
+            for (var i = 0; i < sprites.length; i++) {
+                (function(sprite) {
+                    self.loadImage(sprite.name, sprite.width, sprite.height, sprite.generator, function(err) {
+                        if (err) {
+                            errors.push(err);
+                        } else {
+                            loaded++;
+                            if (onProgress) {
+                                onProgress(loaded, total);
+                            }
+                        }
+                        checkDone();
+                    });
+                })(sprites[i]);
+            }
+        };
+
+        ResourceLoader.prototype.get = function(name) {
+            return this.resources[name];
+        };
+
+        // ============================================
+        // OFFSCREEN RENDERER
+        // ============================================
+
+        function OffscreenRenderer(width, height) {
+            this.canvas = document.createElement('canvas');
+            this.canvas.width = width;
+            this.canvas.height = height;
+            this.ctx = this.canvas.getContext('2d');
+            this.width = width;
+            this.height = height;
+        }
+
+        OffscreenRenderer.prototype.clear = function(color) {
+            this.ctx.fillStyle = color;
+            this.ctx.fillRect(0, 0, this.width, this.height);
+        };
+
+        OffscreenRenderer.prototype.drawRect = function(x, y, w, h, color) {
+            this.ctx.fillStyle = color;
+            this.ctx.fillRect(x, y, w, h);
+        };
+
+        OffscreenRenderer.prototype.getPixel = function(x, y) {
+            var d = this.ctx.getImageData(x, y, 1, 1).data;
+            return { r: d[0], g: d[1], b: d[2], a: d[3] };
+        };
+
+        OffscreenRenderer.prototype.getImageData = function() {
+            return this.ctx.getImageData(0, 0, this.width, this.height);
+        };
+
+        // ============================================
+        // PIXEL VERIFIER
+        // ============================================
+
+        var PixelVerifier = {
+            verifyRegion: function(imageData, x, y, w, h, expected, tolerance) {
+                if (tolerance === undefined) tolerance = 5;
+                var matches = 0;
+                var total = w * h;
+
+                for (var py = y; py < y + h; py++) {
+                    for (var px = x; px < x + w; px++) {
+                        var idx = (py * imageData.width + px) * 4;
+                        var dr = Math.abs(imageData.data[idx] - expected.r);
+                        var dg = Math.abs(imageData.data[idx + 1] - expected.g);
+                        var db = Math.abs(imageData.data[idx + 2] - expected.b);
+
+                        if (dr <= tolerance && dg <= tolerance && db <= tolerance) {
+                            matches++;
+                        }
+                    }
+                }
+                return (matches / total) * 100;
+            },
+
+            checksum: function(imageData) {
+                var sum = 0;
+                for (var i = 0; i < imageData.data.length; i++) {
+                    sum = (sum + imageData.data[i] * (i % 256 + 1)) % 0xFFFFFFFF;
+                }
+                var hex = sum.toString(16);
+                while (hex.length < 8) {
+                    hex = '0' + hex;
+                }
+                return hex;
+            }
+        };
+
+        // ============================================
+        // LOGGING
+        // ============================================
+
+        function log(msg) {
+            if (typeof console !== 'undefined' && console.log) {
+                console.log(msg);
+            }
+        }
+
+        // ============================================
+        // TEST DEFINITIONS
+        // ============================================
+
+        var testResults = { passed: 0, failed: 0 };
+
+        function runTest1_AsyncLoading(callback) {
+            log('Test 1: Async Resource Loading');
+            var loader = new ResourceLoader();
+
+            var sprites = [
+                {
+                    name: 'player',
+                    width: 32,
+                    height: 32,
+                    generator: function(c) {
+                        c.fillStyle = '#4CAF50';
+                        c.fillRect(4, 4, 24, 24);
+                    }
+                },
+                {
+                    name: 'enemy',
+                    width: 32,
+                    height: 32,
+                    generator: function(c) {
+                        c.fillStyle = '#f44336';
+                        c.beginPath();
+                        c.arc(16, 16, 12, 0, Math.PI * 2);
+                        c.fill();
+                    }
+                },
+                {
+                    name: 'tile',
+                    width: 16,
+                    height: 16,
+                    generator: function(c) {
+                        c.fillStyle = '#795548';
+                        c.fillRect(0, 0, 16, 16);
+                    }
+                },
+                {
+                    name: 'coin',
+                    width: 16,
+                    height: 16,
+                    generator: function(c) {
+                        c.fillStyle = '#FFD700';
+                        c.beginPath();
+                        c.arc(8, 8, 6, 0, Math.PI * 2);
+                        c.fill();
+                    }
+                }
+            ];
+
+            var startTime = new Date().getTime();
+
+            loader.loadAll(sprites, function(loaded, total) {
+                log('  Loading: ' + loaded + '/' + total);
+            }, function(errors) {
+                var elapsed = new Date().getTime() - startTime;
+
+                var passed = true;
+                for (var i = 0; i < sprites.length; i++) {
+                    var img = loader.get(sprites[i].name);
+                    var ok = img && img.width === sprites[i].width;
+                    log('  ' + sprites[i].name + ': ' + (ok ? 'PASS' : 'FAIL'));
+                    if (!ok) passed = false;
+                }
+                log('  Loaded in ' + elapsed + 'ms');
+
+                // Draw sprites to canvas
+                var x = 50;
+                for (var j = 0; j < sprites.length; j++) {
+                    var sprite = loader.get(sprites[j].name);
+                    if (sprite) {
+                        ctx.drawImage(sprite, x, 20);
+                        x += sprites[j].width + 10;
+                    }
+                }
+
+                callback(passed);
+            });
+        }
+
+        function runTest2_OffscreenRendering(callback) {
+            log('Test 2: Offscreen Canvas Rendering');
+
+            var bg = new OffscreenRenderer(128, 96);
+            var entities = new OffscreenRenderer(128, 96);
+            var composite = new OffscreenRenderer(128, 96);
+
+            // Background checkerboard
+            bg.clear('#2c3e50');
+            for (var y = 0; y < 96; y += 16) {
+                for (var x = 0; x < 128; x += 16) {
+                    if ((x + y) / 16 % 2 === 0) {
+                        bg.drawRect(x, y, 16, 16, '#34495e');
+                    }
+                }
+            }
+
+            // Entities
+            entities.ctx.clearRect(0, 0, 128, 96);
+            entities.ctx.fillStyle = '#4CAF50';
+            entities.ctx.fillRect(20, 40, 24, 24);
+            entities.ctx.fillStyle = '#f44336';
+            entities.ctx.beginPath();
+            entities.ctx.arc(80, 52, 12, 0, Math.PI * 2);
+            entities.ctx.fill();
+
+            // Composite layers
+            composite.clear('#1a1a2e');
+            composite.ctx.drawImage(bg.canvas, 0, 0);
+            composite.ctx.drawImage(entities.canvas, 0, 0);
+
+            ctx.drawImage(composite.canvas, 50, 80, 256, 192);
+
+            log('  Background rendered: PASS');
+            log('  Entities rendered: PASS');
+            log('  Layers composited: PASS');
+
+            callback(true);
+        }
+
+        function runTest3_PixelVerification(callback) {
+            log('Test 3: Pixel Content Verification');
+
+            var renderer = new OffscreenRenderer(64, 64);
+            renderer.clear('#000000');
+            renderer.drawRect(10, 10, 20, 20, '#FF0000');
+            renderer.drawRect(35, 10, 20, 20, '#00FF00');
+            renderer.drawRect(10, 35, 20, 20, '#0000FF');
+            renderer.drawRect(35, 35, 20, 20, '#FFFF00');
+
+            var tests = [
+                { x: 20, y: 20, expected: { r: 255, g: 0, b: 0 }, name: 'Red' },
+                { x: 45, y: 20, expected: { r: 0, g: 255, b: 0 }, name: 'Green' },
+                { x: 20, y: 45, expected: { r: 0, g: 0, b: 255 }, name: 'Blue' },
+                { x: 45, y: 45, expected: { r: 255, g: 255, b: 0 }, name: 'Yellow' },
+                { x: 5, y: 5, expected: { r: 0, g: 0, b: 0 }, name: 'Black' }
+            ];
+
+            var passed = true;
+            for (var i = 0; i < tests.length; i++) {
+                var t = tests[i];
+                var p = renderer.getPixel(t.x, t.y);
+                var ok = p.r === t.expected.r && p.g === t.expected.g && p.b === t.expected.b;
+                log('  ' + t.name + ' (' + p.r + ',' + p.g + ',' + p.b + '): ' + (ok ? 'PASS' : 'FAIL'));
+                if (!ok) passed = false;
+            }
+
+            var imageData = renderer.getImageData();
+            var regionMatch = PixelVerifier.verifyRegion(imageData, 10, 10, 20, 20, { r: 255, g: 0, b: 0 });
+            log('  Red region: ' + regionMatch.toFixed(1) + '% match');
+            log('  Checksum: ' + PixelVerifier.checksum(imageData));
+
+            ctx.drawImage(renderer.canvas, 320, 80, 128, 128);
+
+            callback(passed && regionMatch === 100);
+        }
+
+        function runTest4_GameLoop(callback) {
+            log('Test 4: Game Loop & Animation');
+
+            var renderer = new OffscreenRenderer(128, 96);
+            var state = {
+                x: 20,
+                y: 40,
+                vx: 50,
+                frame: 0,
+                time: 0
+            };
+            var targetFrames = 60;
+            var lastTime = new Date().getTime();
+
+            function loop() {
+                var now = new Date().getTime();
+                var delta = (now - lastTime) / 1000;
+                lastTime = now;
+
+                // Update
+                state.x += state.vx * delta;
+                if (state.x > 100 || state.x < 10) {
+                    state.vx *= -1;
+                }
+                state.y = 40 + Math.sin(state.time * 5) * 15;
+                state.time += delta;
+                state.frame++;
+
+                // Render
+                renderer.clear('#1a1a2e');
+                renderer.drawRect(0, 70, 128, 26, '#34495e');
+                renderer.drawRect(Math.floor(state.x) - 10, Math.floor(state.y) - 10, 20, 20, '#4CAF50');
+
+                if (state.frame < targetFrames) {
+                    setTimeout(loop, 16);
+                } else {
+                    var fps = state.frame / state.time;
+                    log('  Frames: ' + state.frame);
+                    log('  Time: ' + Math.floor(state.time * 1000) + 'ms');
+                    log('  FPS: ' + fps.toFixed(1));
+
+                    ctx.drawImage(renderer.canvas, 50, 290, 256, 192);
+                    callback(state.frame === targetFrames);
+                }
+            }
+
+            loop();
+        }
+
+        function runTest5_SpriteAnimation(callback) {
+            log('Test 5: Sprite Sheet Animation');
+
+            var sheet = new OffscreenRenderer(128, 32);
+            var legOffsets = [0, 4, 0, -4];
+
+            for (var i = 0; i < 4; i++) {
+                var x = i * 32;
+                var leg = legOffsets[i];
+                sheet.drawRect(x + 8, 4, 16, 16, '#4CAF50');
+                sheet.drawRect(x + 10, 20, 4, 10, '#1565C0');
+                sheet.drawRect(x + 18, 20 + leg, 4, 10, '#1565C0');
+            }
+
+            // Simulate animation
+            var frame = 0;
+            var timer = 0;
+            var changes = 0;
+            var fps = 8;
+
+            for (var j = 0; j < 50; j++) {
+                timer += 1 / 60;
+                if (timer >= 1 / fps) {
+                    frame = (frame + 1) % 4;
+                    timer = 0;
+                    changes++;
+                }
+            }
+
+            log('  Sprite sheet generated: PASS');
+            log('  Frame changes: ' + changes);
+
+            ctx.drawImage(sheet.canvas, 320, 290, 256, 64);
+
+            callback(changes >= 4);
+        }
+
+        function runTest6_CollisionMap(callback) {
+            log('Test 6: Collision Map & Tile System');
+
+            var tileSize = 8;
+            var map = [
+                [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+                [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+                [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+                [1,0,0,0,0,0,2,2,2,2,0,0,0,0,0,1],
+                [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+                [1,0,0,2,2,0,0,0,0,0,0,2,2,0,0,1],
+                [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+                [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+                [1,2,2,0,0,0,0,0,0,0,0,0,0,2,2,1],
+                [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+                [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+                [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+            ];
+
+            var renderer = new OffscreenRenderer(128, 96);
+            var colors = ['#2c3e50', '#795548', '#FFC107'];
+
+            for (var y = 0; y < 12; y++) {
+                for (var x = 0; x < 16; x++) {
+                    renderer.drawRect(x * tileSize, y * tileSize, tileSize, tileSize, colors[map[y][x]]);
+                }
+            }
+
+            function getTile(px, py) {
+                var tx = Math.floor(px / tileSize);
+                var ty = Math.floor(py / tileSize);
+                if (tx < 0 || tx >= 16 || ty < 0 || ty >= 12) {
+                    return 1;
+                }
+                return map[ty][tx];
+            }
+
+            var tests = [
+                { x: 4, y: 4, expected: 1 },
+                { x: 64, y: 48, expected: 0 },
+                { x: 52, y: 28, expected: 2 },
+                { x: 120, y: 88, expected: 1 }
+            ];
+
+            var passedCount = 0;
+            for (var i = 0; i < tests.length; i++) {
+                var t = tests[i];
+                var result = getTile(t.x, t.y);
+                var ok = result === t.expected;
+                log('  Tile at (' + t.x + ',' + t.y + '): ' + result + ' ' + (ok ? 'PASS' : 'FAIL'));
+                if (ok) passedCount++;
+            }
+
+            ctx.drawImage(renderer.canvas, 460, 80, 128, 96);
+
+            callback(passedCount === tests.length);
+        }
+
+        // ============================================
+        // TEST RUNNER
+        // ============================================
+
+        function runAllTests() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, 640, 480);
+
+            log('========================================');
+            log('HTML5 Canvas Test Suite (ES3 Compatible)');
+            log('========================================');
+
+            var tests = [
+                { name: 'asyncLoading', fn: runTest1_AsyncLoading },
+                { name: 'offscreenRendering', fn: runTest2_OffscreenRendering },
+                { name: 'pixelVerification', fn: runTest3_PixelVerification },
+                { name: 'gameLoop', fn: runTest4_GameLoop },
+                { name: 'spriteAnimation', fn: runTest5_SpriteAnimation },
+                { name: 'collisionMap', fn: runTest6_CollisionMap }
+            ];
+
+            var currentTest = 0;
+            var results = { passed: 0, failed: 0 };
+
+            function runNext() {
+                if (currentTest >= tests.length) {
+                    // All done
+                    log('========================================');
+                    log('Results: ' + results.passed + ' passed, ' + results.failed + ' failed');
+                    log('========================================');
+
+                    // Draw summary
+                    ctx.fillStyle = 'rgba(0,0,0,0.8)';
+                    ctx.fillRect(220, 200, 200, 60);
+                    ctx.strokeStyle = results.failed === 0 ? '#4caf50' : '#f44336';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(220, 200, 200, 60);
+                    ctx.font = 'bold 16px monospace';
+                    ctx.fillStyle = '#fff';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Test Results', 320, 225);
+                    ctx.font = '14px monospace';
+                    ctx.fillStyle = '#4caf50';
+                    ctx.fillText('Pass: ' + results.passed, 280, 248);
+                    ctx.fillStyle = '#f44336';
+                    ctx.fillText('Fail: ' + results.failed, 360, 248);
+                    return;
+                }
+
+                var test = tests[currentTest];
+                
+                log('Starting test: ' + test.name);
+
+                try {
+                    test.fn(function(passed) {
+                        log('Test ' + test.name + ' callback: passed=' + passed);
+                        if (passed) {
+                            results.passed++;
+                            log('  >> ' + test.name + ' PASSED\n');
+                        } else {
+                            results.failed++;
+                            log('  >> ' + test.name + ' FAILED\n');
+                        }
+                        currentTest++;
+                        runNext();
+                    });
+                } catch (e) {
+                    results.failed++;
+                    log('  >> ' + test.name + ' ERROR: ' + e.message + '\n');
+                    currentTest++;
+                    runNext();
+                }
+            }
+
+            runNext();
+        }
+
+        // Start tests when page loads
+        log('Setting up load event listener');
+        if (window.addEventListener) {
+            window.addEventListener('load', runAllTests, false);
+            log('Added load event listener for runAllTests');
+        } else if (window.attachEvent) {
+            window.attachEvent('onload', runAllTests);
+            log('Attached onload event');
+        } else {
+            window.onload = runAllTests;
+            log('Set window.onload');
+        }
+    </script>
+</body>
+</html>

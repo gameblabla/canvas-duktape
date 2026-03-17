@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Canvas drawImage Test</title>
+  <style>
+    body { margin: 0; background: #111; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="c" width="400" height="400"></canvas>
+<canvas id="scratch" width="400" height="80" style="display:none"></canvas>
+<script>
+(function() {
+  var passed = 0, failed = 0;
+  var canvas  = document.getElementById('c');
+  var scratch = document.getElementById('scratch');
+  var ctx, sctx;
+
+  function section(title) {
+    console.log('\n=== ' + title + ' ===');
+  }
+
+  function info(msg) {
+    console.log('  ' + msg);
+  }
+
+  function result(name, ok, detail) {
+    var status = ok ? 'PASS' : 'FAIL';
+    console.log('[' + status + '] ' + name + (detail ? '  [' + detail + ']' : ''));
+    if (ok) { passed++; } else { failed++; }
+  }
+
+  function px(context, x, y) {
+    return context.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
+  }
+
+  function approx(a, b, tol) {
+    return Math.abs(a - b) <= (tol || 4);
+  }
+
+  function clear() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  // Spritesheet: 128x128, four 32x32 tiles
+  // tile(0,0)=opaque red  tile(1,0)=opaque green
+  // tile(0,1)=opaque blue tile(1,1)=semi-transparent yellow (alpha=128)
+  function makeSpriteSheet() {
+    var ss = document.createElement('canvas');
+    ss.width = 128; ss.height = 128;
+    var c2 = ss.getContext('2d');
+    c2.fillStyle = 'rgb(255,0,0)';        c2.fillRect(0,  0,  32, 32);
+    c2.fillStyle = 'rgb(0,255,0)';        c2.fillRect(32, 0,  32, 32);
+    c2.fillStyle = 'rgb(0,0,255)';        c2.fillRect(0,  32, 32, 32);
+    c2.clearRect(32, 32, 32, 32);
+    c2.fillStyle = 'rgba(255,255,0,0.5)'; c2.fillRect(32, 32, 32, 32);
+    return ss;
+  }
+
+  // T1: Basic blit
+  function t1_basicBlit() {
+    section('T1 · Basic drawImage Blit');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.drawImage(ss, 0, 0);
+    var r = px(ctx, 16, 16);
+    result('Red tile R channel correct',   approx(r[0], 255, 5), 'R=' + r[0]);
+    result('Red tile G channel correct',   approx(r[1], 0,   8), 'G=' + r[1]);
+    result('Red tile fully opaque',         r[3] === 255,         'A=' + r[3]);
+    var g = px(ctx, 48, 16);
+    result('Green tile G channel correct', approx(g[1], 255, 5), 'G=' + g[1]);
+    var b = px(ctx, 16, 48);
+    result('Blue tile B channel correct',  approx(b[2], 255, 5), 'B=' + b[2]);
+  }
+
+  // T2: Source rectangle clipping
+  function t2_sourceRect() {
+    section('T2 · Source Rectangle (Spritesheet Slicing)');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.drawImage(ss, 32, 0, 32, 32, 100, 50, 32, 32);
+    var g = px(ctx, 116, 66);
+    result('Correct tile selected (green)',      approx(g[1], 255, 5), 'G=' + g[1]);
+    result('Adjacent tile NOT bled (R near 0)',  g[0] < 20,            'R=' + g[0]);
+    result('Adjacent tile NOT bled (B near 0)',  g[2] < 20,            'B=' + g[2]);
+    ctx.drawImage(ss, 0, 32, 32, 32, 200, 50, 32, 32);
+    var bl = px(ctx, 216, 66);
+    result('Blue tile B channel via src rect',   approx(bl[2], 255, 5), 'B=' + bl[2]);
+    result('Blue tile R channel near zero',       bl[0] < 20,            'R=' + bl[0]);
+  }
+
+  // T3: Destination scaling
+  function t3_scaling() {
+    section('T3 · Destination Scaling');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.drawImage(ss, 0, 0, 32, 32, 0, 100, 64, 64);
+    var r = px(ctx, 32, 132);
+    result('Scaled-up tile renders (R present)',    approx(r[0], 255, 8), 'R=' + r[0]);
+    result('Scaled-up tile G near zero',             r[1] < 20,            'G=' + r[1]);
+    ctx.drawImage(ss, 0, 0, 32, 32, 100, 100, 16, 16);
+    var r2 = px(ctx, 108, 108);
+    result('Scaled-down tile renders (R present)',  approx(r2[0], 255, 8), 'R=' + r2[0]);
+    ctx.drawImage(ss, 0, 0, 32, 32, 200, 100, 20, 48);
+    var r3 = px(ctx, 210, 124);
+    result('Non-POT scaled tile has color',         r3[0] > 200,           'R=' + r3[0]);
+  }
+
+  // T4: save/restore + transform
+  function t4_saveRestore() {
+    section('T4 · save() / restore() with drawImage');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.save();
+    ctx.translate(10, 180);
+    ctx.drawImage(ss, 0, 0, 32, 32, 0, 0, 32, 32);
+    var r = px(ctx, 26, 196);
+    result('drawImage respects translate', approx(r[0], 255, 8), 'R=' + r[0]);
+    ctx.restore();
+    ctx.drawImage(ss, 32, 0, 32, 32, 300, 180, 32, 32);
+    var g = px(ctx, 316, 196);
+    result('After restore: no residual transform', approx(g[1], 255, 8), 'G=' + g[1]);
+    var leak = px(ctx, 326, 196);
+    result('Transform state isolated after restore', leak[0] < 30 || approx(leak[1], 255, 8), '');
+  }
+
+  // T5: globalAlpha x drawImage
+  // Chrome behaviour: red(255,0,0) at globalAlpha=0.5 over white(255,255,255)
+  // Porter-Duff source-over: out = src*alpha + dst*(1-alpha)
+  //   R: 255*0.5 + 255*0.5 = 255  (both red, so R stays 255 — this is correct)
+  //   G: 0*0.5  + 255*0.5  = 127  (only white contributes green)
+  //   B: 0*0.5  + 255*0.5  = 127
+  // So testing R<255 was wrong. Test G and B drop instead.
+  function t5_globalAlphaDrawImage() {
+    section('T5 · globalAlpha x drawImage');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 230, 200, 50);
+    ctx.globalAlpha = 0.5;
+    ctx.drawImage(ss, 0, 0, 32, 32, 10, 234, 32, 32);
+    ctx.globalAlpha = 1.0;
+    var p = px(ctx, 26, 250);
+    info('globalAlpha 0.5 red over white: R=' + p[0] + ' G=' + p[1] + ' B=' + p[2] + ' A=' + p[3]);
+    // R=255 is correct: red src + white dst both contribute full red
+    result('globalAlpha 0.5 R channel correct (~255)',  approx(p[0], 255, 5),   'R=' + p[0]);
+    // G drops to ~127: only the white background contributes G at 50%
+    result('globalAlpha 0.5 G channel reduced (~127)',  approx(p[1], 127, 10),  'G=' + p[1]);
+    // B drops to ~127: same reasoning as G
+    result('globalAlpha 0.5 B channel reduced (~127)',  approx(p[2], 127, 10),  'B=' + p[2]);
+    result('Result is fully composited (A=255)',         p[3] === 255,           'A=' + p[3]);
+    ctx.globalAlpha = 0.0;
+    ctx.drawImage(ss, 32, 0, 32, 32, 60, 234, 32, 32);
+    ctx.globalAlpha = 1.0;
+    var p2 = px(ctx, 76, 250);
+    result('globalAlpha 0.0 — tile invisible (G near white)', p2[1] > 240, 'G=' + p2[1]);
+  }
+
+  // T6: Semi-transparent source tile
+  function t6_semiTransparentSource() {
+    section('T6 · Semi-Transparent Source Tile via drawImage');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.fillStyle = 'rgb(0,0,255)';
+    ctx.fillRect(0, 290, 80, 50);
+    ctx.drawImage(ss, 32, 32, 32, 32, 4, 294, 32, 32);
+    var p = px(ctx, 20, 310);
+    info('Semi-transparent yellow over blue: R=' + p[0] + ' G=' + p[1] + ' B=' + p[2] + ' A=' + p[3]);
+    result('Semi-trans src: R blends with bg',   p[0] > 50,  'R=' + p[0]);
+    result('Semi-trans src: G blends with bg',   p[1] > 50,  'G=' + p[1]);
+    result('Semi-trans src: B not zeroed',        p[2] > 50,  'B=' + p[2]);
+    result('Semi-trans src: result opaque',       p[3] > 250, 'A=' + p[3]);
+  }
+
+  // T7: Offscreen canvas as source
+  function t7_offscreenCanvas() {
+    section('T7 · Offscreen Canvas as drawImage Source');
+    var off = document.createElement('canvas');
+    off.width = 64; off.height = 64;
+    var oc = off.getContext('2d');
+    oc.fillStyle = 'rgb(255,0,255)';
+    oc.fillRect(0, 0, 64, 64);
+    oc.fillStyle = 'rgba(255,255,255,0.5)';
+    oc.beginPath(); oc.arc(32, 32, 20, 0, Math.PI * 2); oc.fill();
+    clear();
+    ctx.drawImage(off, 300, 10);
+    var c = px(ctx, 332, 42);
+    info('Offscreen blended circle center: R=' + c[0] + ' G=' + c[1] + ' B=' + c[2]);
+    result('Offscreen canvas blit: R present',           c[0] > 150, 'R=' + c[0]);
+    result('Offscreen canvas blit: G lifted',            c[1] > 80,  'G=' + c[1]);
+    result('Offscreen canvas blit: B present',           c[2] > 150, 'B=' + c[2]);
+    var e = px(ctx, 305, 15);
+    result('Offscreen canvas blit: corner magenta G~0',  e[1] < 30,  'G=' + e[1]);
+  }
+
+  // T8: Sub-pixel coordinates
+  function t8_subPixel() {
+    section('T8 · Sub-Pixel / Fractional Coordinates');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.drawImage(ss, 0, 0, 32, 32, 0.7, 350.4, 32, 32);
+    var p = px(ctx, 8, 358);
+    result('Sub-pixel blit does not produce blank tile', p[0] > 150, 'R=' + p[0]);
+    ctx.drawImage(ss, 0, 0, 32, 32, 50.5, 350.5, 32, 32);
+    var p2 = px(ctx, 66, 366);
+    result('Half-pixel offset blit: R channel present', p2[0] > 200, 'R=' + p2[0]);
+  }
+
+  // T9: Rapid consecutive blits
+  function t9_rapidBlits() {
+    section('T9 · Rapid Consecutive Blits (Game Loop Simulation)');
+    var ss = makeSpriteSheet();
+    clear();
+    var tiles = [[0,0],[32,0],[0,32],[32,32]];
+    var i;
+    for (i = 0; i < 20; i++) {
+      var t = tiles[i % 4];
+      ctx.drawImage(ss, t[0], t[1], 32, 32, i * 20, 370, 18, 18);
+    }
+    var r  = px(ctx, 9,  379);
+    var g  = px(ctx, 29, 379);
+    result('Rapid blit 0: red tile correct',        r[0] > 200 && r[1] < 20, 'R=' + r[0] + ' G=' + r[1]);
+    result('Rapid blit 1: green tile correct',       g[1] > 200 && g[0] < 20, 'R=' + g[0] + ' G=' + g[1]);
+    var r2 = px(ctx, 89, 379);
+    result('Rapid blit 4: red repeated correctly',  r2[0] > 200,              'R=' + r2[0]);
+  }
+
+  // T10: Double-buffering
+  // Fix: tiles drawn at y=0 in scratch (height=80), blit entire scratch to main
+  // canvas at (0,0), read tile centers at y=16.
+  function t10_doubleBuffer() {
+    section('T10 · Double-Buffering via Scratch Canvas');
+    var ss = makeSpriteSheet();
+
+    sctx.clearRect(0, 0, scratch.width, scratch.height);
+    sctx.fillStyle = 'rgb(20,20,20)';
+    sctx.fillRect(0, 0, scratch.width, scratch.height);
+    sctx.drawImage(ss, 0,  0, 32, 32, 10, 0, 32, 32);   // red   at (10,0)-(42,32)
+    sctx.drawImage(ss, 32, 0, 32, 32, 60, 0, 32, 32);   // green at (60,0)-(92,32)
+
+    // Blit full scratch onto main canvas at origin
+    clear();
+    ctx.drawImage(scratch, 0, 0, scratch.width, scratch.height,
+                            0, 0, scratch.width, scratch.height);
+
+    var r  = px(ctx, 26, 16);   // center of red tile
+    var g  = px(ctx, 76, 16);   // center of green tile
+    var bg = px(ctx, 200, 16);  // background (dark fill, no tile here)
+
+    info('Double-buffer red:   R=' + r[0]  + ' G=' + r[1]  + ' A=' + r[3]);
+    info('Double-buffer green: R=' + g[0]  + ' G=' + g[1]  + ' A=' + g[3]);
+    info('Double-buffer bg:    R=' + bg[0] + ' G=' + bg[1] + ' A=' + bg[3]);
+
+    result('Double-buffer: red tile transferred',    r[0]  > 200 && r[1]  < 30,  'R=' + r[0]);
+    result('Double-buffer: green tile transferred',   g[1]  > 200 && g[0]  < 30,  'G=' + g[1]);
+    // dark fill is (20,20,20,255) — opaque, R near 20
+    result('Double-buffer: background preserved',    bg[0] < 40  && bg[3] === 255, 'R=' + bg[0] + ' A=' + bg[3]);
+  }
+
+  // T11: clearRect interaction
+  function t11_clearRectInteraction() {
+    section('T11 · clearRect Interaction');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(ss, 0, 0, 32, 32, 20, 20, 32, 32);
+    ctx.clearRect(24, 24, 16, 16);
+    var cleared = px(ctx, 32, 32);
+    result('clearRect makes area transparent (A=0)', cleared[3] === 0, 'A=' + cleared[3]);
+    var notCleared = px(ctx, 22, 22);
+    result('Area outside clearRect still has red tile', notCleared[0] > 200, 'R=' + notCleared[0]);
+    var bg = px(ctx, 200, 200);
+    result('White bg outside sprite intact', bg[0] > 250 && bg[3] === 255, 'R=' + bg[0] + ' A=' + bg[3]);
+  }
+
+  // T12: globalCompositeOperation source-over
+  function t12_compositeSourceOver() {
+    section('T12 · globalCompositeOperation source-over');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgb(0,0,255)';
+    ctx.fillRect(50, 50, 60, 60);
+    ctx.drawImage(ss, 32, 32, 32, 32, 60, 60, 32, 32);
+    ctx.globalCompositeOperation = 'source-over';
+    var p = px(ctx, 76, 76);
+    info('source-over blend: R=' + p[0] + ' G=' + p[1] + ' B=' + p[2]);
+    result('source-over: R present (yellow contrib)',  p[0] > 50,  'R=' + p[0]);
+    result('source-over: G present (yellow contrib)',  p[1] > 50,  'G=' + p[1]);
+    result('source-over: B preserved from bg',         p[2] > 50,  'B=' + p[2]);
+  }
+
+  // T13: getImageData readback accuracy
+  function t13_readbackAccuracy() {
+    section('T13 · getImageData Accuracy After drawImage');
+    var ss = makeSpriteSheet();
+    clear();
+    ctx.drawImage(ss, 0, 0, 32, 32, 0, 0, 32, 32);
+    var errors = 0;
+    var x, y, p;
+    for (y = 2; y < 30; y += 4) {
+      for (x = 2; x < 30; x += 4) {
+        p = px(ctx, x, y);
+        if (p[0] < 240 || p[1] > 15 || p[2] > 15 || p[3] !== 255) { errors++; }
+      }
+    }
+    result('Opaque tile readback: 0 pixel errors across grid', errors === 0, errors + ' errors');
+    ctx.drawImage(ss, 32, 0, 32, 32, 40, 0, 32, 32);
+    var bleedErrors = 0;
+    for (y = 2; y < 30; y += 4) {
+      p = px(ctx, 42 + y % 28, y);
+      if (p[0] > 15) { bleedErrors++; }
+    }
+    result('No color bleed between adjacent spritesheet tiles', bleedErrors === 0, bleedErrors + ' bleed pixels');
+  }
+
+  function runAll() {
+    ctx  = canvas.getContext('2d');
+    sctx = scratch.getContext('2d');
+    if (!ctx || !sctx) {
+      console.log('[FATAL] Could not get 2D context');
+      return;
+    }
+    console.log('Canvas drawImage / Impact.js Regression Suite');
+    console.log('==============================================');
+    t1_basicBlit();
+    t2_sourceRect();
+    t3_scaling();
+    t4_saveRestore();
+    t5_globalAlphaDrawImage();
+    t6_semiTransparentSource();
+    t7_offscreenCanvas();
+    t8_subPixel();
+    t9_rapidBlits();
+    t10_doubleBuffer();
+    t11_clearRectInteraction();
+    t12_compositeSourceOver();
+    t13_readbackAccuracy();
+    console.log('\n==============================================');
+    console.log('PASSED: ' + passed + '  FAILED: ' + failed + '  TOTAL: ' + (passed + failed));
+    if (failed === 0) {
+      console.log('ALL TESTS PASSED');
+    } else {
+      console.log(failed + ' TEST(S) FAILED - check above for details');
+    }
+  }
+
+  if (window.addEventListener) {
+    window.addEventListener('load', runAll, false);
+  } else if (window.attachEvent) {
+    window.attachEvent('onload', runAll);
+  } else {
+    window.onload = runAll;
+  }
+})();
+</script>
+</body>
+</html>

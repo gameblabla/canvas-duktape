@@ -18,6 +18,9 @@ static SDL_Texture*  g_offscreen        = NULL;
 static int           g_win_w            = 120;
 static int           g_win_h            = 160;
 
+/* Resource directory for loading fonts and other assets */
+static char g_resource_dir[1024] = {0};
+
 /* Font cache */
 #define MAX_FONTS 16
 static TTF_Font* g_font_default = NULL;
@@ -31,11 +34,33 @@ static int g_clip_x = 0, g_clip_y = 0, g_clip_w = 0, g_clip_h = 0;
 /* ============================================================================
  * Internal helpers
  * ============================================================================ */
+
+/* Set resource directory for loading fonts and assets */
+void renderer_sdl2_set_resource_dir(const char* path) {
+    if (path) {
+        strncpy(g_resource_dir, path, sizeof(g_resource_dir) - 1);
+    } else {
+        g_resource_dir[0] = '\0';
+    }
+}
+
+/* Build full path for a resource file */
+static void get_resource_path(const char* filename, char* out, size_t out_size) {
+    if (g_resource_dir[0] != '\0') {
+        snprintf(out, out_size, "%s/%s", g_resource_dir, filename);
+    } else {
+        strncpy(out, filename, out_size - 1);
+        out[out_size - 1] = '\0';
+    }
+}
+
 static TTF_Font* get_font_for_size(int size) {
     for (int i = 0; i < g_font_cache_count; i++)
         if (g_font_cache[i].size == size) return g_font_cache[i].font;
     if (g_font_cache_count < MAX_FONTS) {
-        TTF_Font* f = TTF_OpenFont("Arial.ttf", size);
+        char font_path[1024];
+        get_resource_path("Arial.ttf", font_path, sizeof(font_path));
+        TTF_Font* f = TTF_OpenFont(font_path, size);
         if (f) {
             g_font_cache[g_font_cache_count].size = size;
             g_font_cache[g_font_cache_count].font = f;
@@ -218,7 +243,9 @@ static int r_init(int w, int h, const char* title) {
         fprintf(stderr, "TTF_Init: %s\n", TTF_GetError());
         IMG_Quit(); SDL_Quit(); return 0;
     }
-    g_font_default = TTF_OpenFont("Arial.ttf", 20);
+    char font_path[1024];
+    get_resource_path("Arial.ttf", font_path, sizeof(font_path));
+    g_font_default = TTF_OpenFont(font_path, 20);
     if (!g_font_default)
         fprintf(stderr, "Warning: failed to load Arial.ttf: %s\n", TTF_GetError());
 

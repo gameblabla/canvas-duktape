@@ -1,0 +1,92 @@
+[parse_html] Found inline script (14096 bytes)
+Parsed Images:
+[main] Total scripts: 1
+[main] Script 0: src='', is_inline=1
+[main] Before inline scripts, g_canvas_count=2
+[main] Executing inline script 0...
+[main] Inline script 0 executed successfully
+Canvas drawImage / Impact.js Regression Suite
+==============================================
+
+=== T1 · Basic drawImage Blit ===
+[PASS] Red tile R channel correct  [R=255]
+[PASS] Red tile G channel correct  [G=0]
+[PASS] Red tile fully opaque  [A=255]
+[PASS] Green tile G channel correct  [G=255]
+[PASS] Blue tile B channel correct  [B=255]
+
+=== T2 · Source Rectangle (Spritesheet Slicing) ===
+[PASS] Correct tile selected (green)  [G=255]
+[PASS] Adjacent tile NOT bled (R near 0)  [R=0]
+[PASS] Adjacent tile NOT bled (B near 0)  [B=0]
+[PASS] Blue tile B channel via src rect  [B=255]
+[PASS] Blue tile R channel near zero  [R=0]
+
+=== T3 · Destination Scaling ===
+[PASS] Scaled-up tile renders (R present)  [R=255]
+[PASS] Scaled-up tile G near zero  [G=0]
+[PASS] Scaled-down tile renders (R present)  [R=255]
+[PASS] Non-POT scaled tile has color  [R=255]
+
+=== T4 · save() / restore() with drawImage ===
+[PASS] drawImage respects translate  [R=255]
+[PASS] After restore: no residual transform  [G=255]
+[PASS] Transform state isolated after restore
+
+=== T5 · globalAlpha x drawImage ===
+  globalAlpha 0.5 red over white: R=255 G=127 B=127 A=255
+[PASS] globalAlpha 0.5 R channel correct (~255)  [R=255]
+[PASS] globalAlpha 0.5 G channel reduced (~127)  [G=127]
+[PASS] globalAlpha 0.5 B channel reduced (~127)  [B=127]
+[PASS] Result is fully composited (A=255)  [A=255]
+[PASS] globalAlpha 0.0 — tile invisible (G near white)  [G=255]
+
+=== T6 · Semi-Transparent Source Tile via drawImage ===
+  Semi-transparent yellow over blue: R=63 G=63 B=128 A=255
+[PASS] Semi-trans src: R blends with bg  [R=63]
+[PASS] Semi-trans src: G blends with bg  [G=63]
+[PASS] Semi-trans src: B not zeroed  [B=128]
+[PASS] Semi-trans src: result opaque  [A=255]
+
+=== T7 · Offscreen Canvas as drawImage Source ===
+  Offscreen blended circle center: R=255 G=127 B=255
+[PASS] Offscreen canvas blit: R present  [R=255]
+[PASS] Offscreen canvas blit: G lifted  [G=127]
+[PASS] Offscreen canvas blit: B present  [B=255]
+[PASS] Offscreen canvas blit: corner magenta G~0  [G=0]
+
+=== T8 · Sub-Pixel / Fractional Coordinates ===
+[PASS] Sub-pixel blit does not produce blank tile  [R=255]
+[PASS] Half-pixel offset blit: R channel present  [R=255]
+
+=== T9 · Rapid Consecutive Blits (Game Loop Simulation) ===
+[PASS] Rapid blit 0: red tile correct  [R=255 G=0]
+[PASS] Rapid blit 1: green tile correct  [R=0 G=255]
+[PASS] Rapid blit 4: red repeated correctly  [R=255]
+
+=== T10 · Double-Buffering via Scratch Canvas ===
+  Double-buffer red:   R=255 G=0 A=255
+  Double-buffer green: R=0 G=255 A=255
+  Double-buffer bg:    R=20 G=20 A=255
+[PASS] Double-buffer: red tile transferred  [R=255]
+[PASS] Double-buffer: green tile transferred  [G=255]
+[PASS] Double-buffer: background preserved  [R=20 A=255]
+
+=== T11 · clearRect Interaction ===
+[PASS] clearRect makes area transparent (A=0)  [A=0]
+[PASS] Area outside clearRect still has red tile  [R=255]
+[PASS] White bg outside sprite intact  [R=255 A=255]
+
+=== T12 · globalCompositeOperation source-over ===
+  source-over blend: R=63 G=63 B=128
+[PASS] source-over: R present (yellow contrib)  [R=63]
+[PASS] source-over: G present (yellow contrib)  [G=63]
+[PASS] source-over: B preserved from bg  [B=128]
+
+=== T13 · getImageData Accuracy After drawImage ===
+[PASS] Opaque tile readback: 0 pixel errors across grid  [0 errors]
+[PASS] No color bleed between adjacent spritesheet tiles  [0 bleed pixels]
+
+==============================================
+PASSED: 46  FAILED: 0  TOTAL: 46
+ALL TESTS PASSED

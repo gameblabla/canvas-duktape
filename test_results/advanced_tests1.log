@@ -1,0 +1,34 @@
+[parse_html] Found inline script (24034 bytes)
+Parsed Images:
+[main] Total scripts: 1
+[main] Script 0: src='', is_inline=1
+[main] Before inline scripts, g_canvas_count=2
+[main] Executing inline script 0...
+[main] Inline script 0 executed successfully
+Impact.js Canvas Rendering Test Suite (FIXED)
+=====================================
+Focus: Sprite sheets, transformations, pixel-art, state management
+
+
+=== Test 1: 9-Parameter drawImage Clipping ===
+[PASS] Sprite clip marker detected - R=255 G=255 B=255
+[PASS] Clipped tile shows correct base color - R=0 G=255 B=0
+[PASS] No adjacent tile bleed - Edge: R=0 G=0 B=0 A=0
+
+=== Test 2: imageSmoothingEnabled (Pixel Art) ===
+[PASS] imageSmoothing property available
+[PASS] Scaled pixel art remains crisp
+
+=== Test 3: Transformation State (save/restore) ===
+[PASS] Transformed draw at correct position
+[PASS] Post-restore draw not affected by prior transform
+[PASS] fillStyle functional after restore
+
+=== Test 4: Sub-pixel Positioning (Tile Gaps) ===
+[PASS] Adjacent integer-positioned tiles have no gaps
+[PASS] Sub-pixel positioned tiles render - G=255
+
+=== Test 5: Flip/Mirror Rendering (scaleX -1) ===
+[PASS] Normal draw has correct left/right colors
+[PASS] Flipped draw has mirrored colors - Left(R255) Right(R255)
+[window load] err: ReferenceError: identifier 'testOffscreenTransfer' undefined
