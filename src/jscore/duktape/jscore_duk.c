@@ -176,6 +176,12 @@ static duk_ret_t js_audio_play(duk_context* ctx);
 static duk_ret_t js_audio_pause(duk_context* ctx);
 static duk_ret_t js_audio_canPlayType(duk_context* ctx);
 static duk_ret_t js_audio_addEventListener(duk_context* ctx);
+static duk_ret_t js_audio_currentTime_getter(duk_context* ctx);
+static duk_ret_t js_audio_currentTime_setter(duk_context* ctx);
+static duk_ret_t js_audio_volume_getter(duk_context* ctx);
+static duk_ret_t js_audio_volume_setter(duk_context* ctx);
+static duk_ret_t js_audio_loop_getter(duk_context* ctx);
+static duk_ret_t js_audio_loop_setter(duk_context* ctx);
 static duk_ret_t js_requestAnimationFrame(duk_context* ctx);
 static duk_ret_t js_cancelAnimationFrame(duk_context* ctx);
 static duk_ret_t js_html_element_ctor(duk_context* ctx);
@@ -1492,6 +1498,17 @@ static int alloc_audio_element(void) {
     return -1;
 }
 
+/* Find audio element by src */
+static int find_audio_element_by_src(const char* src) {
+    for (int i = 0; i < MAX_HTML5_AUDIO_ELEMENTS; i++) {
+        if (g_audio_elements[i].src[0] != '\0' && 
+            strcmp(g_audio_elements[i].src, src) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 static duk_ret_t js_audio_load(duk_context* ctx) {
     /* Stack: [args...] */
     duk_push_this(ctx);  /* stack: [this] */
@@ -1504,24 +1521,39 @@ static duk_ret_t js_audio_load(duk_context* ctx) {
         return 1;
     }
 
-    /* Allocate element slot - each Audio object gets its own native slot
-     * This allows multiple instances of the same sound to play concurrently */
-    int elem_idx = alloc_audio_element();
-    if (elem_idx < 0) {
-        fprintf(stderr, "[Audio] Too many audio elements\n");
-        duk_pop_2(ctx);  /* stack: [] */
-        duk_push_this(ctx);  /* stack: [this] */
-        return 1;
+    /* Get existing element index from this object */
+    duk_dup(ctx, 0);  /* stack: [this, src, this] */
+    duk_get_prop_string(ctx, -1, "_audioIndex");
+    int elem_idx = duk_get_int(ctx, -1);
+    duk_pop(ctx);  /* stack: [this, src] */
+
+    /* If no element exists yet, allocate one */
+    if (elem_idx < 0 || elem_idx >= MAX_HTML5_AUDIO_ELEMENTS || 
+        g_audio_elements[elem_idx].audio_index >= 0) {
+        elem_idx = alloc_audio_element();
+        if (elem_idx < 0) {
+            fprintf(stderr, "[Audio] Too many audio elements\n");
+            duk_pop_2(ctx);  /* stack: [] */
+            duk_push_this(ctx);  /* stack: [this] */
+            return 1;
+        }
+        /* Update the JS object with new element index */
+        duk_dup(ctx, 0);  /* stack: [this, src, this] */
+        duk_push_int(ctx, elem_idx);
+        duk_put_prop_string(ctx, -2, "_audioIndex");  /* stack: [this, src, this] */
+        duk_pop(ctx);  /* stack: [this, src] */
+        
+        Html5AudioElement* elem = &g_audio_elements[elem_idx];
+        memset(elem, 0, sizeof(Html5AudioElement));
+        elem->audio_index = -1;
+        elem->volume = 1.0f;
+        elem->paused = 1;
+        elem->canplaythrough_funcId = -1;
+        elem->loadeddata_funcId = -1;
+        strncpy(elem->src, src, sizeof(elem->src) - 1);
     }
 
     Html5AudioElement* elem = &g_audio_elements[elem_idx];
-    memset(elem, 0, sizeof(Html5AudioElement));
-    elem->audio_index = -1;
-    elem->volume = 1.0f;
-    elem->paused = 1;
-    elem->canplaythrough_funcId = -1;
-    elem->loadeddata_funcId = -1;
-    strncpy(elem->src, src, sizeof(elem->src) - 1);
 
     /* Load audio into native backend (path resolution handled in sound_sdl2.c) */
     int native_index;
@@ -1543,6 +1575,32 @@ static duk_ret_t js_audio_load(duk_context* ctx) {
         duk_push_number(ctx, duration);
         duk_put_prop_string(ctx, -2, "duration");  /* stack: [this, src, this] */
         duk_pop(ctx);  /* stack: [this, src] */
+
+        /* Trigger loadeddata and canplaythrough events for Impact.js compatibility */
+        if (elem->loadeddata_funcId >= 0) {
+            push_stored_func(ctx, elem->loadeddata_funcId);
+            if (duk_is_callable(ctx, -1)) {
+                duk_dup(ctx, 0);  /* this as argument */
+                if (duk_pcall(ctx, 1) != 0) {
+                    fprintf(stderr, "[Audio.loadeddata] %s\n", duk_safe_to_string(ctx, -1));
+                }
+                duk_pop(ctx);
+            } else {
+                duk_pop(ctx);
+            }
+        }
+        if (elem->canplaythrough_funcId >= 0) {
+            push_stored_func(ctx, elem->canplaythrough_funcId);
+            if (duk_is_callable(ctx, -1)) {
+                duk_dup(ctx, 0);  /* this as argument */
+                if (duk_pcall(ctx, 1) != 0) {
+                    fprintf(stderr, "[Audio.canplaythrough] %s\n", duk_safe_to_string(ctx, -1));
+                }
+                duk_pop(ctx);
+            } else {
+                duk_pop(ctx);
+            }
+        }
     } else {
         fprintf(stderr, "[Audio] Failed to load: %s\n", src);
         /* stack: [this, src] */
@@ -1598,21 +1656,120 @@ static duk_ret_t js_audio_pause(duk_context* ctx) {
 
     if (native_index >= 0) {
         sound_pause(native_index);
-        
+
         /* Update element state */
         duk_get_prop_string(ctx, -1, "_audioIndex");
         int elem_idx = duk_get_int(ctx, -1);
         duk_pop(ctx);
-        
+
         if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
             g_audio_elements[elem_idx].paused = 1;
         }
-        
+
         duk_push_true(ctx);
         duk_put_prop_string(ctx, -2, "paused");
     }
 
     duk_push_this(ctx);
+    return 1;
+}
+
+static duk_ret_t js_audio_currentTime_getter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_nativeIndex");
+    int native_index = duk_get_int(ctx, -1);
+    duk_pop(ctx);
+
+    if (native_index >= 0) {
+        float time = sound_get_current_time(native_index);
+        duk_push_number(ctx, time);
+    } else {
+        duk_push_number(ctx, 0);
+    }
+    return 1;
+}
+
+static duk_ret_t js_audio_currentTime_setter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_nativeIndex");
+    int native_index = duk_get_int(ctx, -1);
+    duk_pop(ctx);
+
+    float time = (float)duk_get_number(ctx, 0);
+
+    if (native_index >= 0) {
+        sound_set_current_time(native_index, time);
+    }
+
+    duk_push_number(ctx, time);
+    return 1;
+}
+
+static duk_ret_t js_audio_volume_getter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_audioIndex");
+    int elem_idx = duk_get_int(ctx, -1);
+    duk_pop(ctx);
+
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        duk_push_number(ctx, g_audio_elements[elem_idx].volume);
+    } else {
+        duk_push_number(ctx, 1.0);
+    }
+    return 1;
+}
+
+static duk_ret_t js_audio_volume_setter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_audioIndex");
+    int elem_idx = duk_get_int(ctx, -1);
+    duk_pop(ctx);
+
+    float volume = (float)duk_get_number(ctx, 0);
+
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        g_audio_elements[elem_idx].volume = volume;
+        /* Also update native source */
+        if (g_audio_elements[elem_idx].audio_index >= 0) {
+            sound_set_volume(g_audio_elements[elem_idx].audio_index, volume);
+        }
+    }
+
+    duk_push_number(ctx, volume);
+    return 1;
+}
+
+static duk_ret_t js_audio_loop_getter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_audioIndex");
+    int elem_idx = duk_get_int(ctx, -1);
+    duk_pop(ctx);
+
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        duk_push_boolean(ctx, g_audio_elements[elem_idx].loop);
+    } else {
+        duk_push_false(ctx);
+    }
+    return 1;
+}
+
+static duk_ret_t js_audio_loop_setter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_audioIndex");
+    int elem_idx = duk_get_int(ctx, -1);
+    duk_pop(ctx);
+
+    int loop = duk_get_boolean(ctx, 0);
+
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        g_audio_elements[elem_idx].loop = loop;
+        /* Also update native source */
+        if (g_audio_elements[elem_idx].audio_index >= 0) {
+            sound_set_loop(g_audio_elements[elem_idx].audio_index, loop);
+        }
+    }
+
+    duk_push_boolean(ctx, loop);
     return 1;
 }
 
@@ -1633,11 +1790,26 @@ static duk_ret_t js_audio_addEventListener(duk_context* ctx) {
         return 0;
     }
 
+    /* Get src to find the audio element */
     duk_push_this(ctx);
-    duk_get_prop_string(ctx, -1, "_audioIndex");
-    int elem_idx = duk_get_int(ctx, -1);
-    duk_pop(ctx);  /* pop _audioIndex value */
+    duk_get_prop_string(ctx, -1, "src");
+    const char* src = duk_get_string(ctx, -1);
+    duk_pop(ctx);  /* pop src value */
     duk_pop(ctx);  /* pop this */
+
+    /* Find or create element for this src */
+    int elem_idx = -1;
+    if (src && src[0] != '\0') {
+        elem_idx = find_audio_element_by_src(src);
+    }
+    
+    /* If not found by src, try _audioIndex as fallback */
+    if (elem_idx < 0) {
+        duk_push_this(ctx);
+        duk_get_prop_string(ctx, -1, "_audioIndex");
+        elem_idx = duk_get_int(ctx, -1);
+        duk_pop_2(ctx);
+    }
 
     if (elem_idx < 0 || elem_idx >= MAX_HTML5_AUDIO_ELEMENTS) {
         return 0;
@@ -1696,13 +1868,20 @@ static duk_ret_t js_html5_audio(duk_context* ctx) {
     duk_push_c_function(ctx, js_audio_addEventListener, 2); duk_put_prop_string(ctx, -2, "addEventListener");
     duk_push_c_function(ctx, js_noop, DUK_VARARGS);    duk_put_prop_string(ctx, -2, "removeEventListener");
 
-    /* Properties */
-    duk_push_false(ctx);  duk_put_prop_string(ctx, -2, "loop");
-    duk_push_number(ctx, 1.0); duk_put_prop_string(ctx, -2, "volume");
-    duk_push_true(ctx);   duk_put_prop_string(ctx, -2, "paused");
-    duk_push_false(ctx);  duk_put_prop_string(ctx, -2, "ended");
-    duk_push_number(ctx, 0); duk_put_prop_string(ctx, -2, "currentTime");
+    /* Properties - using simple values for now, getters/setters handled in js_audio_load */
+    /* Note: loop, volume, currentTime need special handling via defineProperty */
+    /* paused (read-only) */
+    duk_push_true(ctx);  duk_put_prop_string(ctx, -2, "paused");
+    /* ended (read-only) */
+    duk_push_false(ctx); duk_put_prop_string(ctx, -2, "ended");
+    /* duration (read-only, updated on load) */
     duk_push_number(ctx, 0); duk_put_prop_string(ctx, -2, "duration");
+    /* currentTime (will be updated via getter) */
+    duk_push_number(ctx, 0); duk_put_prop_string(ctx, -2, "currentTime");
+    /* volume */
+    duk_push_number(ctx, 1.0); duk_put_prop_string(ctx, -2, "volume");
+    /* loop */
+    duk_push_false(ctx); duk_put_prop_string(ctx, -2, "loop");
 
     return 0;
 }
