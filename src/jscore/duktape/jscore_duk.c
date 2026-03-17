@@ -172,7 +172,18 @@ static duk_ret_t js_toDataURL(duk_context* ctx);
 static duk_ret_t js_getElementById(duk_context* ctx);
 static duk_ret_t js_getElementsByTagName(duk_context* ctx);
 static duk_ret_t js_createElement(duk_context* ctx);
+static duk_ret_t js_createDocumentFragment(duk_context* ctx);
+static duk_ret_t js_createComment(duk_context* ctx);
+static duk_ret_t js_createTextNode(duk_context* ctx);
+static duk_ret_t js_text_node_value_getter(duk_context* ctx);
+static duk_ret_t js_text_node_value_setter(duk_context* ctx);
+static duk_ret_t js_createEvent(duk_context* ctx);
 static duk_ret_t js_html5_audio(duk_context* ctx);
+static duk_ret_t js_element_appendChild(duk_context* ctx);
+static duk_ret_t js_element_insertBefore(duk_context* ctx);
+static duk_ret_t js_element_removeChild(duk_context* ctx);
+static duk_ret_t js_cloneNode(duk_context* ctx);
+static duk_ret_t js_audio_appendChild(duk_context* ctx);
 static duk_ret_t js_audio_load(duk_context* ctx);
 static duk_ret_t js_audio_play(duk_context* ctx);
 static duk_ret_t js_audio_pause(duk_context* ctx);
@@ -478,7 +489,9 @@ static duk_ret_t js_img_height_getter(duk_context* ctx) {
 }
 
 static duk_ret_t ImageCtor(duk_context* ctx) {
-    duk_push_object(ctx);
+    /* Use this object (for new Image() calls) */
+    duk_push_this(ctx);
+    
     MyImage* im = (MyImage*)calloc(1, sizeof(MyImage));
     duk_push_pointer(ctx, im);
     duk_put_prop_string(ctx, -2, "\xFF""ptr");
@@ -495,7 +508,9 @@ static duk_ret_t ImageCtor(duk_context* ctx) {
     duk_push_string(ctx, "height");
     duk_push_c_function(ctx, js_img_height_getter, 0);
     duk_def_prop(ctx, -3, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_ENUMERABLE);
-    return 1;
+    
+    duk_pop(ctx); /* pop this */
+    return 0; /* return this */
 }
 
 static void create_image(duk_context* ctx) {
@@ -1367,6 +1382,197 @@ static duk_ret_t js_getElementsByTagName(duk_context* ctx) {
     return 1;
 }
 
+static duk_ret_t js_createComment(duk_context* ctx) {
+    const char* text = duk_get_string(ctx, 0);
+    duk_push_object(ctx);
+    duk_push_int(ctx, 8);  /* nodeType COMMENT_NODE */
+    duk_put_prop_string(ctx, -2, "nodeType");
+    duk_push_string(ctx, "#comment");
+    duk_put_prop_string(ctx, -2, "nodeName");
+    
+    /* Store the actual text value in a hidden property */
+    duk_push_string(ctx, text ? text : "");
+    duk_put_prop_string(ctx, -2, "\xFF""textValue");
+    
+    /* textContent with getter/setter */
+    duk_push_string(ctx, "textContent");
+    duk_push_c_function(ctx, js_text_node_value_getter, 0);
+    duk_push_c_function(ctx, js_text_node_value_setter, 1);
+    duk_def_prop(ctx, -4, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_HAVE_SETTER);
+    
+    /* nodeValue with getter/setter (alias of textContent) */
+    duk_push_string(ctx, "nodeValue");
+    duk_push_c_function(ctx, js_text_node_value_getter, 0);
+    duk_push_c_function(ctx, js_text_node_value_setter, 1);
+    duk_def_prop(ctx, -4, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_HAVE_SETTER);
+    
+    return 1;
+}
+
+static duk_ret_t js_text_node_value_getter(duk_context* ctx) {
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "\xFF""textValue");
+    if (duk_is_undefined(ctx, -1)) {
+        duk_pop(ctx);
+        duk_push_string(ctx, "");
+    }
+    duk_remove(ctx, -2);
+    return 1;
+}
+
+static duk_ret_t js_text_node_value_setter(duk_context* ctx) {
+    const char* val = duk_get_string(ctx, 0);
+    duk_push_this(ctx);
+    duk_push_string(ctx, val ? val : "");
+    duk_put_prop_string(ctx, -2, "\xFF""textValue");
+    duk_pop(ctx);
+    return 0;
+}
+
+static duk_ret_t js_createTextNode(duk_context* ctx) {
+    const char* text = duk_get_string(ctx, 0);
+    duk_push_object(ctx);
+    duk_push_int(ctx, 3);  /* nodeType TEXT_NODE */
+    duk_put_prop_string(ctx, -2, "nodeType");
+    duk_push_string(ctx, "#text");
+    duk_put_prop_string(ctx, -2, "nodeName");
+    
+    /* Store the actual text value in a hidden property */
+    duk_push_string(ctx, text ? text : "");
+    duk_put_prop_string(ctx, -2, "\xFF""textValue");
+    
+    /* textContent with getter/setter */
+    duk_push_string(ctx, "textContent");
+    duk_push_c_function(ctx, js_text_node_value_getter, 0);
+    duk_push_c_function(ctx, js_text_node_value_setter, 1);
+    duk_def_prop(ctx, -4, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_HAVE_SETTER);
+    
+    /* nodeValue with getter/setter (alias of textContent) */
+    duk_push_string(ctx, "nodeValue");
+    duk_push_c_function(ctx, js_text_node_value_getter, 0);
+    duk_push_c_function(ctx, js_text_node_value_setter, 1);
+    duk_def_prop(ctx, -4, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_HAVE_SETTER);
+    
+    return 1;
+}
+
+static duk_ret_t js_createDocumentFragment(duk_context* ctx) {
+    duk_push_object(ctx);
+    duk_push_int(ctx, 11);  /* nodeType DOCUMENT_FRAGMENT_NODE */
+    duk_put_prop_string(ctx, -2, "nodeType");
+    duk_push_string(ctx, "#document-fragment");
+    duk_put_prop_string(ctx, -2, "nodeName");
+    duk_push_c_function(ctx, js_element_appendChild, 1);
+    duk_put_prop_string(ctx, -2, "appendChild");
+    duk_push_c_function(ctx, js_element_insertBefore, 2);
+    duk_put_prop_string(ctx, -2, "insertBefore");
+    duk_push_c_function(ctx, js_element_removeChild, 1);
+    duk_put_prop_string(ctx, -2, "removeChild");
+    duk_push_c_function(ctx, js_cloneNode, 0);
+    duk_put_prop_string(ctx, -2, "cloneNode");
+    return 1;
+}
+
+static duk_ret_t js_cloneNode(duk_context* ctx) {
+    /* Simplified - return a new generic object */
+    duk_push_object(ctx);
+    duk_push_int(ctx, 1);
+    duk_put_prop_string(ctx, -2, "nodeType");
+    duk_push_string(ctx, "");
+    duk_put_prop_string(ctx, -2, "innerHTML");
+    duk_push_c_function(ctx, js_element_appendChild, 1);
+    duk_put_prop_string(ctx, -2, "appendChild");
+    return 1;
+}
+
+static duk_ret_t js_element_setAttribute(duk_context* ctx) {
+    const char* key = duk_require_string(ctx, 0);
+    const char* val = duk_require_string(ctx, 1);
+    duk_push_this(ctx);
+    duk_push_string(ctx, val);
+    duk_put_prop_string(ctx, -2, key);
+    duk_pop(ctx);
+    return 0;
+}
+
+static duk_ret_t js_element_getAttribute(duk_context* ctx) {
+    const char* key = duk_require_string(ctx, 0);
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, key);
+    if (duk_is_undefined(ctx, -1)) {
+        duk_pop(ctx);
+        duk_push_null(ctx);
+    }
+    duk_remove(ctx, -2);
+    return 1;
+}
+
+static duk_ret_t js_element_compareDocumentPosition(duk_context* ctx) {
+    /* Simplified implementation - always return 0 (no relationship) */
+    duk_push_int(ctx, 0);
+    return 1;
+}
+
+static duk_ret_t js_element_insertBefore(duk_context* ctx) {
+    /* Simplified - just return the newChild */
+    if (duk_get_top(ctx) >= 1) {
+        duk_dup(ctx, 0);
+        return 1;
+    }
+    duk_push_undefined(ctx);
+    return 1;
+}
+
+static duk_ret_t js_element_removeChild(duk_context* ctx) {
+    /* Simplified - just return the child */
+    if (duk_get_top(ctx) >= 1) {
+        duk_dup(ctx, 0);
+        return 1;
+    }
+    duk_push_undefined(ctx);
+    return 1;
+}
+
+static duk_ret_t js_element_appendChild(duk_context* ctx) {
+    /* For audio elements, handle source element append */
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "src");
+    duk_pop(ctx);
+    
+    /* Get the child element being appended (argument 0) */
+    if (duk_get_top(ctx) < 1) {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    
+    /* Get child.src */
+    duk_dup(ctx, 0);  /* duplicate argument 0 */
+    duk_get_prop_string(ctx, -1, "src");
+    const char* child_src = duk_get_string(ctx, -1);
+    
+    /* If child has a src, copy it to parent */
+    if (child_src && child_src[0] != '\0') {
+        duk_push_this(ctx);
+        duk_push_string(ctx, child_src);
+        duk_put_prop_string(ctx, -2, "src");
+        duk_pop(ctx);
+        
+        /* Trigger load if this is an audio element */
+        duk_push_this(ctx);
+        duk_get_prop_string(ctx, -1, "load");
+        if (duk_is_callable(ctx, -1)) {
+            duk_push_this(ctx);
+            duk_pcall(ctx, 0);
+        }
+        duk_pop(ctx);
+    }
+    duk_pop(ctx);
+    
+    /* Return the appended child (argument 0) */
+    duk_dup(ctx, 0);
+    return 1;
+}
+
 static duk_ret_t js_createElement(duk_context* ctx) {
     const char* tag=duk_require_string(ctx,0);
     if (strcmp(tag,"canvas")==0) {
@@ -1385,7 +1591,54 @@ static duk_ret_t js_createElement(duk_context* ctx) {
         duk_new(ctx, 1);
         return 1;
     }
+    if (strcmp(tag,"source")==0) {
+        /* Create a source element with src property */
+        duk_push_object(ctx);
+        duk_push_string(ctx, "");
+        duk_put_prop_string(ctx, -2, "src");
+        duk_push_string(ctx, "");
+        duk_put_prop_string(ctx, -2, "type");
+        duk_push_c_function(ctx, js_element_appendChild, 1);
+        duk_put_prop_string(ctx, -2, "appendChild");
+        duk_push_c_function(ctx, js_img_addEventListener, 2);
+        duk_put_prop_string(ctx, -2, "addEventListener");
+        duk_push_c_function(ctx, js_noop, DUK_VARARGS);
+        duk_put_prop_string(ctx, -2, "removeEventListener");
+        return 1;
+    }
+    /* Generic element */
     duk_push_object(ctx);
+    duk_push_string(ctx, "");
+    duk_put_prop_string(ctx, -2, "innerHTML");
+    duk_push_string(ctx, "");
+    duk_put_prop_string(ctx, -2, "textContent");
+    duk_push_string(ctx, "");
+    duk_put_prop_string(ctx, -2, "className");
+    duk_push_int(ctx, 1);  /* nodeType ELEMENT_NODE */
+    duk_put_prop_string(ctx, -2, "nodeType");
+    duk_push_c_function(ctx, js_element_setAttribute, 2);
+    duk_put_prop_string(ctx, -2, "setAttribute");
+    duk_push_c_function(ctx, js_element_getAttribute, 1);
+    duk_put_prop_string(ctx, -2, "getAttribute");
+    duk_push_c_function(ctx, js_element_appendChild, 1);
+    duk_put_prop_string(ctx, -2, "appendChild");
+    duk_push_c_function(ctx, js_element_insertBefore, 2);
+    duk_put_prop_string(ctx, -2, "insertBefore");
+    duk_push_c_function(ctx, js_element_removeChild, 1);
+    duk_put_prop_string(ctx, -2, "removeChild");
+    duk_push_c_function(ctx, js_cloneNode, 0);
+    duk_put_prop_string(ctx, -2, "cloneNode");
+    duk_push_c_function(ctx, js_getElementsByTagName, 1);
+    duk_put_prop_string(ctx, -2, "getElementsByTagName");
+    duk_push_c_function(ctx, js_element_compareDocumentPosition, 1);
+    duk_put_prop_string(ctx, -2, "compareDocumentPosition");
+    duk_push_object(ctx);
+    duk_put_prop_string(ctx, -2, "style");
+    /* parentNode and ownerDocument - simplified */
+    duk_push_null(ctx);
+    duk_put_prop_string(ctx, -2, "parentNode");
+    duk_push_null(ctx);
+    duk_put_prop_string(ctx, -2, "ownerDocument");
     return 1;
 }
 
@@ -1853,6 +2106,42 @@ static duk_ret_t js_audio_addEventListener(duk_context* ctx) {
     return 0;
 }
 
+static duk_ret_t js_audio_appendChild(duk_context* ctx) {
+    /* Handle source element append - get the child's src and update parent */
+    if (duk_get_top(ctx) < 1) {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    
+    /* Get child.src */
+    duk_dup(ctx, 0);
+    duk_get_prop_string(ctx, -1, "src");
+    const char* child_src = duk_get_string(ctx, -1);
+    
+    /* If child has a src, update the audio element's src */
+    if (child_src && child_src[0] != '\0') {
+        duk_push_this(ctx);
+        duk_push_string(ctx, child_src);
+        duk_put_prop_string(ctx, -2, "src");
+        
+        /* Trigger load */
+        duk_push_this(ctx);
+        duk_get_prop_string(ctx, -1, "load");
+        if (duk_is_callable(ctx, -1)) {
+            duk_push_this(ctx);
+            duk_pcall(ctx, 0);
+        }
+        duk_pop(ctx);
+        duk_pop(ctx);
+    } else {
+        duk_pop(ctx);
+    }
+    
+    /* Return the appended child */
+    duk_dup(ctx, 0);
+    return 1;
+}
+
 static duk_ret_t js_html5_audio(duk_context* ctx) {
     const char* src = duk_get_string(ctx, 0);
     duk_push_this(ctx);
@@ -1891,6 +2180,7 @@ static duk_ret_t js_html5_audio(duk_context* ctx) {
     duk_push_c_function(ctx, js_audio_canPlayType, 1); duk_put_prop_string(ctx, -2, "canPlayType");
     duk_push_c_function(ctx, js_audio_addEventListener, 2); duk_put_prop_string(ctx, -2, "addEventListener");
     duk_push_c_function(ctx, js_noop, DUK_VARARGS);    duk_put_prop_string(ctx, -2, "removeEventListener");
+    duk_push_c_function(ctx, js_audio_appendChild, 1); duk_put_prop_string(ctx, -2, "appendChild");
 
     /* paused / ended: live getters so Impact.js pool selection works correctly.
      * this is at index 1 (index 0 = src constructor arg). */
@@ -1974,6 +2264,8 @@ static void create_window_obj(duk_context* ctx) {
     duk_put_prop_string(ctx,-2,"cancelAnimationFrame");
     duk_push_c_function(ctx,js_win_addEventListener,2);
     duk_put_prop_string(ctx,-2,"addEventListener");
+    duk_push_c_function(ctx, js_element_getAttribute, 1); duk_put_prop_string(ctx, -2, "getAttribute");
+    duk_push_c_function(ctx, js_element_setAttribute, 2); duk_put_prop_string(ctx, -2, "setAttribute");
     duk_push_string(ctx,"onload");
     duk_push_c_function(ctx,js_onload_get,0);
     duk_push_c_function(ctx,js_onload_set,1);
@@ -2017,27 +2309,74 @@ static void create_document(duk_context* ctx) {
     duk_push_c_function(ctx,js_getElementById,1);     duk_put_prop_string(ctx,-2,"getElementById");
     duk_push_c_function(ctx,js_getElementsByTagName,1);duk_put_prop_string(ctx,-2,"getElementsByTagName");
     duk_push_c_function(ctx,js_createElement,1);      duk_put_prop_string(ctx,-2,"createElement");
+    duk_push_c_function(ctx,js_createDocumentFragment,0); duk_put_prop_string(ctx,-2,"createDocumentFragment");
+    duk_push_c_function(ctx,js_createComment,1);      duk_put_prop_string(ctx,-2,"createComment");
+    duk_push_c_function(ctx,js_createTextNode,1);     duk_put_prop_string(ctx,-2,"createTextNode");
+    duk_push_c_function(ctx,js_createEvent,1);        duk_put_prop_string(ctx,-2,"createEvent");
     duk_push_c_function(ctx,js_doc_addEventListener,2);duk_put_prop_string(ctx,-2,"addEventListener");
+    duk_push_c_function(ctx, js_element_getAttribute, 1); duk_put_prop_string(ctx, -2, "getAttribute");
+    duk_push_c_function(ctx, js_element_setAttribute, 2); duk_put_prop_string(ctx, -2, "setAttribute");
     duk_push_string(ctx,"complete"); duk_put_prop_string(ctx,-2,"readyState");
     duk_push_object(ctx);
     duk_push_string(ctx,"file:///");
     duk_put_prop_string(ctx,-2,"href");
     duk_put_prop_string(ctx,-2,"location");
-    duk_push_object(ctx); duk_put_prop_string(ctx,-2,"body");
-    duk_push_object(ctx); duk_put_prop_string(ctx,-2,"head");
+    
+    /* Create documentElement (html) */
+    duk_push_object(ctx);
+    duk_push_string(ctx, "HTML"); duk_put_prop_string(ctx, -2, "nodeName");
+    duk_push_string(ctx, ""); duk_put_prop_string(ctx, -2, "innerHTML");
+    duk_push_int(ctx, 1); duk_put_prop_string(ctx, -2, "nodeType");
+    duk_push_c_function(ctx, js_element_appendChild, 1); duk_put_prop_string(ctx, -2, "appendChild");
+    duk_push_c_function(ctx, js_element_setAttribute, 2); duk_put_prop_string(ctx, -2, "setAttribute");
+    duk_push_c_function(ctx, js_getElementsByTagName, 1); duk_put_prop_string(ctx, -2, "getElementsByTagName");
+    duk_push_c_function(ctx, js_element_compareDocumentPosition, 1); duk_put_prop_string(ctx, -2, "compareDocumentPosition");
+    duk_push_c_function(ctx, js_element_insertBefore, 2); duk_put_prop_string(ctx, -2, "insertBefore");
+    duk_push_c_function(ctx, js_element_removeChild, 1); duk_put_prop_string(ctx, -2, "removeChild");
+    duk_put_prop_string(ctx, -2, "documentElement");
+    
+    /* Create body element with necessary methods for jQuery */
+    duk_push_object(ctx);
+    duk_push_string(ctx, "BODY"); duk_put_prop_string(ctx, -2, "nodeName");
+    duk_push_string(ctx, ""); duk_put_prop_string(ctx, -2, "innerHTML");
+    duk_push_string(ctx, ""); duk_put_prop_string(ctx, -2, "textContent");
+    duk_push_int(ctx, 1); duk_put_prop_string(ctx, -2, "nodeType");
+    duk_push_c_function(ctx, js_element_appendChild, 1); duk_put_prop_string(ctx, -2, "appendChild");
+    duk_push_c_function(ctx, js_element_setAttribute, 2); duk_put_prop_string(ctx, -2, "setAttribute");
+    duk_push_c_function(ctx, js_getElementsByTagName, 1); duk_put_prop_string(ctx, -2, "getElementsByTagName");
+    duk_push_c_function(ctx, js_element_compareDocumentPosition, 1); duk_put_prop_string(ctx, -2, "compareDocumentPosition");
+    duk_push_c_function(ctx, js_element_insertBefore, 2); duk_put_prop_string(ctx, -2, "insertBefore");
+    duk_push_c_function(ctx, js_element_removeChild, 1); duk_put_prop_string(ctx, -2, "removeChild");
+    duk_push_object(ctx); duk_put_prop_string(ctx, -2, "style");
+    duk_put_prop_string(ctx, -2, "body");
+    
+    /* Create head element */
+    duk_push_object(ctx);
+    duk_push_string(ctx, "HEAD"); duk_put_prop_string(ctx, -2, "nodeName");
+    duk_push_string(ctx, ""); duk_put_prop_string(ctx, -2, "innerHTML");
+    duk_push_c_function(ctx, js_element_appendChild, 1); duk_put_prop_string(ctx, -2, "appendChild");
+    duk_push_object(ctx); duk_put_prop_string(ctx, -2, "style");
+    duk_put_prop_string(ctx, -2, "head");
 
     duk_push_array(ctx);
     int total = g_image_count + 4;
     for (int i=0;i<total;i++) {
         duk_push_global_object(ctx);
         duk_get_prop_string(ctx,-1,"Image");
-        if (duk_is_undefined(ctx,-1)) { duk_pop(ctx); duk_push_undefined(ctx); }
-        else duk_new(ctx,0);
+        if (duk_is_undefined(ctx,-1)) { 
+            duk_pop(ctx); 
+            duk_push_object(ctx); 
+        }
+        else {
+            duk_new(ctx, 0);
+            // Set internal pointer for the image (don't overwrite existing methods)
+            MyImage* im=(MyImage*)calloc(1,sizeof(MyImage));
+            if (im) {
+                duk_push_pointer(ctx,(void*)im);
+                duk_put_prop_string(ctx,-2,"\xFF""ptr");
+            }
+        }
         duk_remove(ctx,-2);
-        MyImage* im=(MyImage*)calloc(1,sizeof(MyImage));
-        if (!im) { duk_push_error_object(ctx,DUK_ERR_ERROR,"OOM"); duk_throw(ctx); }
-        duk_push_pointer(ctx,(void*)im);
-        duk_put_prop_string(ctx,-2,"\xFF""ptr");
         duk_put_prop_index(ctx,-2,i);
     }
     duk_put_prop_string(ctx,-2,"images");
@@ -2051,6 +2390,24 @@ static void create_localStorage(duk_context* ctx) {
     duk_push_c_function(ctx,js_ls_removeItem,1); duk_put_prop_string(ctx,-2,"removeItem");
     duk_push_c_function(ctx,js_ls_clear,0);      duk_put_prop_string(ctx,-2,"clear");
     duk_put_global_string(ctx,"localStorage");
+}
+
+static duk_ret_t js_createEvent(duk_context* ctx) {
+    const char* event_type = duk_require_string(ctx, 0);
+    duk_push_object(ctx);
+    duk_push_string(ctx, event_type);
+    duk_put_prop_string(ctx, -2, "type");
+    duk_push_false(ctx);
+    duk_put_prop_string(ctx, -2, "bubbles");
+    duk_push_false(ctx);
+    duk_put_prop_string(ctx, -2, "cancelable");
+    duk_push_c_function(ctx, js_noop, 0);
+    duk_put_prop_string(ctx, -2, "preventDefault");
+    duk_push_c_function(ctx, js_noop, 0);
+    duk_put_prop_string(ctx, -2, "stopPropagation");
+    duk_push_c_function(ctx, js_noop, 1);
+    duk_put_prop_string(ctx, -2, "initEvent");
+    return 1;
 }
 
 static void create_audio_obj(duk_context* ctx) {

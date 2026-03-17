@@ -10,7 +10,7 @@ This means some Game Maker studio games as well as older HTML5 games. (and newer
 
 # Current status
 
-Biolab Disaster is playable besides some graphical glitches on loading screen.
+Biolab Disaster is playable besides some graphical glitches on loading screen, audio is also properly supported in that game.
 Derp Puncher is playable besides lacking touchscreen/mouse controls.
 Other test examples are playable.
 
@@ -18,7 +18,6 @@ Other test examples are playable.
 
 - Date.now/performance.now support
 - Input (Mouse, Touchscreen, Gamecontroller API)
-- HTML5 Audio support (MP3 support done through minimp3, ogg vorbis through stb_vorbis.h)
 - WebAudio (More advanced, used by more modern games)
 - LocalStorage (Used for saves in games in particular)
 - Add QuickJS-NG backend (the modular framework made this easier) as Duktape lacks proper EMCAScript 5/6 support that's very problematic already for some games
