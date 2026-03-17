@@ -38,15 +38,18 @@ CFLAGS += -DHAVE_GETCWD
 endif
 
 # ============================================================================
-# Duktape Source Check
+# Duktape Download and Setup
 # ============================================================================
-# The duktape/src directory must exist (from release tarball or submodule)
-DUKTAPE_SRC := duktape/src
+# Duktape version to download
+DUKTAPE_VERSION = 2.7.0
+DUKTAPE_URL = https://github.com/svaarala/duktape/releases/download/v$(DUKTAPE_VERSION)/duktape-$(DUKTAPE_VERSION).tar.xz
+DUKTAPE_TAR = duktape-$(DUKTAPE_VERSION).tar.xz
+DUKTAPE_SRC = duktape/src
 
+# Download and extract duktape if not present
 ifeq ($(wildcard $(DUKTAPE_SRC)),)
-$(error Duktape source not found. Please either:
-  1. Clone duktape as submodule: git submodule add https://github.com/svaarala/duktape.git duktape
-  2. Or download a release: wget https://github.com/svaarala/duktape/releases/download/v2.7.0/duktape-2.7.0.tar.xz && tar xf duktape-2.7.0.tar.xz && mv duktape-2.7.0 duktape)
+$(info Duktape not found. Downloading...)
+$(shell wget -q $(DUKTAPE_URL) -O $(DUKTAPE_TAR) && tar xf $(DUKTAPE_TAR) && mv duktape-$(DUKTAPE_VERSION) duktape && rm $(DUKTAPE_TAR))
 endif
 
 # ============================================================================
@@ -159,6 +162,27 @@ clean:
 	@echo "Cleaned build artifacts"
 
 # ============================================================================
+# Duktape Management
+# ============================================================================
+
+# Download and extract duktape
+duktape: duktape/src
+	@echo "Duktape is already present"
+
+duktape/src:
+	@echo "Downloading Duktape $(DUKTAPE_VERSION)..."
+	@wget -q $(DUKTAPE_URL) -O $(DUKTAPE_TAR)
+	@tar xf $(DUKTAPE_TAR)
+	@mv duktape-$(DUKTAPE_VERSION) duktape
+	@rm $(DUKTAPE_TAR)
+	@echo "Duktape downloaded and extracted successfully"
+
+# Remove downloaded duktape
+clean-duktape:
+	rm -rf duktape
+	@echo "Duktape directory removed"
+
+# ============================================================================
 # Tests
 # ============================================================================
 
@@ -255,7 +279,7 @@ test-run: $(TARGET)
 	@echo "Running tests from testsuite/ directory..."
 	@(cd testsuite && ../$(TARGET))
 
-.PHONY: all clean test-biolab test-ultra test-tapi2 test-ultra-more test-api test-alpha test-all check-regressions save-baseline test-run
+.PHONY: all clean duktape clean-duktape test-biolab test-ultra test-tapi2 test-ultra-more test-api test-alpha test-all check-regressions save-baseline test-run
 
 # ============================================================================
 # Module Interface Documentation
