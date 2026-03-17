@@ -532,6 +532,18 @@ int sound_is_playing(int index) {
     return playing;
 }
 
+int sound_has_ended(int index) {
+    if (index < 0 || index >= MAX_AUDIO_SOURCES) return 0;
+
+    SDL_LockMutex(g_audio_mutex);
+    AudioSource* src = &g_audio_sources[index];
+    /* ended = was started (position > 0) and is now inactive and not explicitly paused */
+    int ended = !src->active && !src->paused && src->position > 0;
+    SDL_UnlockMutex(g_audio_mutex);
+
+    return ended;
+}
+
 float sound_get_duration(int index) {
     if (index < 0 || index >= MAX_AUDIO_SOURCES) return 0.0f;
 

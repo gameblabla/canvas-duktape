@@ -50,6 +50,7 @@ void sound_stop(int index);
 void sound_set_volume(int index, float volume);
 void sound_set_loop(int index, int looping);
 int  sound_is_playing(int index);
+int  sound_has_ended(int index);
 float sound_get_duration(int index);
 float sound_get_current_time(int index);
 void sound_set_current_time(int index, float time);
