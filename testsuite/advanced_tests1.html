@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Impact.js Canvas Rendering Test Suite (FIXED)</title>
+    <style>
+        body { margin: 20px; font-family: monospace; background: #222; color: #eee; }
+        canvas { border: 2px solid #666; display: block; margin: 10px 0; background: #000; }
+        #results { background: #111; color: #0f0; padding: 10px; white-space: pre-wrap; max-height: 500px; overflow-y: auto; font-size: 11px; }
+        .visual-test { margin: 20px 0; }
+        .label { color: #aaa; font-size: 10px; margin-top: 2px; }
+    </style>
+</head>
+<body>
+    <h2 style="color: #fff;">Impact.js Canvas Rendering Test Suite (ES3 - FIXED)</h2>
+    <p style="color: #aaa;">Tests sprite sheets, transformations, pixel-art rendering, and state management</p>
+
+    <canvas id="testCanvas" width="512" height="384"></canvas>
+    <div id="results"></div>
+
+    <div class="visual-test">
+        <h3 style="color: #fff; margin-bottom: 5px;">Visual Verification Area</h3>
+        <canvas id="visualCanvas" width="256" height="256" style="image-rendering: pixelated; image-rendering: crisp-edges;"></canvas>
+        <div class="label">Expected: Sharp pixel-art sprites, no gaps between tiles, correct flip/mirror</div>
+    </div>
+
+<script>
+// ECMAScript 3 compliant - FIXED VERSION
+(function() {
+    var canvas = document.getElementById('testCanvas');
+    var visualCanvas = document.getElementById('visualCanvas');
+    var ctx = null;
+    var vctx = null;
+    var testResults = [];
+    var testsPassed = 0;
+    var testsFailed = 0;
+
+    function log(message) {
+        console.log(message);
+        var resultsDiv = document.getElementById('results');
+        resultsDiv.innerHTML = resultsDiv.innerHTML + message + '\n';
+    }
+
+    function logResult(testName, passed, details) {
+        var status = passed ? 'PASS' : 'FAIL';
+        var message = '[' + status + '] ' + testName;
+        if (details) { message = message + ' - ' + details; }
+        log(message);
+        if (passed) { testsPassed++; } else { testsFailed++; }
+        testResults.push({ name: testName, passed: passed, details: details });
+    }
+
+    // Helper: Check if a pixel is approximately a given color (tolerance for anti-aliasing)
+    function pixelIsColor(data, r, g, b, tolerance) {
+        tolerance = tolerance || 30;
+        return Math.abs(data[0] - r) <= tolerance &&
+               Math.abs(data[1] - g) <= tolerance &&
+               Math.abs(data[2] - b) <= tolerance;
+    }
+
+    // Helper: Create a simple sprite sheet pattern
+    function createTestSpriteSheet(width, height, tileSize) {
+        var off = document.createElement('canvas');
+        off.width = width;
+        off.height = height;
+        var octx = off.getContext('2d');
+        var tilesX = Math.floor(width / tileSize);
+        var tilesY = Math.floor(height / tileSize);
+        var colors = ['#f00', '#0f0', '#00f', '#ff0', '#f0f', '#0ff', '#fff', '#888'];
+        for (var y = 0; y < tilesY; y++) {
+            for (var x = 0; x < tilesX; x++) {
+                octx.fillStyle = colors[(y * tilesX + x) % colors.length];
+                octx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+                // Add a small WHITE marker in bottom-right corner for easy detection
+                octx.fillStyle = '#fff';
+                octx.fillRect(x * tileSize + tileSize - 6, y * tileSize + tileSize - 6, 4, 4);
+            }
+        }
+        return off;
+    }
+
+    // ===== TEST 1: 9-Parameter drawImage Clipping (Sprite Sheet Extraction) =====
+    function testDrawImageClipping() {
+        log('\n=== Test 1: 9-Parameter drawImage Clipping ===');
+        if (!ctx) { logResult('Context available', false); return false; }
+
+        var spriteSheet = createTestSpriteSheet(128, 64, 32); // 4x2 tiles, each 32x32
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Draw tile at source rect (32, 0, 32, 32) to dest rect (10, 10, 32, 32)
+        // The white marker in source is at (32+26, 0+26) = (58, 26) in source coordinates
+        // When clipped to 32x32 source starting at (32,0), marker is at relative (26, 26)
+        // So in dest, marker should be at (10+26, 10+26) = (36, 36)
+        ctx.drawImage(spriteSheet, 32, 0, 32, 32, 10, 10, 32, 32);
+
+        // Sample the white marker position
+        var markerSample = ctx.getImageData(36, 36, 1, 1).data;
+        var markerDetected = markerSample[0] > 220 && markerSample[1] > 220 && markerSample[2] > 220;
+        logResult('Sprite clip marker detected', markerDetected, 'R=' + markerSample[0] + ' G=' + markerSample[1] + ' B=' + markerSample[2]);
+
+        // Sample a position that should be the tile's base color (green = tile index 1)
+        // Base color area: sample at (10+8, 10+8) = (18, 18)
+        var baseSample = ctx.getImageData(18, 18, 1, 1).data;
+        var isGreen = baseSample[1] > 200 && baseSample[0] < 50 && baseSample[2] < 50;
+        logResult('Clipped tile shows correct base color', isGreen, 'R=' + baseSample[0] + ' G=' + baseSample[1] + ' B=' + baseSample[2]);
+
+        // Sample just outside the drawn area to ensure no bleed from adjacent source tile
+        // Adjacent tile (index 2) is blue; sample at dest (45, 25) which is outside our 32x32 draw at (10,10)
+        var edgeSample = ctx.getImageData(45, 25, 1, 1).data;
+        // This should be transparent/black (canvas background), not blue from adjacent tile
+        var noBleed = edgeSample[3] < 10 || (edgeSample[0] < 50 && edgeSample[1] < 50 && edgeSample[2] < 50);
+        logResult('No adjacent tile bleed', noBleed, 'Edge: R=' + edgeSample[0] + ' G=' + edgeSample[1] + ' B=' + edgeSample[2] + ' A=' + edgeSample[3]);
+
+        return markerDetected && isGreen;
+    }
+
+    // ===== TEST 2: imageSmoothingEnabled for Pixel Art =====
+    function testImageSmoothing() {
+        log('\n=== Test 2: imageSmoothingEnabled (Pixel Art) ===');
+
+        // Create a 2x2 pixel pattern
+        var tiny = document.createElement('canvas');
+        tiny.width = 2; tiny.height = 2;
+        var tctx = tiny.getContext('2d');
+        tctx.fillStyle = '#f00'; tctx.fillRect(0,0,1,1);
+        tctx.fillStyle = '#0f0'; tctx.fillRect(1,0,1,1);
+        tctx.fillStyle = '#00f'; tctx.fillRect(0,1,1,1);
+        tctx.fillStyle = '#ff0'; tctx.fillRect(1,1,1,1);
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Test with smoothing DISABLED
+        var smoothingSupported = false;
+        if (typeof ctx.imageSmoothingEnabled !== 'undefined') {
+            smoothingSupported = true;
+            ctx.imageSmoothingEnabled = false;
+        } else if (typeof ctx.mozImageSmoothingEnabled !== 'undefined') {
+            smoothingSupported = true;
+            ctx.mozImageSmoothingEnabled = false;
+        } else if (typeof ctx.webkitImageSmoothingEnabled !== 'undefined') {
+            smoothingSupported = true;
+            ctx.webkitImageSmoothingEnabled = false;
+        }
+        logResult('imageSmoothing property available', smoothingSupported);
+
+        // Draw scaled up 16x => each original pixel becomes 16x16 block
+        ctx.drawImage(tiny, 10, 10, 32, 32);
+
+        // Sample center of each 16x16 quadrant (should be solid original colors)
+        // Quadrant 1 (top-left, red): center at (10+8, 10+8) = (18, 18)
+        var q1 = ctx.getImageData(18, 18, 1, 1).data;
+        // Quadrant 2 (top-right, green): center at (10+16+8, 10+8) = (34, 18)
+        var q2 = ctx.getImageData(34, 18, 1, 1).data;
+        // Quadrant 3 (bottom-left, blue): center at (18, 34)
+        var q3 = ctx.getImageData(18, 34, 1, 1).data;
+        // Quadrant 4 (bottom-right, yellow): center at (34, 34)
+        var q4 = ctx.getImageData(34, 34, 1, 1).data;
+
+        var crispRendering = pixelIsColor(q1, 255, 0, 0, 20) &&    // Red
+                            pixelIsColor(q2, 0, 255, 0, 20) &&    // Green
+                            pixelIsColor(q3, 0, 0, 255, 20) &&    // Blue
+                            pixelIsColor(q4, 255, 255, 0, 20);    // Yellow
+        logResult('Scaled pixel art remains crisp', crispRendering);
+        if (!crispRendering) {
+            log('  Q1(R' + q1[0] + 'G' + q1[1] + ') Q2(R' + q2[0] + 'G' + q2[1] + ') Q3(R' + q3[0] + 'B' + q3[2] + ') Q4(R' + q4[0] + 'G' + q4[1] + ')');
+        }
+
+        return crispRendering || !smoothingSupported;
+    }
+
+    // ===== TEST 3: Transformation State Management (save/restore) =====
+    function testTransformState() {
+        log('\n=== Test 3: Transformation State (save/restore) ===');
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Set initial state
+        ctx.save();
+        ctx.translate(100, 50);
+        ctx.scale(2, 2);
+        ctx.fillStyle = '#f00';
+        ctx.fillRect(0, 0, 10, 10); // Appears at (100,50) scaled to 20x20 red
+        ctx.restore();
+
+        // After restore, transformations reset. Set new color and draw.
+        ctx.fillStyle = '#0f0';
+        ctx.fillRect(100, 50, 10, 10); // Green, unscaled, at (100,50)
+
+        // Check: red rectangle center at (100+10, 50+10) = (110, 60)
+        var redSample = ctx.getImageData(110, 60, 1, 1).data;
+        var redAtCorrectPos = pixelIsColor(redSample, 255, 0, 0, 30);
+        logResult('Transformed draw at correct position', redAtCorrectPos);
+
+        // Check: green rectangle center at (100+5, 50+5) = (105, 55)
+        var greenSample = ctx.getImageData(105, 55, 1, 1).data;
+        var greenNotScaled = pixelIsColor(greenSample, 0, 255, 0, 30);
+        logResult('Post-restore draw not affected by prior transform', greenNotScaled);
+
+        // Check fillStyle: set to blue, verify it's accepted (don't compare string format)
+        ctx.fillStyle = '#00f';
+        // Draw a blue pixel and verify color, rather than comparing fillStyle string
+        ctx.fillRect(200, 200, 1, 1);
+        var blueSample = ctx.getImageData(200, 200, 1, 1).data;
+        var fillStyleWorks = pixelIsColor(blueSample, 0, 0, 255, 30);
+        logResult('fillStyle functional after restore', fillStyleWorks);
+
+        return redAtCorrectPos && greenNotScaled && fillStyleWorks;
+    }
+
+    // ===== TEST 4: Sub-pixel Positioning and Tile Gaps =====
+    function testSubpixelPositioning() {
+        log('\n=== Test 4: Sub-pixel Positioning (Tile Gaps) ===');
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#f00';
+
+        // Draw adjacent tiles with integer positions
+        for (var i = 0; i < 5; i++) {
+            ctx.fillRect(i * 16, 100, 16, 16);
+        }
+
+        // Sample boundaries between tiles - should be solid red
+        var allSolid = true;
+        for (var j = 1; j < 5; j++) {
+            // Sample at the exact boundary: x = j*16 - 1 (last pixel of prev tile)
+            var sample = ctx.getImageData(j * 16 - 1, 108, 1, 1).data;
+            var isRed = pixelIsColor(sample, 255, 0, 0, 30);
+            if (!isRed) { allSolid = false; }
+        }
+        logResult('Adjacent integer-positioned tiles have no gaps', allSolid);
+
+        // Sub-pixel offset test (acceptable to have anti-aliasing)
+        ctx.fillStyle = '#0f0';
+        for (var k = 0; k < 5; k++) {
+            ctx.fillRect(k * 16 + 0.5, 130, 16, 16);
+        }
+        var subpixelSample = ctx.getImageData(16 + 8, 130 + 8, 1, 1).data;
+        var subpixelRendered = subpixelSample[1] > 100;
+        logResult('Sub-pixel positioned tiles render', subpixelRendered, 'G=' + subpixelSample[1]);
+
+        return allSolid;
+    }
+
+    // ===== TEST 5: Flip/Mirror Operations (scaleX negative) - FIXED =====
+    function testFlipMirror() {
+        log('\n=== Test 5: Flip/Mirror Rendering (scaleX -1) ===');
+
+        // Create simple asymmetric test: LEFT half red, RIGHT half white
+        var asym = document.createElement('canvas');
+        asym.width = 32; asym.height = 32;
+        var actx = asym.getContext('2d');
+        actx.fillStyle = '#f00'; actx.fillRect(0, 0, 16, 32);   // Left: red
+        actx.fillStyle = '#fff'; actx.fillRect(16, 0, 16, 32);  // Right: white
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Draw normal at (20, 20) - should show red on left, white on right
+        ctx.drawImage(asym, 20, 20);
+
+        // Draw flipped at (100, 20) - should show WHITE on left, RED on right
+        ctx.save();
+        ctx.translate(132, 20);  // Position at RIGHT edge of where image will appear
+        ctx.scale(-1, 1);         // Flip horizontally
+        ctx.drawImage(asym, 0, 0); // Draw at origin in flipped coords
+        ctx.restore();
+
+        // Normal draw: left side (x=20-35) should be red, right side (x=36-51) white
+        var normalLeft = ctx.getImageData(28, 36, 1, 1).data;  // Center of left half
+        var normalRight = ctx.getImageData(44, 36, 1, 1).data; // Center of right half
+        var normalCorrect = pixelIsColor(normalLeft, 255, 0, 0, 30) &&
+                           pixelIsColor(normalRight, 255, 255, 255, 30);
+
+        // Flipped draw: spans canvas x=100 to x=132. After flip, LEFT side should be WHITE
+        var flippedLeft = ctx.getImageData(108, 36, 1, 1).data;  // Left half of flipped image
+        var flippedRight = ctx.getImageData(124, 36, 1, 1).data; // Right half
+        var flippedCorrect = pixelIsColor(flippedLeft, 255, 255, 255, 30) &&  // White on left
+                            pixelIsColor(flippedRight, 255, 0, 0, 30);        // Red on right
+
+        logResult('Normal draw has correct left/right colors', normalCorrect);
+        logResult('Flipped draw has mirrored colors', flippedCorrect,
+                 'Left(R' + flippedLeft[0] + ') Right(R' + flippedRight[0] + ')');
+
+        return normalCorrect && flippedCorrect;
+    }
+
+    // ===== TEST 8: Multiple drawImage Calls (Sprite Batch) - FIXED =====
+    function testBatchDrawing() {
+        log('\n=== Test 8: Batch drawImage Calls (50 sprites) ===');
+
+        // Create sprite sheet with MULTIPLE distinct tiles (10x1 grid)
+        var spriteSheet = document.createElement('canvas');
+        spriteSheet.width = 320; spriteSheet.height = 32; // 10 tiles of 32x32
+        var ssctx = spriteSheet.getContext('2d');
+        var colors = ['#f00', '#0f0', '#00f', '#ff0', '#f0f', '#0ff', '#88f', '#f88', '#8f8', '#ff8'];
+        for (var t = 0; t < 10; t++) {
+            ssctx.fillStyle = colors[t];
+            ssctx.fillRect(t * 32, 0, 32, 32);
+            // Add small white marker in corner for verification
+            ssctx.fillStyle = '#fff';
+            ssctx.fillRect(t * 32 + 2, 2, 4, 4);
+        }
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        var startTime = new Date().getTime();
+        // Draw 5x10 grid, cycling through the 10 tile types
+        for (var row = 0; row < 5; row++) {
+            for (var col =  0; col < 10; col++) {
+                var tileIndex = (row + col) % 10; // Cycle through colors
+                ctx.drawImage(spriteSheet, tileIndex * 32, 0, 32, 32, col * 32, row * 32, 32, 32);
+            }
+        }
+        var elapsed = new Date().getTime() - startTime;
+
+        // Sample first tile (row=0,col=0): tileIndex=0 -> red
+        var sample1 = ctx.getImageData(16, 16, 1, 1).data;
+        // Sample last tile (row=4,col=9): tileIndex=(4+9)%10=3 -> yellow (#ff0)
+        var sample2 = ctx.getImageData(288 + 16, 128 + 16, 1, 1).data;
+
+        var firstCorrect = pixelIsColor(sample1, 255, 0, 0, 40);      // Red
+        var lastCorrect = pixelIsColor(sample2, 255, 255, 0, 40);     // Yellow
+
+        var batchCorrect = firstCorrect && lastCorrect;
+        logResult('Batch draw renders correct tile colors', batchCorrect);
+        log('  Drew 50 sprites in ' + elapsed + 'ms');
+        if (!batchCorrect) {
+            log('  First: R=' + sample1[0] + ' G=' + sample1[1] + ' B=' + sample1[2]);
+            log('  Last:  R=' + sample2[0] + ' G=' + sample2[1] + ' B=' + sample2[2]);
+        }
+
+        return batchCorrect;
+    }
+
+    // ===== TEST 9: Visual Verification (Pixel Art) - FIXED =====
+    function testVisualVerification() {
+        log('\n=== Test 9: Visual Verification (Pixel Art) ===');
+
+        if (!vctx) { logResult('Visual context available', false); return false; }
+
+        vctx.clearRect(0, 0, visualCanvas.width, visualCanvas.height);
+
+        // Disable smoothing
+        if (typeof vctx.imageSmoothingEnabled !== 'undefined') { vctx.imageSmoothingEnabled = false; }
+        else if (typeof vctx.mozImageSmoothingEnabled !== 'undefined') { vctx.mozImageSmoothingEnabled = false; }
+        else if (typeof vctx.webkitImageSmoothingEnabled !== 'undefined') { vctx.webkitImageSmoothingEnabled = false; }
+
+        // Create simple 2-frame sprite: 64x32 sheet, each frame 32x32
+        var charSheet = document.createElement('canvas');
+        charSheet.width = 64; charSheet.height = 32;
+        var csctx = charSheet.getContext('2d');
+
+        // Frame 0 (x=0-31): RED body, small WHITE marker top-right
+        csctx.fillStyle = '#f00'; csctx.fillRect(0, 0, 32, 32);
+        csctx.fillStyle = '#fff'; csctx.fillRect(26, 2, 4, 4);
+
+        // Frame 1 (x=32-63): GREEN body, small WHITE marker top-LEFT (to distinguish after flip)
+        csctx.fillStyle = '#0f0'; csctx.fillRect(32, 0, 32, 32);
+        csctx.fillStyle = '#fff'; csctx.fillRect(34, 2, 4, 4); // Left side of frame 1
+
+        // Draw frame 0 normal at (10, 10), scaled 2x
+        vctx.drawImage(charSheet, 0, 0, 32, 32, 10, 10, 64, 64);
+
+        // Draw frame 1 FLIPPED at (120, 10), scaled 2x
+        // Strategy: translate to RIGHT edge of draw area, flip, draw normally
+        vctx.save();
+        vctx.translate(120 + 64, 10);  // Move to right edge of 64px-wide draw area
+        vctx.scale(-1, 1);              // Flip horizontally
+        vctx.drawImage(charSheet, 32, 0, 32, 32, 0, 0, 64, 64); // Draw at origin in flipped coords
+        vctx.restore();
+
+        // Frame 0: should be red with white marker on RIGHT side
+        // Marker in source: x=26-30 of 32px frame -> scaled 2x: dest relative x=52-60 -> absolute x=10+52=62
+        var frame0Marker = vctx.getImageData(62, 14, 1, 1).data;
+        var frame0Body = vctx.getImageData(42, 42, 1, 1).data; // Center of frame
+        var frame0Correct = pixelIsColor(frame0Body, 255, 0, 0, 30) &&
+                           frame0Marker[0] > 220; // White marker
+
+        // Frame 1 flipped: original had white marker on LEFT of frame -> after flip, marker on RIGHT
+        // Draw area: canvas x=120 to 184. Flipped: source left maps to canvas right.
+        // Source marker at x=34 (2px into frame 1) -> after flip, appears 2px from RIGHT edge of draw area
+        // Right edge of draw area = 184, so marker at x=184-2=182
+        var frame1Marker = vctx.getImageData(182, 14, 1, 1).data;
+        var frame1Body = vctx.getImageData(152, 42, 1, 1).data; // Center of flipped frame
+        var frame1Correct = pixelIsColor(frame1Body, 0, 255, 0, 30) &&
+                           frame1Marker[0] > 220; // White marker
+
+        logResult('Visual: Frame 0 (normal) renders red with marker', frame0Correct,
+                 'Body(R' + frame0Body[0] + ') Marker(R' + frame0Marker[0] + ')');
+        logResult('Visual: Frame 1 (flipped) renders green with marker', frame1Correct,
+                 'Body(R' + frame1Body[0] + 'G' + frame1Body[1] + ') Marker(R' + frame1Marker[0] + ')');
+
+        return frame0Correct && frame1Correct;
+    }
+
+    // ===== TEST 9: Visual Verification (Pixel Art Sprite Sheet) =====
+    function testVisualVerification() {
+        log('\n=== Test 9: Visual Verification (Pixel Art) ===');
+
+        if (!vctx) { logResult('Visual context available', false); return false; }
+
+        vctx.clearRect(0, 0, visualCanvas.width, visualCanvas.height);
+
+        // Disable smoothing
+        if (typeof vctx.imageSmoothingEnabled !== 'undefined') { vctx.imageSmoothingEnabled = false; }
+        else if (typeof vctx.mozImageSmoothingEnabled !== 'undefined') { vctx.mozImageSmoothingEnabled = false; }
+        else if (typeof vctx.webkitImageSmoothingEnabled !== 'undefined') { vctx.webkitImageSmoothingEnabled = false; }
+
+        // Create character sprite sheet: 64x32, two 32x32 frames
+        var charSheet = document.createElement('canvas');
+        charSheet.width = 64; charSheet.height = 32;
+        var csctx = charSheet.getContext('2d');
+
+        // Frame 0 (left 32px): blue body, red head
+        csctx.fillStyle = '#00f'; csctx.fillRect(4, 16, 24, 16); // body
+        csctx.fillStyle = '#f00'; csctx.fillRect(8, 8, 16, 8);    // head
+        // Frame 1 (right 32px): same + green foot indicator
+        csctx.fillStyle = '#00f'; csctx.fillRect(36, 16, 24, 16);
+        csctx.fillStyle = '#0f0'; csctx.fillRect(40, 24, 8, 8);   // green foot
+        csctx.fillStyle = '#f00'; csctx.fillRect(40, 8, 16, 8);
+
+        // Draw frame 0 at 2x scale at (10, 10)
+        // Source: (0,0,32,32) -> Dest: (10,10,64,64)
+        vctx.drawImage(charSheet, 0, 0, 32, 32, 10, 10, 64, 64);
+
+        // Draw frame 1 flipped at position (150, 10)
+        vctx.save();
+        vctx.translate(150 + 64, 10); // Move to right edge of draw area
+        vctx.scale(-1, 1); // Flip
+        // Draw at (-64, 0) so it appears at (150, 10) to (214, 74)
+        vctx.drawImage(charSheet, 32, 0, 32, 32, -64, 0, 64, 64);
+        vctx.restore();
+
+        // Frame 0: red head center at source (8+8, 8+4) = (16, 12), scaled 2x -> dest (10+32, 10+24) = (42, 34)
+        var head1 = vctx.getImageData(42, 34, 1, 1).data;
+        var headCorrect = pixelIsColor(head1, 255, 0, 0, 30);
+
+        // Frame 1: green foot at source (40+4, 24+4) = (44, 28), scaled 2x -> before flip: (10+24, 10+56) = (34, 66)
+        // After flip around x=150+32=182: x becomes 182 + (182 - 34) = 330? Let me recalculate...
+        // Simpler: flipped image spans x=150 to x=214. Source x=44 in 32px frame = relative x=12.
+        // After flip, relative x=12 from right edge = 214 - 12 = 202. Y: source y=28 -> dest y=10+56=66.
+        var foot1 = vctx.getImageData(202, 66, 1, 1).data;
+        var footCorrect = pixelIsColor(foot1, 0, 255, 0, 30);
+
+        logResult('Visual: Frame 0 head renders red', headCorrect, 'R=' + head1[0]);
+        logResult('Visual: Frame 1 foot renders green', footCorrect, 'G=' + foot1[1]);
+
+        return headCorrect && footCorrect;
+    }
+
+    // ===== TEST 10: Compositing Mode Consistency =====
+    function testCompositingModes() {
+        log('\n=== Test 10: globalCompositeOperation Modes ===');
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#00f';
+        ctx.fillRect(10, 200, 30, 30);
+        ctx.fillStyle = 'rgba(255, 255, 0, 0.5)';
+        ctx.fillRect(20, 210, 30, 30);
+
+        var blendSample = ctx.getImageData(35, 225, 1, 1).data;
+        var sourceOverWorks = blendSample[0] > 100 && blendSample[2] > 100;
+        logResult('source-over blending works', sourceOverWorks);
+
+        var originalMode = ctx.globalCompositeOperation;
+        ctx.globalCompositeOperation = 'source-over';
+        var modeSettable = ctx.globalCompositeOperation === 'source-over';
+        logResult('globalCompositeOperation settable', modeSettable);
+        ctx.globalCompositeOperation = originalMode;
+
+        return sourceOverWorks;
+    }
+
+    // ===== RUN ALL TESTS =====
+    function runAllTests() {
+        log('Impact.js Canvas Rendering Test Suite (FIXED)');
+        log('=====================================');
+        log('Focus: Sprite sheets, transformations, pixel-art, state management');
+        log('');
+
+        if (!canvas || !canvas.getContext) {
+            log('*** CRITICAL: Canvas not supported ***');
+            printSummary();
+            return;
+        }
+        ctx = canvas.getContext('2d');
+        vctx = visualCanvas ? visualCanvas.getContext('2d') : null;
+
+        if (!ctx) {
+            log('*** CRITICAL: Could not get 2D context ***');
+            printSummary();
+            return;
+        }
+
+        testDrawImageClipping();
+        testImageSmoothing();
+        testTransformState();
+        testSubpixelPositioning();
+        testFlipMirror();
+        testOffscreenTransfer();
+        testClearRectTransform();
+        testBatchDrawing();
+        testVisualVerification();
+        testCompositingModes();
+
+        printSummary();
+    }
+
+    function printSummary() {
+        log('\n=====================================');
+        log('TEST SUMMARY');
+        log('=====================================');
+        log('Tests Passed: ' + testsPassed);
+        log('Tests Failed: ' + testsFailed);
+        log('Total: ' + (testsPassed + testsFailed));
+        log('');
+
+        if (testsFailed === 0) {
+            log('*** ALL TESTS PASSED ***');
+            log('Canvas rendering supports Impact.js-style games.');
+        } else if (testsFailed <= 3) {
+            log('*** MOST TESTS PASSED ***');
+            log('Minor issues may cause visual glitches.');
+        } else {
+            log('*** MULTIPLE TESTS FAILED ***');
+            log('Check implementation of: drawImage clipping, transformations, imageSmoothingEnabled');
+        }
+    }
+
+    // Initialize
+    if (window.addEventListener) {
+        window.addEventListener('load', runAllTests, false);
+    } else if (window.attachEvent) {
+        window.attachEvent('onload', runAllTests);
+    } else {
+        window.onload = runAllTests;
+    }
+})();
+</script>
+</body>
+</html>

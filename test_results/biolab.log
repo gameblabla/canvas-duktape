@@ -1,0 +1,108 @@
+[parse_html] Found inline script (28772 bytes)
+Parsed Images:
+Warning: failed to load Arial.ttf: Couldn't open Arial.ttf: No such file or directory
+[main] Total scripts: 1
+[main] Script 0: src='', is_inline=1
+[main] Before inline scripts, g_canvas_count=1
+[main] Executing inline script 0...
+[main] Inline script 0 executed successfully
+Impact.js / Biolab Disaster — Targeted Regression Suite
+=========================================================
+Covers: drawTile flipX/Y, ImpactSplashLoader vector logo,
+        imageSmoothingEnabled, globalCompositeOperation=lighter,
+        ig.Image.draw src+scale, rotated tiles, fillText/textAlign
+
+=== T1 · Horizontal Flip (drawTile flipX — player sprite mirror) ===
+[PASS] Unflipped: left side is red  [R=255 B=0]
+[PASS] Unflipped: right side is blue  [R=0 B=255]
+  After flipX: left@(58,16)  R=0 B=255
+  After flipX: right@(74,16) R=255 B=0
+[PASS] FlipX: left side now shows blue (was red)  [R=0 B=255]
+[PASS] FlipX: right side now shows red (was blue)  [R=255 B=0]
+[PASS] FlipX: result is fully opaque  [A=255]
+
+=== T2 · Vertical Flip (drawTile flipY) ===
+[PASS] Unflipped: top is green  [G=200 R=0]
+[PASS] Unflipped: bottom is yellow  [R=255 G=200]
+  After flipY: top@(66,58)    R=255 G=200
+  After flipY: bottom@(66,74) R=0 G=200
+[PASS] FlipY: top now shows yellow (was green)  [R=255 G=200]
+[PASS] FlipY: bottom now shows green (was yellow)  [G=200 R=0]
+
+=== T3 · Combined XY Flip (drawTile flipX+flipY) ===
+  XY flip TL@(108,8):  R=255 G=255 B=255
+  XY flip TR@(124,8):  R=0 G=0 B=255
+  XY flip BL@(108,24): R=0 G=255 B=0
+  XY flip BR@(124,24): R=255 G=0 B=0
+[PASS] XY flip: TL quadrant is now white  [RGB=255,255,255]
+[PASS] XY flip: TR quadrant is now blue  [R=0 B=255]
+[PASS] XY flip: BL quadrant is now green  [G=255 R=0]
+[PASS] XY flip: BR quadrant is now red  [R=255 B=0]
+
+=== T4 · ctx.scale State Isolation After Flip (save/restore) ===
+[PASS] Post-restore blit: left is red (scale not leaked)  [R=255 B=0]
+[PASS] Post-restore blit: right is blue (scale not leaked)  [R=0 B=255]
+
+=== T5 · Nested save/restore Stack Depth ===
+[PASS] Nested restore: outer globalAlpha preserved after inner restore  [alpha=0.8]
+[PASS] Nested restore: globalAlpha back to 1.0 after outer restore  [alpha=1]
+[PASS] Nested flip blit: left is blue  [B=204]
+[PASS] Nested flip blit: right is red  [R=204]
+
+=== T6 · ig.System.getDrawPos Positioning (SMOOTH mode) ===
+[PASS] getDrawPos SMOOTH: scaled tile left is red  [R=255 B=0]
+[PASS] getDrawPos SMOOTH: scaled tile right is blue  [R=0 B=255]
+[PASS] getDrawPos SMOOTH: pixel at exact draw origin is colored
+
+=== T7 · ImpactSplashLoader Vector Logo (bezierCurveTo / fillText) ===
+[PASS] Splash: dark background rendered (A~204)  [A=204]
+[PASS] Splash: background is dark  [RGB=0,0,0]
+  I-bar sample at (217,156): R=255 G=255 B=255
+[PASS] Splash: IMPACT I-bar white pixels rendered  [RGB=255,255,255]
+  Comet sample at (179,142): R=243 G=120 B=31
+[PASS] Splash: bezierCurveTo comet shape rendered (orange present)  [R=243]
+  Progress bar sample at (184,208): R=255 G=255 B=255
+[PASS] Splash: progress bar white fill rendered  [RGB=255,255,255]
+[FAIL] Splash: fillText URL label produced visible pixels
+
+=== T8 · imageSmoothingEnabled=false (CRISP Scale Mode) ===
+  imageSmoothingEnabled=false TL: R=255 G=0 B=0
+[PASS] imageSmoothingEnabled=false: TL is pure red (no blend)  [R=255 B=0]
+[PASS] imageSmoothingEnabled=false: no green bleed into TL  [G=0]
+  imageSmoothingEnabled=true center: R=255 G=0 B=0
+[PASS] imageSmoothingEnabled=true: center has color (A=255)  [A=255]
+
+=== T9 · globalCompositeOperation "lighter" (EntityPlasma) ===
+  "lighter" additive blend: R=200 G=0 B=0
+[PASS] "lighter": R channel is additive (>100)  [R=200]
+[PASS] "lighter": result fully opaque (A=255)  [A=255]
+[PASS] source-over reset: subsequent draw is normal composite (B present)  [B=100]
+[PASS] source-over reset: R channel covered by blue fill  [R=0]
+
+=== T10 · globalCompositeOperation Reset After "lighter" ===
+[PASS] "lighter" additive green: G > single value  [G=160]
+[PASS] source-over after lighter: red fully covers (R>150)  [R=200]
+[PASS] source-over after lighter: green zeroed (G~0)  [G=0]
+
+=== T11 · ig.Image.draw() Source Rect + Scale (Title Screen Images) ===
+  ig.Image.draw with src offset: R=0 G=255 B=0
+[PASS] ig.Image.draw: correct source region selected (green)  [G=255 R=0]
+[PASS] ig.Image.draw: fully opaque  [A=255]
+
+=== T12 · Rotated Tile Draw (ig.Animation angle path) ===
+  Rotated 90°: top@(316,108) R=255 B=0
+  Rotated 90°: bot@(316,124) R=0 B=255
+[PASS] Rotated tile: top quadrant red (original left)  [R=255]
+[PASS] Rotated tile: bottom quadrant blue (original right)  [B=255]
+[PASS] Rotated tile: opaque after rotate  [A=255]
+[PASS] Post-rotate restore: next blit is unrotated (left=red)  [R=255 B=0]
+
+=== T13 · fillText / textAlign / font (ig.Font + Loader URL) ===
+[FAIL] textAlign=right: pixels near right edge
+[FAIL] textAlign=left: pixels near left edge
+[FAIL] textAlign=center: pixels in center band
+[PASS] textAlign isolation: no pixels at x=3 (left of left-aligned text)
+
+=========================================================
+PASSED: 44  FAILED: 4  TOTAL: 48
+4 TEST(S) FAILED - see above

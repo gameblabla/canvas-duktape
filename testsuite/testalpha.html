@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Canvas Alpha Transparency Test Suite</title>
+    <style>
+        body {
+            margin: 20px;
+            font-family: monospace;
+            background: #333;
+        }
+        canvas {
+            border: 2px solid #fff;
+            display: block;
+            margin: 10px 0;
+        }
+        #results {
+            background: #000;
+            color: #0f0;
+            padding: 10px;
+            white-space: pre-wrap;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h2 style="color: #fff;">Canvas Alpha Transparency Test Suite (ES3 Compatible)</h2>
+    <canvas id="testCanvas" width="400" height="300"></canvas>
+    <div id="results"></div>
+
+    <script>
+        // ECMAScript 3 compliant code - no let/const, no arrow functions, no template literals
+
+        (function() {
+            var canvas = document.getElementById('testCanvas');
+            var ctx = null;
+            var testResults = [];
+            var testsPassed = 0;
+            var testsFailed = 0;
+
+            // Logging helper that also displays in the results div
+            function log(message) {
+                console.log(message);
+                var resultsDiv = document.getElementById('results');
+                resultsDiv.innerHTML = resultsDiv.innerHTML + message + '\n';
+            }
+
+            function logResult(testName, passed, details) {
+                var status = passed ? 'PASS' : 'FAIL';
+                var message = '[' + status + '] ' + testName;
+                if (details) {
+                    message = message + ' - ' + details;
+                }
+                log(message);
+                if (passed) {
+                    testsPassed++;
+                } else {
+                    testsFailed++;
+                }
+                testResults.push({
+                    name: testName,
+                    passed: passed,
+                    details: details
+                });
+            }
+
+            // Test 1: Check if canvas element exists and is supported
+            function testCanvasSupport() {
+                log('\n=== Test 1: Canvas Support ===');
+
+                if (!canvas) {
+                    logResult('Canvas element exists', false, 'Canvas element not found');
+                    return false;
+                }
+                logResult('Canvas element exists', true);
+
+                if (!canvas.getContext) {
+                    logResult('getContext method exists', false, 'getContext is not a function - stub implementation');
+                    return false;
+                }
+                logResult('getContext method exists', true);
+
+                ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    logResult('2D context obtainable', false, 'Could not get 2D context');
+                    return false;
+                }
+                logResult('2D context obtainable', true);
+
+                return true;
+            }
+
+            // Test 2: Check for stub implementation by verifying essential methods
+            function testStubImplementation() {
+                log('\n=== Test 2: Stub Implementation Detection ===');
+
+                var requiredMethods = [
+                    'fillRect',
+                    'clearRect',
+                    'getImageData',
+                    'putImageData',
+                    'createImageData',
+                    'drawImage'
+                ];
+
+                var allMethodsExist = true;
+                var i;
+
+                for (i = 0; i < requiredMethods.length; i++) {
+                    var method = requiredMethods[i];
+                    var exists = typeof ctx[method] === 'function';
+                    logResult('Method ' + method + ' exists', exists);
+                    if (!exists) {
+                        allMethodsExist = false;
+                    }
+                }
+
+                // Check if fillStyle property works
+                var originalFillStyle = ctx.fillStyle;
+                ctx.fillStyle = '#ff0000';
+                var fillStyleWorks = ctx.fillStyle !== originalFillStyle || ctx.fillStyle === '#ff0000';
+                logResult('fillStyle property functional', fillStyleWorks);
+
+                // Check globalAlpha property
+                var hasGlobalAlpha = typeof ctx.globalAlpha !== 'undefined';
+                logResult('globalAlpha property exists', hasGlobalAlpha);
+
+                if (hasGlobalAlpha) {
+                    ctx.globalAlpha = 0.5;
+                    var globalAlphaWorks = ctx.globalAlpha === 0.5;
+                    logResult('globalAlpha property functional', globalAlphaWorks);
+                    ctx.globalAlpha = 1.0;
+                }
+
+                return allMethodsExist;
+            }
+
+            // Test 3: Test basic RGBA color support
+            function testRGBAColorSupport() {
+                log('\n=== Test 3: RGBA Color Support ===');
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Draw with RGBA color
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+                ctx.fillRect(10, 10, 50, 50);
+
+                var imageData;
+                try {
+                    imageData = ctx.getImageData(35, 35, 1, 1);
+                } catch (e) {
+                    logResult('getImageData accessible', false, 'Security error or not implemented: ' + e.message);
+                    return false;
+                }
+
+                logResult('getImageData accessible', true);
+
+                var data = imageData.data;
+                logResult('ImageData has data property', data && data.length >= 4, 'Length: ' + (data ? data.length : 0));
+
+                // Check if we got valid pixel data (should be semi-transparent red on transparent background)
+                // Due to premultiplied alpha, values may vary
+                var hasRedChannel = data[0] > 100;
+                var hasLowGreen = data[1] < 50;
+                var hasLowBlue = data[2] < 50;
+                var hasAlpha = data[3] > 50 && data[3] < 200;
+
+                log('  Pixel values: R=' + data[0] + ' G=' + data[1] + ' B=' + data[2] + ' A=' + data[3]);
+
+                logResult('RGBA red channel rendered', hasRedChannel, 'R=' + data[0]);
+                logResult('RGBA alpha channel rendered', hasAlpha, 'A=' + data[3]);
+
+                return true;
+            }
+
+            // Test 4: Test alpha blending (compositing)
+            function testAlphaBlending() {
+                log('\n=== Test 4: Alpha Blending / Compositing ===');
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Draw opaque blue background
+                ctx.fillStyle = 'rgb(0, 0, 255)';
+                ctx.fillRect(70, 10, 50, 50);
+
+                // Draw semi-transparent red on top
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+                ctx.fillRect(80, 20, 50, 50);
+
+                // Read the overlapping area
+                var imageData = ctx.getImageData(90, 35, 1, 1);
+                var data = imageData.data;
+
+                log('  Blended pixel: R=' + data[0] + ' G=' + data[1] + ' B=' + data[2] + ' A=' + data[3]);
+
+                // Should have both red and blue components (purple-ish)
+                var hasRedComponent = data[0] > 50;
+                var hasBlueComponent = data[2] > 50;
+                var isBlended = hasRedComponent && hasBlueComponent;
+
+                logResult('Alpha blending produces mixed colors', isBlended,
+                    'Red and blue should both be present in blended pixel');
+
+                // The alpha should be fully opaque since we drew over opaque background
+                var isOpaque = data[3] > 250;
+                logResult('Blended result is opaque', isOpaque, 'A=' + data[3]);
+
+                return isBlended;
+            }
+
+            // Test 5: Test color keying simulation (common in games)
+            function testColorKeyTransparency() {
+                log('\n=== Test 5: Color Key Transparency (Game RGBA Surfaces) ===');
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Draw a "background" layer
+                ctx.fillStyle = '#00ff00';  // Green background
+                ctx.fillRect(140, 10, 80, 80);
+
+                // Create an ImageData to simulate a sprite with color key
+                var spriteWidth = 40;
+                var spriteHeight = 40;
+                var spriteData = ctx.createImageData(spriteWidth, spriteHeight);
+                var pixels = spriteData.data;
+
+                var x, y, idx;
+                for (y = 0; y < spriteHeight; y++) {
+                    for (x = 0; x < spriteWidth; x++) {
+                        idx = (y * spriteWidth + x) * 4;
+
+                        // Create a simple pattern: red sprite with magenta (255,0,255) as color key
+                        // Center area is visible (red), edges are transparent (using alpha 0)
+                        if (x > 5 && x < 35 && y > 5 && y < 35) {
+                            // Visible sprite area - red
+                            pixels[idx] = 255;     // R
+                            pixels[idx + 1] = 0;   // G
+                            pixels[idx + 2] = 0;   // B
+                            pixels[idx + 3] = 255; // A - fully opaque
+                        } else {
+                            // Color key area - fully transparent
+                            pixels[idx] = 0;       // R
+                            pixels[idx + 1] = 0;   // G
+                            pixels[idx + 2] = 0;   // B
+                            pixels[idx + 3] = 0;   // A - fully transparent
+                        }
+                    }
+                }
+
+                // Put the sprite on top of background
+                ctx.putImageData(spriteData, 150, 20);
+
+                // Read back pixels
+                // Center of sprite should be red
+                var centerData = ctx.getImageData(170, 40, 1, 1);
+                var center = centerData.data;
+                log('  Sprite center: R=' + center[0] + ' G=' + center[1] + ' B=' + center[2] + ' A=' + center[3]);
+
+                var centerIsRed = center[0] > 200 && center[1] < 50 && center[2] < 50;
+                logResult('Sprite center rendered correctly (red)', centerIsRed);
+
+                // Edge of sprite (color key area) - Note: putImageData replaces, doesn't blend
+                var edgeData = ctx.getImageData(152, 22, 1, 1);
+                var edge = edgeData.data;
+                log('  Sprite edge (colorkey): R=' + edge[0] + ' G=' + edge[1] + ' B=' + edge[2] + ' A=' + edge[3]);
+
+                // putImageData replaces pixels directly, so alpha 0 pixels will have alpha 0
+                var edgeIsTransparent = edge[3] === 0;
+                logResult('Color key area has zero alpha', edgeIsTransparent);
+
+                return centerIsRed;
+            }
+
+            // Test 6: Test globalAlpha for sprite transparency
+            function testGlobalAlphaBlending() {
+                log('\n=== Test 6: globalAlpha for Sprite Transparency ===');
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Draw background
+                ctx.fillStyle = '#0000ff';  // Blue
+                ctx.fillRect(230, 10, 60, 60);
+
+                // Draw with globalAlpha
+                ctx.globalAlpha = 0.5;
+                ctx.fillStyle = '#ffff00';  // Yellow
+                ctx.fillRect(240, 20, 40, 40);
+                ctx.globalAlpha = 1.0;  // Reset
+
+                // Read blended area
+                var blendData = ctx.getImageData(260, 40, 1, 1);
+                var blend = blendData.data;
+                log('  Blended with globalAlpha: R=' + blend[0] + ' G=' + blend[1] + ' B=' + blend[2] + ' A=' + blend[3]);
+
+                // Should have yellow blended with blue
+                var hasYellowish = blend[0] > 50 && blend[1] > 50;
+                var hasBluish = blend[2] > 50;
+                var globalAlphaWorks = hasYellowish && hasBluish;
+
+                logResult('globalAlpha blending works', globalAlphaWorks,
+                    'Yellow and blue should be blended');
+
+                return globalAlphaWorks;
+            }
+
+            // Test 7: Test multiple layered transparency
+            function testMultiLayerTransparency() {
+                log('\n=== Test 7: Multi-Layer Transparency (Game Layers) ===');
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Background layer
+                ctx.fillStyle = 'rgb(100, 100, 100)';  // Gray
+                ctx.fillRect(10, 100, 120, 80);
+
+                // Middle layer - semi-transparent
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';  // Red 50%
+                ctx.fillRect(30, 110, 80, 60);
+
+                // Top layer - semi-transparent
+                ctx.fillStyle = 'rgba(0, 0, 255, 0.5)';  // Blue 50%
+                ctx.fillRect(50, 120, 60, 40);
+
+                // Read from area with all three layers
+                var layerData = ctx.getImageData(70, 140, 1, 1);
+                var layers = layerData.data;
+                log('  Three layers blended: R=' + layers[0] + ' G=' + layers[1] + ' B=' + layers[2] + ' A=' + layers[3]);
+
+                // Should have contributions from all colors
+                var hasAllComponents = layers[0] > 30 && layers[2] > 30;
+                logResult('Multi-layer blending works', hasAllComponents);
+
+                // Read from area with only background and red (no blue)
+                var twoLayerData = ctx.getImageData(35, 115, 1, 1);
+                var twoLayers = twoLayerData.data;
+                log('  Two layers (gray+red): R=' + twoLayers[0] + ' G=' + twoLayers[1] + ' B=' + twoLayers[2] + ' A=' + twoLayers[3]);
+
+                var twoLayerCorrect = twoLayers[0] > twoLayers[2];  // Should be more red than blue
+                logResult('Two-layer area correct', twoLayerCorrect);
+
+                return hasAllComponents;
+            }
+
+            // Test 8: Test framebuffer read consistency
+            function testFramebufferReadConsistency() {
+                log('\n=== Test 8: Framebuffer Read/Write Consistency ===');
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Write specific values
+                var testData = ctx.createImageData(10, 10);
+                var i;
+                for (i = 0; i < testData.data.length; i += 4) {
+                    testData.data[i] = 123;     // R
+                    testData.data[i + 1] = 45;  // G
+                    testData.data[i + 2] = 67;  // B
+                    testData.data[i + 3] = 255; // A - fully opaque
+                }
+
+                ctx.putImageData(testData, 150, 100);
+
+                // Read back
+                var readData = ctx.getImageData(155, 105, 1, 1);
+                var read = readData.data;
+                log('  Written: R=123 G=45 B=67 A=255');
+                log('  Read back: R=' + read[0] + ' G=' + read[1] + ' B=' + read[2] + ' A=' + read[3]);
+
+                var isConsistent = read[0] === 123 && read[1] === 45 && read[2] === 67 && read[3] === 255;
+                logResult('Framebuffer read/write consistency', isConsistent);
+
+                // Test with semi-transparent pixels
+                var alphaTestData = ctx.createImageData(10, 10);
+                for (i = 0; i < alphaTestData.data.length; i += 4) {
+                    alphaTestData.data[i] = 200;     // R
+                    alphaTestData.data[i + 1] = 100; // G
+                    alphaTestData.data[i + 2] = 50;  // B
+                    alphaTestData.data[i + 3] = 128; // A - semi-transparent
+                }
+
+                ctx.putImageData(alphaTestData, 170, 100);
+
+                var alphaRead = ctx.getImageData(175, 105, 1, 1);
+                var ar = alphaRead.data;
+                log('  Semi-transparent written: R=200 G=100 B=50 A=128');
+                log('  Semi-transparent read: R=' + ar[0] + ' G=' + ar[1] + ' B=' + ar[2] + ' A=' + ar[3]);
+
+                // Note: Some implementations may have slight variations due to premultiplied alpha
+                var alphaConsistent = Math.abs(ar[0] - 200) < 5 &&
+                                     Math.abs(ar[1] - 100) < 5 &&
+                                     Math.abs(ar[2] - 50) < 5 &&
+                                     Math.abs(ar[3] - 128) < 5;
+                logResult('Semi-transparent read/write consistency', alphaConsistent);
+
+                return isConsistent;
+            }
+
+            // Test 9: Test drawImage with alpha
+            function testDrawImageAlpha() {
+                log('\n=== Test 9: drawImage with Alpha Channel ===');
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Create an offscreen canvas as image source
+                var offscreen = document.createElement('canvas');
+                offscreen.width = 50;
+                offscreen.height = 50;
+                var offCtx = offscreen.getContext('2d');
+
+                if (!offCtx) {
+                    logResult('Offscreen canvas creation', false, 'Could not create offscreen context');
+                    return false;
+                }
+                logResult('Offscreen canvas creation', true);
+
+                // Draw semi-transparent gradient on offscreen
+                offCtx.fillStyle = 'rgba(255, 128, 0, 0.7)';  // Orange, 70% opacity
+                offCtx.fillRect(0, 0, 50, 50);
+
+                // Draw semi-transparent circle
+                offCtx.fillStyle = 'rgba(0, 255, 128, 0.5)';
+                offCtx.beginPath();
+                offCtx.arc(25, 25, 20, 0, Math.PI * 2, true);
+                offCtx.fill();
+
+                // Draw background on main canvas
+                ctx.fillStyle = '#ff00ff';  // Magenta
+                ctx.fillRect(200, 100, 70, 70);
+
+                // Draw offscreen canvas onto main canvas
+                ctx.drawImage(offscreen, 210, 110);
+
+                // Read blended result
+                var drawImageData = ctx.getImageData(235, 135, 1, 1);
+                var di = drawImageData.data;
+                log('  drawImage blended result: R=' + di[0] + ' G=' + di[1] + ' B=' + di[2] + ' A=' + di[3]);
+
+                // Should have multiple color contributions
+                var hasMultipleColors = di[0] > 50 && di[1] > 50;
+                logResult('drawImage preserves alpha blending', hasMultipleColors);
+
+                return hasMultipleColors;
+            }
+
+            // Test 10: Visual verification test - FIXED
+            function testVisualVerification() {
+                log('\n=== Test 10: Visual Verification Pattern ===');
+
+                // Draw a verification pattern in the remaining space
+                var startX = 300;
+                var startY = 100;
+
+                // Solid BLACK background for accurate alpha testing
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(startX, startY, 80, 120);
+
+                // Draw various alpha levels of RED over black background
+                var alphaLevels = [0.1, 0.25, 0.5, 0.75, 0.9];
+                var i;
+                for (i = 0; i < alphaLevels.length; i++) {
+                    ctx.fillStyle = 'rgba(255, 0, 0, ' + alphaLevels[i] + ')';
+                    ctx.fillRect(startX + i * 16, startY + 10, 14, 40);
+                }
+
+                // Sample from center of first bar (alpha 0.1) and last bar (alpha 0.9)
+                // Over black background: red channel should equal roughly alpha * 255
+                var firstSample = ctx.getImageData(startX + 7, startY + 30, 1, 1);
+                var lastSample = ctx.getImageData(startX + 64 + 7, startY + 30, 1, 1);
+
+                var firstRed = firstSample.data[0];
+                var lastRed = lastSample.data[0];
+
+                log('  Alpha 0.1 over black - R=' + firstRed + ' (expected ~26)');
+                log('  Alpha 0.9 over black - R=' + lastRed + ' (expected ~230)');
+
+                // Alpha 0.9 should produce significantly more red than alpha 0.1
+                var alphaGradientWorks = lastRed > firstRed && (lastRed - firstRed) > 100;
+                logResult('Alpha gradient rendering works', alphaGradientWorks,
+                    'Difference: ' + (lastRed - firstRed) + ' (expected >100)');
+
+                // Additional test: verify approximate expected values
+                var firstExpected = Math.round(0.1 * 255);  // ~26
+                var lastExpected = Math.round(0.9 * 255);   // ~230
+
+                var firstAccurate = Math.abs(firstRed - firstExpected) < 10;
+                var lastAccurate = Math.abs(lastRed - lastExpected) < 10;
+
+                logResult('Alpha 0.1 value accurate', firstAccurate,
+                    'Got ' + firstRed + ', expected ~' + firstExpected);
+                logResult('Alpha 0.9 value accurate', lastAccurate,
+                    'Got ' + lastRed + ', expected ~' + lastExpected);
+
+                // Draw checkerboard reference pattern below
+                var j;
+                for (i = 0; i < 5; i++) {
+                    for (j = 0; j < 3; j++) {
+                        ctx.fillStyle = ((i + j) % 2 === 0) ? '#ffffff' : '#888888';
+                        ctx.fillRect(startX + i * 16, startY + 60 + j * 14, 14, 12);
+                    }
+                }
+
+                // Add label
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '10px monospace';
+                if (ctx.fillText) {
+                    ctx.fillText('Alpha: .1  .25  .5  .75  .9', startX, startY + 5);
+                }
+
+                return alphaGradientWorks;
+            }
+
+            // Run all tests
+            function runAllTests() {
+                log('Canvas Alpha Transparency Test Suite');
+                log('=====================================');
+                log('ECMAScript 3 Compatible');
+                log('Testing canvas alpha transparency for game RGBA surfaces');
+                log('');
+
+                var canvasSupported = testCanvasSupport();
+
+                if (!canvasSupported) {
+                    log('\n*** CRITICAL: Canvas not supported. Remaining tests skipped. ***');
+                    printSummary();
+                    return;
+                }
+
+                var notStub = testStubImplementation();
+
+                if (!notStub) {
+                    log('\n*** WARNING: Possible stub implementation detected. ***');
+                }
+
+                testRGBAColorSupport();
+                testAlphaBlending();
+                testColorKeyTransparency();
+                testGlobalAlphaBlending();
+                testMultiLayerTransparency();
+                testFramebufferReadConsistency();
+                testDrawImageAlpha();
+                testVisualVerification();
+
+                printSummary();
+            }
+
+            function printSummary() {
+                log('\n=====================================');
+                log('TEST SUMMARY');
+                log('=====================================');
+                log('Tests Passed: ' + testsPassed);
+                log('Tests Failed: ' + testsFailed);
+                log('Total Tests: ' + (testsPassed + testsFailed));
+                log('');
+
+                if (testsFailed === 0) {
+                    log('*** ALL TESTS PASSED ***');
+                    log('Canvas alpha transparency is fully functional.');
+                    log('RGBA surfaces with color key transparency should work correctly.');
+                } else if (testsFailed < 5) {
+                    log('*** MOST TESTS PASSED ***');
+                    log('Canvas alpha transparency is mostly functional.');
+                    log('Some features may have limitations.');
+                } else {
+                    log('*** MULTIPLE TESTS FAILED ***');
+                    log('Canvas alpha transparency may have significant issues.');
+                    log('Check if canvas implementation is complete.');
+                }
+            }
+
+            // Execute tests when page loads
+            if (window.addEventListener) {
+                window.addEventListener('load', runAllTests, false);
+            } else if (window.attachEvent) {
+                window.attachEvent('onload', runAllTests);
+            } else {
+                window.onload = runAllTests;
+            }
+        })();
+    </script>
+</body>
+</html>

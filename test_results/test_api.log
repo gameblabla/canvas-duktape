@@ -1,0 +1,73 @@
+[parse_html] Found inline script (19924 bytes)
+Parsed Images:
+[main] Total scripts: 1
+[main] Script 0: src='', is_inline=1
+[main] Before inline scripts, g_canvas_count=1
+[main] Executing inline script 0...
+Setting up load event listener
+Added load event listener for runAllTests
+[main] Inline script 0 executed successfully
+========================================
+HTML5 Canvas Test Suite (ES3 Compatible)
+========================================
+Starting test: asyncLoading
+Test 1: Async Resource Loading
+  Loading: 1/4
+  Loading: 2/4
+  Loading: 3/4
+  Loading: 4/4
+  player: PASS
+  enemy: PASS
+  tile: PASS
+  coin: PASS
+  Loaded in 201ms
+Test asyncLoading callback: passed=true
+  >> asyncLoading PASSED
+
+Starting test: offscreenRendering
+Test 2: Offscreen Canvas Rendering
+  Background rendered: PASS
+  Entities rendered: PASS
+  Layers composited: PASS
+Test offscreenRendering callback: passed=true
+  >> offscreenRendering PASSED
+
+Starting test: pixelVerification
+Test 3: Pixel Content Verification
+  Red (255,0,0): PASS
+  Green (0,255,0): PASS
+  Blue (0,0,255): PASS
+  Yellow (255,255,0): PASS
+  Black (0,0,0): PASS
+  Red region: 100.0% match
+  Checksum: 0c57cbd0
+Test pixelVerification callback: passed=true
+  >> pixelVerification PASSED
+
+Starting test: gameLoop
+Test 4: Game Loop & Animation
+  Frames: 60
+  Time: 1043ms
+  FPS: 57.5
+Test gameLoop callback: passed=true
+  >> gameLoop PASSED
+
+Starting test: spriteAnimation
+Test 5: Sprite Sheet Animation
+  Sprite sheet generated: PASS
+  Frame changes: 6
+Test spriteAnimation callback: passed=true
+  >> spriteAnimation PASSED
+
+Starting test: collisionMap
+Test 6: Collision Map & Tile System
+  Tile at (4,4): 1 PASS
+  Tile at (64,48): 0 PASS
+  Tile at (52,28): 2 PASS
+  Tile at (120,88): 1 PASS
+Test collisionMap callback: passed=true
+  >> collisionMap PASSED
+
+========================================
+Results: 6 passed, 0 failed
+========================================

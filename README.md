@@ -10,25 +10,18 @@ This means some Game Maker studio games as well as older HTML5 games. (and newer
 
 # Current status
 
-Boots to BioLab's titlescreen and Derp Puncher's titlescreen.
+Biolab Disaster is playable besides some graphical glitches on loading screen.
+Derp Puncher is playable besides lacking touchscreen/mouse controls.
+Other test examples are playable.
 
 # TODO
 
-- Input (keyboard and mouse)
-- Touchscreen
-- Game controller API
+- Date.now/performance.now support
+- Input (Mouse, Touchscreen, Gamecontroller API)
 - HTML5 Audio support (MP3 support done through minimp3, ogg vorbis through stb_vorbis.h)
-- WebAudio
-- LocalStorage
-
-# Roadmap
-
-- Add basic keyboard and mouse support
-- Support Localstorage
-- Support sound libraries directly such as buzz.js/howl.js through SDL_mixer
-- SDL 1.2 backend for Opendingux handhelds (right now, SDL2 because its currently the best middleground)
-
-
-# Far future
-- Possibly WebGL support through ANGLE?
-- ECMASCript 2015+ (Will possibly need upgrade to Duktape 3+)
+- WebAudio (More advanced, used by more modern games)
+- LocalStorage (Used for saves in games in particular)
+- Add QuickJS-NG backend (the modular framework made this easier) as Duktape lacks proper EMCAScript 5/6 support that's very problematic already for some games
+- Add SDL3 backend for renderer/sound/input (It's using SDL2 currently because that's what i was using then.)
+- SDL1.2 backend (For older platforms like OpenDingux. Canvas API is easier to implement in software)
+- Eventually when support gets further along, custom KOS PVR/Dreamcast support as separate backend (this is why the modular/opaque functions were important)

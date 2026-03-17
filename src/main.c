@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <libgen.h>
+#include <limits.h>
 
 #include "common/types.h"
 #include "renderer/sdl2/renderer_sdl2.h"
@@ -19,6 +22,12 @@ static ScriptInfo g_script_info[MAX_SCRIPTS];
 static int        g_script_count = 0;
 
 /* ============================================================================
+ * Base directory for resolving relative paths (set from HTML file path)
+ * ============================================================================ */
+static char g_base_dir[1024] = {0};
+static char g_original_cwd[1024] = {0};
+
+/* ============================================================================
  * Helper: extract a quoted attribute value from an HTML tag string
  * ============================================================================ */
 static int extract_attribute(const char* tag, const char* attr,
@@ -35,6 +44,26 @@ static int extract_attribute(const char* tag, const char* attr,
     strncpy(value, start, len);
     value[len] = '\0';
     return 1;
+}
+
+/* ============================================================================
+ * Helper: resolve a relative path against the base directory
+ * ============================================================================ */
+static void resolve_relative_path(const char* relative, char* out, size_t out_size) {
+    /* If it's an absolute path or data URL, return as-is */
+    if (relative[0] == '/' || strncmp(relative, "data:", 5) == 0) {
+        strncpy(out, relative, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+    /* If no base dir set, return as-is */
+    if (g_base_dir[0] == '\0') {
+        strncpy(out, relative, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+    /* Combine base dir with relative path */
+    snprintf(out, out_size, "%s/%s", g_base_dir, relative);
 }
 
 /* ============================================================================
@@ -104,9 +133,10 @@ static int parse_html(const char* path) {
                         ScriptInfo* script = &g_script_info[g_script_count];
                         script->is_inline   = 0;
                         script->inline_code = NULL;
-                        strncpy(script->src, src_value, sizeof(script->src) - 1);
+                        /* Resolve relative path against HTML file directory */
+                        resolve_relative_path(src_value, script->src, sizeof(script->src));
                         g_script_count++;
-                        fprintf(stderr, "[parse_html] Found external script: %s\n", src_value);
+                        fprintf(stderr, "[parse_html] Found external script: %s\n", script->src);
                     }
                 } else {
                     inside_script       = 1;
@@ -169,8 +199,11 @@ static int parse_html(const char* path) {
                     inside_img = 0;
                     if (g_image_count < MAX_IMAGES) {
                         ImageInfo* img = &g_image_info[g_image_count];
+                        char src_value[512];
                         extract_attribute(img_buffer, "id",  img->id,  sizeof(img->id));
-                        extract_attribute(img_buffer, "src", img->src, sizeof(img->src));
+                        extract_attribute(img_buffer, "src", src_value, sizeof(src_value));
+                        /* Resolve relative path against HTML file directory */
+                        resolve_relative_path(src_value, img->src, sizeof(img->src));
                         char width_str[32], height_str[32];
                         if (extract_attribute(img_buffer, "width",  width_str,  sizeof(width_str)))
                             img->width  = atoi(width_str);
@@ -184,8 +217,11 @@ static int parse_html(const char* path) {
                 if (strstr(line, ">") != NULL || strstr(line, "/>") != NULL) {
                     if (g_image_count < MAX_IMAGES) {
                         ImageInfo* img = &g_image_info[g_image_count];
+                        char src_value[512];
                         extract_attribute(line, "id",  img->id,  sizeof(img->id));
-                        extract_attribute(line, "src", img->src, sizeof(img->src));
+                        extract_attribute(line, "src", src_value, sizeof(src_value));
+                        /* Resolve relative path against HTML file directory */
+                        resolve_relative_path(src_value, img->src, sizeof(img->src));
                         char width_str[32], height_str[32];
                         if (extract_attribute(line, "width",  width_str,  sizeof(width_str)))
                             img->width  = atoi(width_str);
@@ -217,6 +253,51 @@ static int parse_html(const char* path) {
 }
 
 /* ============================================================================
+ * Helper: get the directory containing the executable
+ * Uses argv[0] with realpath() for portability
+ * Includes fallbacks for platforms without realpath/getcwd
+ * ============================================================================ */
+static void get_exe_dir(const char* argv0, char* out, size_t out_size) {
+    char resolved[PATH_MAX];
+    char* dir;
+    
+    /* Try realpath first (handles symlinks and relative paths) */
+#if defined(HAVE_REALPATH) || !defined(__STRICT_ANSI__)
+    if (realpath(argv0, resolved) != NULL) {
+        dir = dirname(resolved);
+        strncpy(out, dir, out_size - 1);
+        out[out_size - 1] = '\0';
+        return;
+    }
+#else
+    (void)resolved;
+#endif
+    
+    /* Fallback: if argv[0] contains a path separator, extract directory */
+    if (strchr(argv0, '/') != NULL) {
+        char* argv0_copy = strdup(argv0);
+        if (argv0_copy) {
+            dir = dirname(argv0_copy);
+            strncpy(out, dir, out_size - 1);
+            out[out_size - 1] = '\0';
+            free(argv0_copy);
+            return;
+        }
+    }
+    
+    /* Last resort: use current directory if available */
+#if defined(HAVE_GETCWD) || !defined(__STRICT_ANSI__)
+    if (getcwd(out, out_size) != NULL) {
+        return;
+    }
+#endif
+    
+    /* Ultimate fallback: use "." */
+    strncpy(out, ".", out_size - 1);
+    out[out_size - 1] = '\0';
+}
+
+/* ============================================================================
  * Main entry point
  * ============================================================================ */
 int main(int argc, char** argv) {
@@ -225,6 +306,19 @@ int main(int argc, char** argv) {
         return 1;
     }
     const char* html_path = argv[1];
+
+    /* --- Get executable directory for resource files (fonts, etc.) --- */
+    get_exe_dir(argv[0], g_original_cwd, sizeof(g_original_cwd));
+    
+    /* Extract directory from HTML path */
+    char* html_path_copy = strdup(html_path);
+    if (html_path_copy) {
+        char* dir = dirname(html_path_copy);
+        if (dir && strcmp(dir, ".") != 0) {
+            strncpy(g_base_dir, dir, sizeof(g_base_dir) - 1);
+        }
+        free(html_path_copy);
+    }
 
     /* --- Parse HTML --- */
     memset(g_canvas_info, 0, sizeof(g_canvas_info));
@@ -246,6 +340,9 @@ int main(int argc, char** argv) {
     InputInterface    input;
     SoundInterface    sound;
     JSCoreInterface   jscore;
+
+    /* Set resource directory for renderer (fonts, etc.) */
+    renderer_sdl2_set_resource_dir(g_original_cwd);
 
     renderer_sdl2_init_iface(&renderer);
     input_sdl2_init_iface(&input);
