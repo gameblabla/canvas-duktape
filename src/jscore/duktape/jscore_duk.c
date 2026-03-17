@@ -6,6 +6,7 @@
 #include "duktape.h"
 #include "duktape/extras/console/duk_console.h"
 #include "jscore_duk.h"
+#include "sound/SDL2/sound_sdl2.h"
 
 /* ============================================================================
  * Module-level state
@@ -98,6 +99,33 @@ static int g_keyup_listener_count   = 0;
  * ============================================================================ */
 static StorageItem g_storage[MAX_STORAGE_ITEMS];
 static int         g_storage_count = 0;
+
+/* ============================================================================
+ * Audio element state (maps JS Audio objects to native audio sources)
+ * ============================================================================ */
+#define MAX_HTML5_AUDIO_ELEMENTS 64
+typedef struct {
+    int    audio_index;  /* index into g_audio_sources */
+    char   src[512];
+    int    loop;
+    float  volume;
+    int    paused;
+    int    ended;
+    int    canplaythrough_funcId;
+    int    loadeddata_funcId;
+} Html5AudioElement;
+
+static Html5AudioElement g_audio_elements[MAX_HTML5_AUDIO_ELEMENTS];
+static int g_audio_element_count = 0;
+
+/* Initialize audio elements array (called once at startup) */
+static void init_audio_elements(void) {
+    for (int i = 0; i < MAX_HTML5_AUDIO_ELEMENTS; i++) {
+        g_audio_elements[i].audio_index = -1;
+        g_audio_elements[i].loadeddata_funcId = -1;
+        g_audio_elements[i].canplaythrough_funcId = -1;
+    }
+}
 
 /* ============================================================================
  * Forward declarations
@@ -1451,55 +1479,231 @@ static duk_ret_t js_onload_get(duk_context* ctx) {
 }
 
 /* ============================================================================
- * Audio (stubs)
+ * Audio (HTML5 Audio element with real playback)
  * ============================================================================ */
-static duk_ret_t js_audio_load(duk_context* ctx) {
-    duk_push_this(ctx); return 1;
+
+/* Allocate new audio element slot */
+static int alloc_audio_element(void) {
+    for (int i = 0; i < MAX_HTML5_AUDIO_ELEMENTS; i++) {
+        if (g_audio_elements[i].audio_index < 0) {
+            return i;
+        }
+    }
+    return -1;
 }
+
+static duk_ret_t js_audio_load(duk_context* ctx) {
+    /* Stack: [args...] */
+    duk_push_this(ctx);  /* stack: [this] */
+    duk_get_prop_string(ctx, -1, "src");  /* stack: [this, src] */
+    const char* src = duk_get_string(ctx, -1);
+
+    if (!src || src[0] == '\0') {
+        duk_pop_2(ctx);  /* stack: [] */
+        duk_push_this(ctx);  /* stack: [this] */
+        return 1;
+    }
+
+    /* Allocate element slot - each Audio object gets its own native slot
+     * This allows multiple instances of the same sound to play concurrently */
+    int elem_idx = alloc_audio_element();
+    if (elem_idx < 0) {
+        fprintf(stderr, "[Audio] Too many audio elements\n");
+        duk_pop_2(ctx);  /* stack: [] */
+        duk_push_this(ctx);  /* stack: [this] */
+        return 1;
+    }
+
+    Html5AudioElement* elem = &g_audio_elements[elem_idx];
+    memset(elem, 0, sizeof(Html5AudioElement));
+    elem->audio_index = -1;
+    elem->volume = 1.0f;
+    elem->paused = 1;
+    elem->canplaythrough_funcId = -1;
+    elem->loadeddata_funcId = -1;
+    strncpy(elem->src, src, sizeof(elem->src) - 1);
+
+    /* Load audio into native backend (path resolution handled in sound_sdl2.c) */
+    int native_index;
+    if (sound_load_audio(src, &native_index) >= 0) {
+        elem->audio_index = native_index;
+        fprintf(stderr, "[Audio] Loaded: %s (native slot %d, element %d)\n",
+                src, native_index, elem_idx);
+
+        /* stack: [this, src] */
+        /* Store indices on JS object - use dup to get this object */
+        duk_dup(ctx, 0);  /* stack: [this, src, this] */
+        duk_push_int(ctx, elem_idx);
+        duk_put_prop_string(ctx, -2, "_audioIndex");  /* stack: [this, src, this] */
+        duk_push_int(ctx, native_index);
+        duk_put_prop_string(ctx, -2, "_nativeIndex");  /* stack: [this, src, this] */
+
+        /* Get duration */
+        float duration = sound_get_duration(native_index);
+        duk_push_number(ctx, duration);
+        duk_put_prop_string(ctx, -2, "duration");  /* stack: [this, src, this] */
+        duk_pop(ctx);  /* stack: [this, src] */
+    } else {
+        fprintf(stderr, "[Audio] Failed to load: %s\n", src);
+        /* stack: [this, src] */
+        duk_dup(ctx, 0);  /* stack: [this, src, this] */
+        duk_push_int(ctx, -1);
+        duk_put_prop_string(ctx, -2, "_audioIndex");  /* stack: [this, src, this] */
+        duk_push_int(ctx, -1);
+        duk_put_prop_string(ctx, -2, "_nativeIndex");  /* stack: [this, src, this] */
+        duk_pop(ctx);  /* stack: [this, src] */
+    }
+
+    duk_pop_2(ctx);  /* stack: [] */
+    duk_push_this(ctx);  /* stack: [this] */
+    return 1;
+}
+
 static duk_ret_t js_audio_play(duk_context* ctx) {
     duk_push_this(ctx);
-    duk_push_false(ctx); duk_put_prop_string(ctx,-2,"paused");
+    duk_get_prop_string(ctx, -1, "_nativeIndex");
+    int native_index = duk_get_int(ctx, -1);
+    duk_pop(ctx);
+
+    if (native_index >= 0) {
+        sound_play(native_index);
+        
+        /* Update element state */
+        duk_get_prop_string(ctx, -1, "_audioIndex");
+        int elem_idx = duk_get_int(ctx, -1);
+        duk_pop(ctx);
+        
+        if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+            g_audio_elements[elem_idx].paused = 0;
+            g_audio_elements[elem_idx].ended = 0;
+        }
+        
+        duk_push_false(ctx);
+        duk_put_prop_string(ctx, -2, "paused");
+    } else {
+        duk_push_true(ctx);
+        duk_put_prop_string(ctx, -2, "paused");
+    }
+
+    duk_push_undefined(ctx); /* Audio.play() returns Promise, but we return undefined for simplicity */
+    duk_replace(ctx, -3);
     return 1;
 }
+
 static duk_ret_t js_audio_pause(duk_context* ctx) {
     duk_push_this(ctx);
-    duk_push_true(ctx); duk_put_prop_string(ctx,-2,"paused");
-    return 1;
-}
-static duk_ret_t js_audio_canPlayType(duk_context* ctx) {
-    const char* t=duk_get_string(ctx,0);
-    if (t&&(strstr(t,"ogg")||strstr(t,"mp3")||strstr(t,"wav")||strstr(t,"mpeg")))
-        duk_push_string(ctx,"maybe");
-    else duk_push_string(ctx,"");
-    return 1;
-}
-static duk_ret_t js_audio_addEventListener(duk_context* ctx) {
-    const char* ev=duk_get_string(ctx,0);
-    if (duk_is_callable(ctx,1) &&
-        (strcmp(ev,"canplaythrough")==0||strcmp(ev,"loadeddata")==0)) {
-        duk_dup(ctx,1); duk_push_this(ctx);
-        if (duk_pcall(ctx,1)!=0)
-            fprintf(stderr,"[Audio] event err: %s\n",duk_safe_to_string(ctx,-1));
+    duk_get_prop_string(ctx, -1, "_nativeIndex");
+    int native_index = duk_get_int(ctx, -1);
+    duk_pop(ctx);
+
+    if (native_index >= 0) {
+        sound_pause(native_index);
+        
+        /* Update element state */
+        duk_get_prop_string(ctx, -1, "_audioIndex");
+        int elem_idx = duk_get_int(ctx, -1);
         duk_pop(ctx);
+        
+        if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+            g_audio_elements[elem_idx].paused = 1;
+        }
+        
+        duk_push_true(ctx);
+        duk_put_prop_string(ctx, -2, "paused");
     }
+
+    duk_push_this(ctx);
+    return 1;
+}
+
+static duk_ret_t js_audio_canPlayType(duk_context* ctx) {
+    const char* t = duk_get_string(ctx, 0);
+    if (t && (strstr(t, "ogg") || strstr(t, "mp3") || strstr(t, "wav") || strstr(t, "mpeg"))) {
+        duk_push_string(ctx, "probably");
+    } else {
+        duk_push_string(ctx, "");
+    }
+    return 1;
+}
+
+static duk_ret_t js_audio_addEventListener(duk_context* ctx) {
+    const char* ev = duk_get_string(ctx, 0);
+
+    if (!duk_is_callable(ctx, 1)) {
+        return 0;
+    }
+
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "_audioIndex");
+    int elem_idx = duk_get_int(ctx, -1);
+    duk_pop(ctx);  /* pop _audioIndex value */
+    duk_pop(ctx);  /* pop this */
+
+    if (elem_idx < 0 || elem_idx >= MAX_HTML5_AUDIO_ELEMENTS) {
+        return 0;
+    }
+
+    Html5AudioElement* elem = &g_audio_elements[elem_idx];
+    int fid = store_func(ctx, 1);
+
+    if (strcmp(ev, "canplaythrough") == 0) {
+        elem->canplaythrough_funcId = fid;
+    } else if (strcmp(ev, "loadeddata") == 0) {
+        elem->loadeddata_funcId = fid;
+    } else if (strcmp(ev, "ended") == 0) {
+        /* Store for later trigger */
+        elem->loadeddata_funcId = fid; /* reuse for simplicity */
+    }
+
     return 0;
 }
+
 static duk_ret_t js_html5_audio(duk_context* ctx) {
-    const char* src=duk_get_string(ctx,0);
+    const char* src = duk_get_string(ctx, 0);
     duk_push_this(ctx);
-    if (src) { duk_push_string(ctx,src); duk_put_prop_string(ctx,-2,"src"); }
-    duk_push_c_function(ctx,js_audio_load,0);        duk_put_prop_string(ctx,-2,"load");
-    duk_push_c_function(ctx,js_audio_play,0);        duk_put_prop_string(ctx,-2,"play");
-    duk_push_c_function(ctx,js_audio_pause,0);       duk_put_prop_string(ctx,-2,"pause");
-    duk_push_c_function(ctx,js_audio_canPlayType,1); duk_put_prop_string(ctx,-2,"canPlayType");
-    duk_push_c_function(ctx,js_audio_addEventListener,2); duk_put_prop_string(ctx,-2,"addEventListener");
-    duk_push_c_function(ctx,js_noop,DUK_VARARGS);   duk_put_prop_string(ctx,-2,"removeEventListener");
-    duk_push_false(ctx); duk_put_prop_string(ctx,-2,"loop");
-    duk_push_number(ctx,1.0); duk_put_prop_string(ctx,-2,"volume");
-    duk_push_true(ctx);  duk_put_prop_string(ctx,-2,"paused");
-    duk_push_false(ctx); duk_put_prop_string(ctx,-2,"ended");
-    duk_push_number(ctx,0); duk_put_prop_string(ctx,-2,"currentTime");
-    duk_push_number(ctx,0); duk_put_prop_string(ctx,-2,"duration");
+
+    /* Initialize element slot */
+    int elem_idx = alloc_audio_element();
+    if (elem_idx >= 0) {
+        memset(&g_audio_elements[elem_idx], 0, sizeof(Html5AudioElement));
+        g_audio_elements[elem_idx].audio_index = -1;
+        g_audio_elements[elem_idx].volume = 1.0f;
+        g_audio_elements[elem_idx].paused = 1;
+        g_audio_elements[elem_idx].canplaythrough_funcId = -1;
+        g_audio_elements[elem_idx].loadeddata_funcId = -1;
+        
+        duk_push_int(ctx, elem_idx);
+        duk_put_prop_string(ctx, -2, "_audioIndex");
+        duk_push_int(ctx, -1);
+        duk_put_prop_string(ctx, -2, "_nativeIndex");
+    }
+
+    if (src && src[0] != '\0') {
+        duk_push_string(ctx, src);
+        duk_put_prop_string(ctx, -2, "src");
+        
+        /* Auto-load if src provided */
+        if (elem_idx >= 0) {
+            strncpy(g_audio_elements[elem_idx].src, src, sizeof(g_audio_elements[elem_idx].src) - 1);
+        }
+    }
+
+    /* Methods */
+    duk_push_c_function(ctx, js_audio_load, 0);        duk_put_prop_string(ctx, -2, "load");
+    duk_push_c_function(ctx, js_audio_play, 0);        duk_put_prop_string(ctx, -2, "play");
+    duk_push_c_function(ctx, js_audio_pause, 0);       duk_put_prop_string(ctx, -2, "pause");
+    duk_push_c_function(ctx, js_audio_canPlayType, 1); duk_put_prop_string(ctx, -2, "canPlayType");
+    duk_push_c_function(ctx, js_audio_addEventListener, 2); duk_put_prop_string(ctx, -2, "addEventListener");
+    duk_push_c_function(ctx, js_noop, DUK_VARARGS);    duk_put_prop_string(ctx, -2, "removeEventListener");
+
+    /* Properties */
+    duk_push_false(ctx);  duk_put_prop_string(ctx, -2, "loop");
+    duk_push_number(ctx, 1.0); duk_put_prop_string(ctx, -2, "volume");
+    duk_push_true(ctx);   duk_put_prop_string(ctx, -2, "paused");
+    duk_push_false(ctx);  duk_put_prop_string(ctx, -2, "ended");
+    duk_push_number(ctx, 0); duk_put_prop_string(ctx, -2, "currentTime");
+    duk_push_number(ctx, 0); duk_put_prop_string(ctx, -2, "duration");
+
     return 0;
 }
 static duk_ret_t js_html_element_ctor(duk_context* ctx) {
@@ -1712,6 +1916,10 @@ static int jsi_init(RendererInterface* renderer,
     g_ctx = duk_create_heap_default();
     if (!g_ctx) { fprintf(stderr,"duk_create_heap failed\n"); return 0; }
     duk_console_init(g_ctx, DUK_CONSOLE_PROXY_WRAPPER | DUK_CONSOLE_FLUSH);
+    
+    /* Initialize audio elements */
+    init_audio_elements();
+    
     /* Init canvas transform to identity */
     g_cs.m[0]=1; g_cs.m[1]=0; g_cs.m[2]=0;
     g_cs.m[3]=1; g_cs.m[4]=0; g_cs.m[5]=0;

@@ -349,6 +349,9 @@ int main(int argc, char** argv) {
     sound_sdl2_init_iface(&sound);
     jscore_duk_init_iface(&jscore);
 
+    /* Set base directory for sound (for resolving relative audio paths) */
+    sound_set_base_dir(g_base_dir);
+
     if (!renderer.init(win_w, win_h, "Canvas Demo")) {
         fprintf(stderr, "Renderer init failed.\n");
         return 1;

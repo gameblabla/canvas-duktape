@@ -16,12 +16,12 @@
 
 CC = gcc
 CFLAGS = -Wall -c -std=gnu99 -O3 -march=native -flto -DNDEBUG
-LDFLAGS = -lm -lSDL2 -lSDL2_image -lSDL2_ttf -lz
+LDFLAGS = -lm -lSDL2 -lSDL2_image -lSDL2_ttf -lz -lvorbisfile -lvorbis -logg
 
 # Include paths
 INCLUDES = -I. -I/usr/include/SDL2 -D_GNU_SOURCE=1 -D_REENTRANT
 INCLUDES += -Iduktape/src -Iduktape/extras -Iduktape/extras/duk-v1-compat -Iduktape/extras/console
-INCLUDES += -Isrc
+INCLUDES += -Isrc -Isound/libs
 
 # ============================================================================
 # Feature Detection
@@ -134,7 +134,7 @@ src/input/SDL2/%.o: src/input/SDL2/%.c src/input/SDL2/%.h
 # ----------------------------------------------------------------------------
 # Sound Backends
 # ----------------------------------------------------------------------------
-src/sound/SDL2/%.o: src/sound/SDL2/%.c src/sound/SDL2/%.h
+src/sound/SDL2/%.o: src/sound/SDL2/%.c src/sound/SDL2/%.h src/sound/libs/dr_mp3.h src/sound/libs/minivorbis.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
 
