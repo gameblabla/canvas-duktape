@@ -71,6 +71,9 @@ typedef struct {
     int stack_capacity;
 } Canvas2DContext;
 
+/* Size of state to save/restore (everything before path tracking) */
+#define STATE_SIZE (offsetof(Canvas2DContext, path_pts))
+
 static Canvas2DContext g_ctx2d = {0};
 
 /* Timers */
@@ -257,16 +260,14 @@ static void push_state(void) {
         g_ctx2d.state_stack = realloc(g_ctx2d.state_stack, new_cap * sizeof(*g_ctx2d.state_stack));
         g_ctx2d.stack_capacity = new_cap;
     }
-    memcpy(&g_ctx2d.state_stack[g_ctx2d.stack_top], &g_ctx2d, sizeof(g_ctx2d) - 
-           offsetof(Canvas2DContext, state_stack));
+    memcpy(&g_ctx2d.state_stack[g_ctx2d.stack_top], &g_ctx2d, STATE_SIZE);
     g_ctx2d.stack_top++;
 }
 
 static void pop_state(void) {
     if (g_ctx2d.stack_top > 0) {
         g_ctx2d.stack_top--;
-        memcpy(&g_ctx2d, &g_ctx2d.state_stack[g_ctx2d.stack_top], 
-               sizeof(g_ctx2d) - offsetof(Canvas2DContext, state_stack));
+        memcpy(&g_ctx2d, &g_ctx2d.state_stack[g_ctx2d.stack_top], STATE_SIZE);
     }
 }
 
@@ -645,6 +646,26 @@ static JSValue js_ctx2d_save(JSContext *ctx, JSValueConst this_val,
 static JSValue js_ctx2d_restore(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
     pop_state();
+    
+    /* Update the JS context object properties to match restored state */
+    char buf[64];
+    snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,%.2f)",
+             (int)(g_ctx2d.fill_color[0] * 255),
+             (int)(g_ctx2d.fill_color[1] * 255),
+             (int)(g_ctx2d.fill_color[2] * 255),
+             g_ctx2d.fill_color[3]);
+    JS_SetPropertyStr(ctx, (JSValue)this_val, "fillStyle", JS_NewString(ctx, buf));
+    
+    snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,%.2f)",
+             (int)(g_ctx2d.stroke_color[0] * 255),
+             (int)(g_ctx2d.stroke_color[1] * 255),
+             (int)(g_ctx2d.stroke_color[2] * 255),
+             g_ctx2d.stroke_color[3]);
+    JS_SetPropertyStr(ctx, (JSValue)this_val, "strokeStyle", JS_NewString(ctx, buf));
+    
+    JS_SetPropertyStr(ctx, (JSValue)this_val, "lineWidth", JS_NewFloat64(ctx, g_ctx2d.line_width));
+    JS_SetPropertyStr(ctx, (JSValue)this_val, "globalAlpha", JS_NewFloat64(ctx, g_ctx2d.global_alpha));
+    
     return JS_UNDEFINED;
 }
 
