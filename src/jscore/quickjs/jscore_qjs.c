@@ -40,22 +40,24 @@ typedef struct {
     double fill_color[4]; /* RGBA 0-1 */
     double stroke_color[4];
     int line_width;
+    double global_alpha;  /* 0.0 - 1.0 */
     char font[256];
     int font_size;
     char text_align[32];
     char text_baseline[32];
-    
+
     /* Path tracking */
     double *path_pts;
     int path_count;
     int path_capacity;
-    
+
     /* State stack for save/restore */
     struct {
         double transform[6];
         double fill_color[4];
         double stroke_color[4];
         int line_width;
+        double global_alpha;
         char font[256];
         int font_size;
         char text_align[32];
@@ -121,8 +123,47 @@ typedef struct {
 
 static CanvasObject g_canvases[32];
 
-/* Audio elements */
+/* Audio elements - HTML5 Audio wrapper */
+#define MAX_HTML5_AUDIO_ELEMENTS 16
+
 typedef struct {
+    int in_use;
+    int native_index;  /* Index into sound system */
+    char src[512];
+    double volume;
+    double duration;
+    int paused;
+    int ended;
+    JSValue loadeddata_listener;
+    JSValue canplaythrough_listener;
+} Html5AudioElement;
+
+static Html5AudioElement g_audio_elements[MAX_HTML5_AUDIO_ELEMENTS];
+
+/* Find or allocate audio element */
+static int alloc_audio_element(void) {
+    for (int i = 0; i < MAX_HTML5_AUDIO_ELEMENTS; i++) {
+        if (!g_audio_elements[i].in_use) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_audio_element_by_src(const char *src) {
+    for (int i = 0; i < MAX_HTML5_AUDIO_ELEMENTS; i++) {
+        if (g_audio_elements[i].in_use && 
+            g_audio_elements[i].src[0] != '\0' &&
+            strcmp(g_audio_elements[i].src, src) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Audio object for JS (different from Html5AudioElement) */
+typedef struct {
+    int elem_index;  /* Index into g_audio_elements */
     char src[512];
     double volume;
     int paused;
@@ -131,6 +172,30 @@ typedef struct {
 /* ============================================================================
  * Helper Functions
  * ============================================================================ */
+
+static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
+    /* Get canvas ID from context object */
+    JSValue canvas_id_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
+    int canvas_id = 0;
+    if (!JS_IsUndefined(canvas_id_val)) {
+        JS_ToInt32(ctx, &canvas_id, canvas_id_val);
+    }
+    JS_FreeValue(ctx, canvas_id_val);
+    
+    /* If canvas_id is 0, use main texture */
+    if (canvas_id == 0) {
+        return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    }
+    
+    /* Find canvas by ID */
+    for (int i = 0; i < 32; i++) {
+        if (g_canvases[i].id == canvas_id) {
+            return g_canvases[i].tex_handle;
+        }
+    }
+    
+    return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+}
 
 static void init_transform(double *m) {
     m[0] = 1.0; m[1] = 0.0;
@@ -259,6 +324,72 @@ static void color_from_js(JSValue v, double *out) {
         out[2] = ((c >> 8) & 0xFF) / 255.0;
         out[3] = (c & 0xFF) / 255.0;
         if (out[3] == 0) out[3] = 1.0;  /* Default alpha */
+    } else if (JS_IsString(v)) {
+        /* String color: "#RRGGBB", "#RRGGBBAA", "rgb(r,g,b)", "rgba(r,g,b,a)", or named color */
+        const char *str = JS_ToCString(g_ctx, v);
+        if (str) {
+            /* Simple named colors */
+            if (strcmp(str, "red") == 0) {
+                out[0] = 1.0; out[1] = 0; out[2] = 0; out[3] = 1.0;
+            } else if (strcmp(str, "green") == 0) {
+                out[0] = 0; out[1] = 1.0; out[2] = 0; out[3] = 1.0;
+            } else if (strcmp(str, "blue") == 0) {
+                out[0] = 0; out[1] = 0; out[2] = 1.0; out[3] = 1.0;
+            } else if (strcmp(str, "black") == 0) {
+                out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1.0;
+            } else if (strcmp(str, "white") == 0) {
+                out[0] = 1.0; out[1] = 1.0; out[2] = 1.0; out[3] = 1.0;
+            } else if (strcmp(str, "yellow") == 0) {
+                out[0] = 1.0; out[1] = 1.0; out[2] = 0; out[3] = 1.0;
+            } else if (strcmp(str, "cyan") == 0) {
+                out[0] = 0; out[1] = 1.0; out[2] = 1.0; out[3] = 1.0;
+            } else if (strcmp(str, "magenta") == 0) {
+                out[0] = 1.0; out[1] = 0; out[2] = 1.0; out[3] = 1.0;
+            } else if (strcmp(str, "transparent") == 0) {
+                out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+            } else if (str[0] == '#') {
+                /* Hex color #RRGGBB or #RRGGBBAA */
+                unsigned int r, g, b, a = 255;
+                if (strlen(str) == 7) {
+                    sscanf(str, "#%02x%02x%02x", &r, &g, &b);
+                } else if (strlen(str) == 9) {
+                    sscanf(str, "#%02x%02x%02x%02x", &r, &g, &b, &a);
+                } else {
+                    r = g = b = 0;
+                }
+                out[0] = r / 255.0;
+                out[1] = g / 255.0;
+                out[2] = b / 255.0;
+                out[3] = a / 255.0;
+            } else if (strncmp(str, "rgba(", 5) == 0) {
+                /* rgba(r,g,b,a) */
+                int r, g, b;
+                float a;
+                if (sscanf(str, "rgba(%d,%d,%d,%f)", &r, &g, &b, &a) == 4) {
+                    out[0] = r / 255.0;
+                    out[1] = g / 255.0;
+                    out[2] = b / 255.0;
+                    out[3] = a;
+                } else {
+                    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1;
+                }
+            } else if (strncmp(str, "rgb(", 4) == 0) {
+                /* rgb(r,g,b) */
+                int r, g, b;
+                if (sscanf(str, "rgb(%d,%d,%d)", &r, &g, &b) == 3) {
+                    out[0] = r / 255.0;
+                    out[1] = g / 255.0;
+                    out[2] = b / 255.0;
+                    out[3] = 1.0;
+                } else {
+                    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1;
+                }
+            } else {
+                /* Default to black */
+                out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1;
+            }
+            JS_FreeCString(g_ctx, str);
+        }
     } else {
         /* Default to black */
         out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1;
@@ -618,6 +749,17 @@ static JSValue js_ctx2d_get_lineWidth(JSContext *ctx, JSValueConst this_val) {
     return JS_NewInt32(ctx, g_ctx2d.line_width);
 }
 
+static JSValue js_ctx2d_set_globalAlpha(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    JS_ToFloat64(ctx, &g_ctx2d.global_alpha, val);
+    if (g_ctx2d.global_alpha < 0.0) g_ctx2d.global_alpha = 0.0;
+    if (g_ctx2d.global_alpha > 1.0) g_ctx2d.global_alpha = 1.0;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_ctx2d_get_globalAlpha(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewFloat64(ctx, g_ctx2d.global_alpha);
+}
+
 static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
     const char *font = JS_ToCString(ctx, val);
     if (font) {
@@ -842,11 +984,11 @@ static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
     uint8_t b = color_to_byte(g_ctx2d.fill_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.fill_color[3]);
     
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         return JS_UNDEFINED;
     }
-    
+
     /* Transform points */
     double *pts = malloc(g_ctx2d.path_count * 2 * sizeof(double));
     for (int i = 0; i < g_ctx2d.path_count; i++) {
@@ -874,11 +1016,11 @@ static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
     uint8_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.stroke_color[3]);
     
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         return JS_UNDEFINED;
     }
-    
+
     /* Draw lines between consecutive points */
     for (int i = 0; i < g_ctx2d.path_count - 1; i++) {
         double x1, y1, x2, y2;
@@ -898,34 +1040,26 @@ static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
-    double x = 0, y = 0, w = 0, h = 0;
-    if (argc >= 1) JS_ToFloat64(ctx, &x, argv[0]);
-    if (argc >= 2) JS_ToFloat64(ctx, &y, argv[1]);
-    if (argc >= 3) JS_ToFloat64(ctx, &w, argv[2]);
-    if (argc >= 4) JS_ToFloat64(ctx, &h, argv[3]);
-    
+    int x = 0, y = 0, w = 0, h = 0;
+    if (argc >= 1) JS_ToInt32(ctx, &x, argv[0]);
+    if (argc >= 2) JS_ToInt32(ctx, &y, argv[1]);
+    if (argc >= 3) JS_ToInt32(ctx, &w, argv[2]);
+    if (argc >= 4) JS_ToInt32(ctx, &h, argv[3]);
+
     if (!g_renderer) return JS_UNDEFINED;
-    
+
     uint8_t r = color_to_byte(g_ctx2d.fill_color[0]);
     uint8_t g = color_to_byte(g_ctx2d.fill_color[1]);
     uint8_t b = color_to_byte(g_ctx2d.fill_color[2]);
-    uint8_t a = color_to_byte(g_ctx2d.fill_color[3]);
-    
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    uint8_t a = (uint8_t)(color_to_byte(g_ctx2d.fill_color[3]) * g_ctx2d.global_alpha);
+
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) return JS_UNDEFINED;
-    
-    /* Transform corners */
-    double x1, y1, x2, y2, x3, y3, x4, y4;
-    transform_point(&x1, &y1, g_ctx2d.transform, x, y);
-    transform_point(&x2, &y2, g_ctx2d.transform, x + w, y);
-    transform_point(&x3, &y3, g_ctx2d.transform, x + w, y + h);
-    transform_point(&x4, &y4, g_ctx2d.transform, x, y + h);
-    
-    double pts[8] = {x1, y1, x2, y2, x3, y3, x4, y4};
-    if (g_renderer->fill_polygon) {
-        g_renderer->fill_polygon(target, pts, 4, r, g, b, a, 0);
+
+    if (g_renderer->fill_rect) {
+        g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, 0, g_ctx2d.transform);
     }
-    
+
     return JS_UNDEFINED;
 }
 
@@ -944,7 +1078,7 @@ static JSValue js_ctx2d_strokeRect(JSContext *ctx, JSValueConst this_val,
     uint8_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.stroke_color[3]);
     
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) return JS_UNDEFINED;
     
     if (g_renderer->stroke_rect) {
@@ -964,7 +1098,7 @@ static JSValue js_ctx2d_clearRect(JSContext *ctx, JSValueConst this_val,
     
     if (!g_renderer) return JS_UNDEFINED;
     
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) return JS_UNDEFINED;
     
     if (g_renderer->clear_rect) {
@@ -977,18 +1111,18 @@ static JSValue js_ctx2d_clearRect(JSContext *ctx, JSValueConst this_val,
 static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     if (argc < 1 || !g_renderer) return JS_UNDEFINED;
-    
+
     /* Get image object */
     JSValue img_obj = argv[0];
     int img_id = (int)(intptr_t)JS_GetOpaque(img_obj, js_image_class_id);
     int img_idx = find_image_by_id(img_id);
-    
+
     /* Also check for canvas */
     int canvas_id = (int)(intptr_t)JS_GetOpaque(img_obj, js_canvas_class_id);
-    
+
     void *img_handle = NULL;
     int img_w = 0, img_h = 0;
-    
+
     if (img_idx >= 0 && g_images[img_idx].img_handle) {
         img_handle = g_images[img_idx].img_handle;
         img_w = g_images[img_idx].width;
@@ -1004,49 +1138,48 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
             }
         }
     }
-    
-    if (!img_handle) return JS_UNDEFINED;
-    
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
-    if (!target) return JS_UNDEFINED;
-    
-    double sx = 0, sy = 0, sw = img_w, sh = img_h;
-    double dx = 0, dy = 0, dw = img_w, dh = img_h;
-    
+
+    if (!img_handle) {
+        return JS_UNDEFINED;
+    }
+
+    void *target = get_current_canvas_texture(ctx, this_val);
+    if (!target) {
+        return JS_UNDEFINED;
+    }
+
+    int sx = 0, sy = 0, sw = img_w, sh = img_h;
+    int dx = 0, dy = 0, dw = img_w, dh = img_h;
+
     if (argc == 5) {
         /* drawImage(img, dx, dy, dw, dh) */
-        JS_ToFloat64(ctx, &dx, argv[1]);
-        JS_ToFloat64(ctx, &dy, argv[2]);
-        JS_ToFloat64(ctx, &dw, argv[3]);
-        JS_ToFloat64(ctx, &dh, argv[4]);
+        JS_ToInt32(ctx, &dx, argv[1]);
+        JS_ToInt32(ctx, &dy, argv[2]);
+        JS_ToInt32(ctx, &dw, argv[3]);
+        JS_ToInt32(ctx, &dh, argv[4]);
     } else if (argc == 9) {
         /* drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh) */
-        JS_ToFloat64(ctx, &sx, argv[1]);
-        JS_ToFloat64(ctx, &sy, argv[2]);
-        JS_ToFloat64(ctx, &sw, argv[3]);
-        JS_ToFloat64(ctx, &sh, argv[4]);
-        JS_ToFloat64(ctx, &dx, argv[5]);
-        JS_ToFloat64(ctx, &dy, argv[6]);
-        JS_ToFloat64(ctx, &dw, argv[7]);
-        JS_ToFloat64(ctx, &dh, argv[8]);
+        JS_ToInt32(ctx, &sx, argv[1]);
+        JS_ToInt32(ctx, &sy, argv[2]);
+        JS_ToInt32(ctx, &sw, argv[3]);
+        JS_ToInt32(ctx, &sh, argv[4]);
+        JS_ToInt32(ctx, &dx, argv[5]);
+        JS_ToInt32(ctx, &dy, argv[6]);
+        JS_ToInt32(ctx, &dw, argv[7]);
+        JS_ToInt32(ctx, &dh, argv[8]);
     } else if (argc == 3) {
         /* drawImage(img, dx, dy) */
-        JS_ToFloat64(ctx, &dx, argv[1]);
-        JS_ToFloat64(ctx, &dy, argv[2]);
+        JS_ToInt32(ctx, &dx, argv[1]);
+        JS_ToInt32(ctx, &dy, argv[2]);
     }
-    
-    /* Apply transform to destination */
-    double x1, y1, x2, y2;
-    transform_point(&x1, &y1, g_ctx2d.transform, dx, dy);
-    transform_point(&x2, &y2, g_ctx2d.transform, dx + dw, dy + dh);
-    
+
     if (g_renderer->draw_image) {
         g_renderer->draw_image(target, img_handle,
-                               (int)sx, (int)sy, (int)sw, (int)sh,
-                               (int)x1, (int)y1, (int)(x2-x1), (int)(y2-y1),
-                               g_ctx2d.transform, 255);
+                               sx, sy, sw, sh,
+                               dx, dy, dw, dh,
+                               g_ctx2d.transform, (uint8_t)(255 * g_ctx2d.global_alpha));
     }
-    
+
     return JS_UNDEFINED;
 }
 
@@ -1066,7 +1199,7 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
     uint8_t b = color_to_byte(g_ctx2d.fill_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.fill_color[3]);
     
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         JS_FreeCString(ctx, text);
         return JS_UNDEFINED;
@@ -1101,7 +1234,7 @@ static JSValue js_ctx2d_strokeText(JSContext *ctx, JSValueConst this_val,
     uint8_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.stroke_color[3]);
     
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         JS_FreeCString(ctx, text);
         return JS_UNDEFINED;
@@ -1184,8 +1317,8 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
         JS_SetPropertyStr(ctx, obj, "data", data_arr);
         return obj;
     }
-    
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         JSValue data_arr = JS_NewArray(ctx);
         JS_SetPropertyStr(ctx, obj, "data", data_arr);
@@ -1246,7 +1379,7 @@ static JSValue js_ctx2d_putImageData(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &h, h_val);
     JS_FreeValue(ctx, h_val);
 
-    void *target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (target && g_renderer->put_pixels) {
         g_renderer->put_pixels(target, pixels, dx, dy, w, h);
     }
@@ -1346,6 +1479,7 @@ static const JSCFunctionListEntry js_ctx2d_props[] = {
     JS_CGETSET_DEF("fillStyle", js_ctx2d_get_fillStyle, js_ctx2d_set_fillStyle),
     JS_CGETSET_DEF("strokeStyle", js_ctx2d_get_strokeStyle, js_ctx2d_set_strokeStyle),
     JS_CGETSET_DEF("lineWidth", js_ctx2d_get_lineWidth, js_ctx2d_set_lineWidth),
+    JS_CGETSET_DEF("globalAlpha", js_ctx2d_get_globalAlpha, js_ctx2d_set_globalAlpha),
     JS_CGETSET_DEF("font", js_ctx2d_get_font, js_ctx2d_set_font),
     JS_CGETSET_DEF("textAlign", js_ctx2d_get_textAlign, js_ctx2d_set_textAlign),
     JS_CGETSET_DEF("textBaseline", js_ctx2d_get_textBaseline, js_ctx2d_set_textBaseline),
@@ -1377,8 +1511,12 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyFunctionList(ctx, ctx_obj, js_ctx2d_props,
                                sizeof(js_ctx2d_props) / sizeof(js_ctx2d_props[0]));
 
-    /* Store reference to canvas */
+    /* Store reference to canvas - this is used to determine which texture to draw to */
     JS_SetPropertyStr(ctx, ctx_obj, "canvas", JS_DupValue(ctx, this_val));
+    
+    /* Store canvas ID for texture lookup */
+    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    JS_SetPropertyStr(ctx, ctx_obj, "_canvasId", JS_NewInt32(ctx, id));
 
     return ctx_obj;
 }
@@ -1419,18 +1557,49 @@ static JSValue js_canvas_get_style(JSContext *ctx, JSValueConst this_val) {
 
 static JSValue js_audio_ctor(JSContext *ctx, JSValueConst new_target,
                              int argc, JSValueConst *argv) {
-    JSValue obj = JS_NewObjectClass(ctx, js_audio_class_id);
+    /* Get the prototype from the constructor */
+    JSValue proto = JS_UNDEFINED;
+    if (!JS_IsUndefined(new_target)) {
+        proto = JS_GetPropertyStr(ctx, new_target, "prototype");
+    }
     
+    JSValue obj;
+    if (JS_IsObject(proto)) {
+        obj = JS_NewObjectProtoClass(ctx, proto, js_audio_class_id);
+        JS_FreeValue(ctx, proto);
+    } else {
+        obj = JS_NewObjectClass(ctx, js_audio_class_id);
+    }
+
     AudioObject *audio = malloc(sizeof(AudioObject));
     memset(audio, 0, sizeof(AudioObject));
+    audio->elem_index = -1;
     audio->volume = 1.0;
     audio->paused = 1;
 
     JS_SetOpaque(obj, audio);
 
+    /* Set initial properties */
     JS_SetPropertyStr(ctx, obj, "src", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "volume", JS_NewFloat64(ctx, 1.0));
     JS_SetPropertyStr(ctx, obj, "paused", JS_NewBool(ctx, true));
+    JS_SetPropertyStr(ctx, obj, "duration", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "currentTime", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "ended", JS_NewBool(ctx, false));
+    JS_SetPropertyStr(ctx, obj, "loop", JS_NewBool(ctx, false));
+    JS_SetPropertyStr(ctx, obj, "_audioIndex", JS_NewInt32(ctx, -1));
+    JS_SetPropertyStr(ctx, obj, "_nativeIndex", JS_NewInt32(ctx, -1));
+
+    /* If src is provided, set it */
+    if (argc > 0) {
+        const char *src = JS_ToCString(ctx, argv[0]);
+        if (src) {
+            JS_SetPropertyStr(ctx, obj, "src", JS_NewString(ctx, src));
+            strncpy(audio->src, src, sizeof(audio->src) - 1);
+            audio->src[sizeof(audio->src) - 1] = '\0';
+            JS_FreeCString(ctx, src);
+        }
+    }
 
     return obj;
 }
@@ -1474,33 +1643,266 @@ static JSValue js_audio_set_volume(JSContext *ctx, JSValueConst this_val, JSValu
 
 static JSValue js_audio_get_paused(JSContext *ctx, JSValueConst this_val) {
     AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
-    if (audio) {
-        return JS_NewBool(ctx, audio->paused ? true : false);
+    if (!audio) return JS_NewBool(ctx, true);
+    
+    int elem_idx = audio->elem_index;
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        Html5AudioElement *elem = &g_audio_elements[elem_idx];
+        if (elem->native_index >= 0) {
+            elem->paused = !sound_is_playing(elem->native_index);
+        }
+        return JS_NewBool(ctx, elem->paused ? true : false);
     }
-    return JS_NewBool(ctx, true);
+    return JS_NewBool(ctx, audio->paused ? true : false);
+}
+
+static JSValue js_audio_get_duration(JSContext *ctx, JSValueConst this_val) {
+    AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
+    if (!audio) return JS_NewFloat64(ctx, 0);
+    
+    int elem_idx = audio->elem_index;
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        Html5AudioElement *elem = &g_audio_elements[elem_idx];
+        if (elem->native_index >= 0) {
+            return JS_NewFloat64(ctx, sound_get_duration(elem->native_index));
+        }
+        return JS_NewFloat64(ctx, elem->duration);
+    }
+    return JS_NewFloat64(ctx, 0);
+}
+
+static JSValue js_audio_get_currentTime(JSContext *ctx, JSValueConst this_val) {
+    AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
+    if (!audio) return JS_NewFloat64(ctx, 0);
+    
+    int elem_idx = audio->elem_index;
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        Html5AudioElement *elem = &g_audio_elements[elem_idx];
+        if (elem->native_index >= 0) {
+            return JS_NewFloat64(ctx, sound_get_current_time(elem->native_index));
+        }
+    }
+    return JS_NewFloat64(ctx, 0);
+}
+
+static JSValue js_audio_set_currentTime(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
+    if (!audio) return JS_UNDEFINED;
+    
+    int elem_idx = audio->elem_index;
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        Html5AudioElement *elem = &g_audio_elements[elem_idx];
+        if (elem->native_index >= 0) {
+            double time;
+            JS_ToFloat64(ctx, &time, val);
+            sound_set_current_time(elem->native_index, (float)time);
+        }
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audio_get_ended(JSContext *ctx, JSValueConst this_val) {
+    AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
+    if (!audio) return JS_NewBool(ctx, false);
+    
+    int elem_idx = audio->elem_index;
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        Html5AudioElement *elem = &g_audio_elements[elem_idx];
+        if (elem->native_index >= 0) {
+            return JS_NewBool(ctx, sound_has_ended(elem->native_index) ? true : false);
+        }
+    }
+    return JS_NewBool(ctx, false);
 }
 
 static JSValue js_audio_play(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
     AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
-    if (audio) {
-        audio->paused = 0;
+    if (!audio) return JS_UNDEFINED;
+    
+    int elem_idx = audio->elem_index;
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        Html5AudioElement *elem = &g_audio_elements[elem_idx];
+        if (elem->native_index >= 0) {
+            sound_play(elem->native_index);
+            elem->paused = 0;
+        }
     }
-    /* In a real implementation, we'd start playback here */
     return JS_UNDEFINED;
 }
 
 static JSValue js_audio_pause(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
     AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
-    if (audio) {
-        audio->paused = 1;
+    if (!audio) return JS_UNDEFINED;
+    
+    int elem_idx = audio->elem_index;
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        Html5AudioElement *elem = &g_audio_elements[elem_idx];
+        if (elem->native_index >= 0) {
+            sound_pause(elem->native_index);
+            elem->paused = 1;
+        }
     }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audio_addEventListener(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+
+    const char *event = JS_ToCString(ctx, argv[0]);
+    JSValue listener = argv[1];
+
+    if (!event) return JS_UNDEFINED;
+
+    /* Get audio element index */
+    AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
+    if (!audio) {
+        JS_FreeCString(ctx, event);
+        return JS_UNDEFINED;
+    }
+
+    int elem_idx = audio->elem_index;
+    if (elem_idx < 0 || elem_idx >= MAX_HTML5_AUDIO_ELEMENTS) {
+        /* Try to find by src */
+        elem_idx = find_audio_element_by_src(audio->src);
+        if (elem_idx < 0) {
+            /* Element doesn't exist yet - store listener on JS object for later */
+            char prop_name[64];
+            if (strcmp(event, "loadeddata") == 0) {
+                JS_SetPropertyStr(ctx, this_val, "_loadeddata_listener", JS_DupValue(ctx, listener));
+            } else if (strcmp(event, "canplaythrough") == 0) {
+                JS_SetPropertyStr(ctx, this_val, "_canplaythrough_listener", JS_DupValue(ctx, listener));
+            }
+            if (event) JS_FreeCString(ctx, event);
+            return JS_UNDEFINED;
+        }
+        audio->elem_index = elem_idx;
+    }
+
+    if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
+        /* Store event listener on the audio element */
+        if (strcmp(event, "loadeddata") == 0) {
+            if (!JS_IsUndefined(g_audio_elements[elem_idx].loadeddata_listener)) {
+                JS_FreeValue(ctx, g_audio_elements[elem_idx].loadeddata_listener);
+            }
+            g_audio_elements[elem_idx].loadeddata_listener = JS_DupValue(ctx, listener);
+        } else if (strcmp(event, "canplaythrough") == 0) {
+            if (!JS_IsUndefined(g_audio_elements[elem_idx].canplaythrough_listener)) {
+                JS_FreeValue(ctx, g_audio_elements[elem_idx].canplaythrough_listener);
+            }
+            g_audio_elements[elem_idx].canplaythrough_listener = JS_DupValue(ctx, listener);
+        }
+    }
+
+    if (event) JS_FreeCString(ctx, event);
     return JS_UNDEFINED;
 }
 
 static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
+    AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
+    if (!audio) return JS_UNDEFINED;
+    
+    /* Get src from the audio object */
+    const char *src = audio->src;
+    if (!src || src[0] == '\0') return JS_UNDEFINED;
+    
+    /* Find or allocate element */
+    int elem_idx = audio->elem_index;
+    if (elem_idx < 0 || elem_idx >= MAX_HTML5_AUDIO_ELEMENTS) {
+        elem_idx = find_audio_element_by_src(src);
+        if (elem_idx < 0) {
+            elem_idx = alloc_audio_element();
+            if (elem_idx < 0) {
+                fprintf(stderr, "[Audio] Too many audio elements\n");
+                return JS_UNDEFINED;
+            }
+            memset(&g_audio_elements[elem_idx], 0, sizeof(Html5AudioElement));
+            g_audio_elements[elem_idx].in_use = 1;
+            g_audio_elements[elem_idx].native_index = -1;
+            g_audio_elements[elem_idx].volume = 1.0f;
+            g_audio_elements[elem_idx].paused = 1;
+            strncpy(g_audio_elements[elem_idx].src, src, sizeof(g_audio_elements[elem_idx].src) - 1);
+            audio->elem_index = elem_idx;
+        }
+    }
+    
+    Html5AudioElement *elem = &g_audio_elements[elem_idx];
+
+    /* Load audio into native backend */
+    int native_index;
+    if (sound_load_audio(src, &native_index) >= 0) {
+        elem->native_index = native_index;
+        elem->paused = 0;
+        elem->duration = sound_get_duration(native_index);
+        audio->elem_index = elem_idx;
+        fprintf(stderr, "[Audio] Loaded: %s (native slot %d, element %d)\n",
+                src, native_index, elem_idx);
+
+        /* Update JS object properties */
+        JS_SetPropertyStr(ctx, this_val, "duration", JS_NewFloat64(ctx, elem->duration));
+        JS_SetPropertyStr(ctx, this_val, "_audioIndex", JS_NewInt32(ctx, elem_idx));
+        JS_SetPropertyStr(ctx, this_val, "_nativeIndex", JS_NewInt32(ctx, native_index));
+
+        /* Transfer listeners from JS object to element if they were stored there */
+        JSValue loadeddata_listener = JS_GetPropertyStr(ctx, this_val, "_loadeddata_listener");
+        if (!JS_IsUndefined(loadeddata_listener)) {
+            if (!JS_IsUndefined(elem->loadeddata_listener)) {
+                JS_FreeValue(ctx, elem->loadeddata_listener);
+            }
+            elem->loadeddata_listener = JS_DupValue(ctx, loadeddata_listener);
+            JS_FreeValue(ctx, loadeddata_listener);
+        }
+
+        JSValue canplaythrough_listener = JS_GetPropertyStr(ctx, this_val, "_canplaythrough_listener");
+        if (!JS_IsUndefined(canplaythrough_listener)) {
+            if (!JS_IsUndefined(elem->canplaythrough_listener)) {
+                JS_FreeValue(ctx, elem->canplaythrough_listener);
+            }
+            elem->canplaythrough_listener = JS_DupValue(ctx, canplaythrough_listener);
+            JS_FreeValue(ctx, canplaythrough_listener);
+        }
+
+        /* Trigger loadeddata event */
+        if (!JS_IsUndefined(elem->loadeddata_listener)) {
+            JS_Call(ctx, elem->loadeddata_listener, this_val, 0, NULL);
+        }
+
+        /* Trigger canplaythrough event */
+        if (!JS_IsUndefined(elem->canplaythrough_listener)) {
+            JS_Call(ctx, elem->canplaythrough_listener, this_val, 0, NULL);
+        }
+    } else {
+        fprintf(stderr, "[Audio] Failed to load: %s\n", src);
+        elem->native_index = -1;
+    }
+
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audio_canPlayType(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewString(ctx, "");
+    
+    const char *type = JS_ToCString(ctx, argv[0]);
+    if (!type) return JS_NewString(ctx, "");
+    
+    /* Simple implementation - return "maybe" for ogg and mp3 */
+    JSValue result = JS_NewString(ctx, "");
+    if (strstr(type, "ogg") || strstr(type, "vorbis")) {
+        result = JS_NewString(ctx, "maybe");
+    } else if (strstr(type, "mp3") || strstr(type, "mpeg")) {
+        result = JS_NewString(ctx, "maybe");
+    }
+    
+    JS_FreeCString(ctx, type);
+    return result;
+}
+
+static JSValue js_audio_removeEventListener(JSContext *ctx, JSValueConst this_val,
+                                            int argc, JSValueConst *argv) {
     /* No-op for now */
     return JS_UNDEFINED;
 }
@@ -1509,12 +1911,18 @@ static const JSCFunctionListEntry js_audio_funcs[] = {
     JS_CFUNC_DEF("play", 0, js_audio_play),
     JS_CFUNC_DEF("pause", 0, js_audio_pause),
     JS_CFUNC_DEF("load", 0, js_audio_load),
+    JS_CFUNC_DEF("addEventListener", 2, js_audio_addEventListener),
+    JS_CFUNC_DEF("removeEventListener", 2, js_audio_removeEventListener),
+    JS_CFUNC_DEF("canPlayType", 1, js_audio_canPlayType),
 };
 
 static const JSCFunctionListEntry js_audio_props[] = {
     JS_CGETSET_DEF("src", js_audio_get_src, js_audio_set_src),
     JS_CGETSET_DEF("volume", js_audio_get_volume, js_audio_set_volume),
     JS_CGETSET_DEF("paused", js_audio_get_paused, NULL),
+    JS_CGETSET_DEF("duration", js_audio_get_duration, NULL),
+    JS_CGETSET_DEF("currentTime", js_audio_get_currentTime, js_audio_set_currentTime),
+    JS_CGETSET_DEF("ended", js_audio_get_ended, NULL),
 };
 
 /* ============================================================================
@@ -1879,6 +2287,12 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
             
             obj = JS_NewObjectClass(ctx, js_canvas_class_id);
             JS_SetOpaque(obj, (void*)(intptr_t)id);
+            
+            /* Add canvas methods and properties */
+            JS_SetPropertyStr(ctx, obj, "getContext",
+                JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
+            JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, g_canvases[idx].width));
+            JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, g_canvases[idx].height));
         }
     } else if (strcmp(tag, "img") == 0 || strcmp(tag, "image") == 0) {
         /* Create an Image object */
@@ -2410,6 +2824,7 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_ctx2d.stroke_color[2] = 0;
     g_ctx2d.stroke_color[3] = 1;
     g_ctx2d.line_width = 1;
+    g_ctx2d.global_alpha = 1.0;
     g_ctx2d.font[0] = '\0';
     g_ctx2d.font_size = 16;
     strcpy(g_ctx2d.text_align, "start");
@@ -2421,6 +2836,7 @@ static int jscore_qjs_init(RendererInterface *renderer,
     memset(g_images, 0, sizeof(g_images));
     memset(g_canvases, 0, sizeof(g_canvases));
     memset(g_raf_callbacks, 0, sizeof(g_raf_callbacks));
+    memset(g_audio_elements, 0, sizeof(g_audio_elements));
 
     g_timer_next_id = 1;
     g_image_next_id = 1;
@@ -2460,6 +2876,16 @@ static void jscore_qjs_quit(void) {
     /* Free load listeners */
     for (int i = 0; i < g_load_listener_count; i++) {
         JS_FreeValue(g_ctx, g_load_listeners[i]);
+    }
+
+    /* Free audio element listeners */
+    for (int i = 0; i < MAX_HTML5_AUDIO_ELEMENTS; i++) {
+        if (!JS_IsUndefined(g_audio_elements[i].loadeddata_listener)) {
+            JS_FreeValue(g_ctx, g_audio_elements[i].loadeddata_listener);
+        }
+        if (!JS_IsUndefined(g_audio_elements[i].canplaythrough_listener)) {
+            JS_FreeValue(g_ctx, g_audio_elements[i].canplaythrough_listener);
+        }
     }
 
     /* Free path and state stack */
@@ -2515,10 +2941,15 @@ static void setup_globals_object(JSContext *ctx) {
     /* Audio constructor */
     JSValue audio_ctor = JS_NewCFunction2(ctx, js_audio_ctor, "Audio", 0,
                                           JS_CFUNC_constructor, 0);
-    JS_SetPropertyFunctionList(ctx, audio_ctor, js_audio_funcs,
+    
+    /* Create prototype object and add methods to it */
+    JSValue audio_proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, audio_proto, js_audio_funcs,
                                sizeof(js_audio_funcs) / sizeof(js_audio_funcs[0]));
-    JS_SetPropertyFunctionList(ctx, audio_ctor, js_audio_props,
+    JS_SetPropertyFunctionList(ctx, audio_proto, js_audio_props,
                                sizeof(js_audio_props) / sizeof(js_audio_props[0]));
+    JS_SetPropertyStr(ctx, audio_ctor, "prototype", audio_proto);
+    
     JS_SetPropertyStr(ctx, global, "Audio", audio_ctor);
 
     /* location object - create early so it can be used by document and global */
