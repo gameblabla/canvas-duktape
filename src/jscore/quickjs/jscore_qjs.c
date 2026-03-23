@@ -41,6 +41,7 @@ typedef struct {
     double stroke_color[4];
     int line_width;
     double global_alpha;  /* 0.0 - 1.0 */
+    int image_smoothing_enabled;  /* 0 or 1 */
     char font[256];
     int font_size;
     char text_align[32];
@@ -59,6 +60,7 @@ typedef struct {
         double stroke_color[4];
         int line_width;
         double global_alpha;
+        int image_smoothing_enabled;
         char font[256];
         int font_size;
         char text_align[32];
@@ -176,21 +178,35 @@ typedef struct {
  * ============================================================================ */
 
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
-    /* Use the canvas_id stored in the 2D context */
-    int canvas_id = g_ctx2d.canvas_id;
+    /* Get canvas ID from the context object's _canvasId property */
+    JSValue canvas_id_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
+    int canvas_id = 0;
+    if (!JS_IsUndefined(canvas_id_val)) {
+        JS_ToInt32(ctx, &canvas_id, canvas_id_val);
+    }
+    JS_FreeValue(ctx, canvas_id_val);
+    
+    /* Update global canvas_id for other functions */
+    g_ctx2d.canvas_id = canvas_id;
+    
+    fprintf(stderr, "[get_current_canvas_texture] canvas_id=%d\n", canvas_id);
     
     /* If canvas_id is 0, use main texture */
     if (canvas_id == 0) {
-        return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+        void *main_tex = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+        fprintf(stderr, "[get_current_canvas_texture] Using main texture %p\n", main_tex);
+        return main_tex;
     }
     
     /* Find canvas by ID */
     for (int i = 0; i < 32; i++) {
         if (g_canvases[i].id == canvas_id) {
+            fprintf(stderr, "[get_current_canvas_texture] Found canvas %d: tex=%p\n", i, g_canvases[i].tex_handle);
             return g_canvases[i].tex_handle;
         }
     }
     
+    fprintf(stderr, "[get_current_canvas_texture] Canvas %d not found, using main texture\n", canvas_id);
     return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
 }
 
@@ -345,11 +361,27 @@ static void color_from_js(JSValue v, double *out) {
             } else if (strcmp(str, "transparent") == 0) {
                 out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
             } else if (str[0] == '#') {
-                /* Hex color #RRGGBB or #RRGGBBAA */
+                /* Hex color #RRGGBB, #RRGGBBAA, #RGB, or #RGBA */
                 unsigned int r, g, b, a = 255;
-                if (strlen(str) == 7) {
+                size_t len = strlen(str);
+                if (len == 4) {
+                    /* #RGB */
+                    sscanf(str, "#%1x%1x%1x", &r, &g, &b);
+                    r = (r << 4) | r;
+                    g = (g << 4) | g;
+                    b = (b << 4) | b;
+                } else if (len == 5) {
+                    /* #RGBA */
+                    sscanf(str, "#%1x%1x%1x%1x", &r, &g, &b, &a);
+                    r = (r << 4) | r;
+                    g = (g << 4) | g;
+                    b = (b << 4) | b;
+                    a = (a << 4) | a;
+                } else if (len == 7) {
+                    /* #RRGGBB */
                     sscanf(str, "#%02x%02x%02x", &r, &g, &b);
-                } else if (strlen(str) == 9) {
+                } else if (len == 9) {
+                    /* #RRGGBBAA */
                     sscanf(str, "#%02x%02x%02x%02x", &r, &g, &b, &a);
                 } else {
                     r = g = b = 0;
@@ -425,19 +457,10 @@ static void js_image_finalizer(JSRuntime *rt, JSValue val) {
 }
 
 static void js_canvas_finalizer(JSRuntime *rt, JSValue val) {
-    int id = (int)(intptr_t)JS_GetOpaque(val, js_canvas_class_id);
-    if (id > 0 && g_renderer && g_renderer->destroy_texture) {
-        /* Find canvas and destroy texture */
-        for (int i = 0; i < 32; i++) {
-            if (g_canvases[i].id == id) {
-                if (g_canvases[i].tex_handle) {
-                    g_renderer->destroy_texture(g_canvases[i].tex_handle);
-                }
-                g_canvases[i].id = 0;
-                break;
-            }
-        }
-    }
+    /* Don't destroy canvas textures when JS object is GC'd.
+     * The canvas persists in g_canvases array until engine shutdown. */
+    (void)rt;
+    (void)val;
 }
 
 static JSClassDef js_image_class = {
@@ -757,6 +780,15 @@ static JSValue js_ctx2d_get_globalAlpha(JSContext *ctx, JSValueConst this_val) {
     return JS_NewFloat64(ctx, g_ctx2d.global_alpha);
 }
 
+static JSValue js_ctx2d_set_imageSmoothingEnabled(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    g_ctx2d.image_smoothing_enabled = JS_ToBool(ctx, val);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_ctx2d_get_imageSmoothingEnabled(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewBool(ctx, g_ctx2d.image_smoothing_enabled ? true : false);
+}
+
 static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
     const char *font = JS_ToCString(ctx, val);
     if (font) {
@@ -1051,7 +1083,13 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
     uint8_t a = (uint8_t)(color_to_byte(g_ctx2d.fill_color[3]) * g_ctx2d.global_alpha);
 
     void *target = get_current_canvas_texture(ctx, this_val);
-    if (!target) return JS_UNDEFINED;
+    if (!target) {
+        fprintf(stderr, "[fillRect] No target texture (canvas_id=%d)\n", g_ctx2d.canvas_id);
+        return JS_UNDEFINED;
+    }
+
+    fprintf(stderr, "[fillRect] canvas_id=%d, target=%p, rect=(%d,%d,%d,%d), color=(%d,%d,%d,%d)\n",
+            g_ctx2d.canvas_id, target, x, y, w, h, r, g, b, a);
 
     if (g_renderer->fill_rect) {
         g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, 0, g_ctx2d.transform);
@@ -1117,6 +1155,8 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
     /* Also check for canvas */
     int canvas_id = (int)(intptr_t)JS_GetOpaque(img_obj, js_canvas_class_id);
 
+    fprintf(stderr, "[drawImage] img_id=%d, img_idx=%d, canvas_id=%d\n", img_id, img_idx, canvas_id);
+
     void *img_handle = NULL;
     int img_w = 0, img_h = 0;
 
@@ -1124,6 +1164,7 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
         img_handle = g_images[img_idx].img_handle;
         img_w = g_images[img_idx].width;
         img_h = g_images[img_idx].height;
+        fprintf(stderr, "[drawImage] Using image %d: tex=%p, %dx%d\n", img_idx, img_handle, img_w, img_h);
     } else if (canvas_id > 0) {
         /* Canvas as image */
         for (int i = 0; i < 32; i++) {
@@ -1131,12 +1172,15 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
                 img_handle = g_canvases[i].tex_handle;
                 img_w = g_canvases[i].width;
                 img_h = g_canvases[i].height;
+                fprintf(stderr, "[drawImage] Canvas source: id=%d, tex=%p, %dx%d\n", 
+                        canvas_id, img_handle, img_w, img_h);
                 break;
             }
         }
     }
 
     if (!img_handle) {
+        fprintf(stderr, "[drawImage] No image handle (img_id=%d, canvas_id=%d)\n", img_id, canvas_id);
         return JS_UNDEFINED;
     }
 
@@ -1326,6 +1370,8 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
     uint8_t *pixels = malloc(sw * sh * 4);
     if (g_renderer->get_pixels) {
         g_renderer->get_pixels(target, sx, sy, sw, sh, pixels);
+        fprintf(stderr, "[getImageData] canvas_id=%d, target=%p, rect=(%d,%d,%d,%d), pixel[0]=(%d,%d,%d,%d)\n",
+                g_ctx2d.canvas_id, target, sx, sy, sw, sh, pixels[0], pixels[1], pixels[2], pixels[3]);
     }
     
     JSValue data_arr = JS_NewArray(ctx);
@@ -1477,6 +1523,7 @@ static const JSCFunctionListEntry js_ctx2d_props[] = {
     JS_CGETSET_DEF("strokeStyle", js_ctx2d_get_strokeStyle, js_ctx2d_set_strokeStyle),
     JS_CGETSET_DEF("lineWidth", js_ctx2d_get_lineWidth, js_ctx2d_set_lineWidth),
     JS_CGETSET_DEF("globalAlpha", js_ctx2d_get_globalAlpha, js_ctx2d_set_globalAlpha),
+    JS_CGETSET_DEF("imageSmoothingEnabled", js_ctx2d_get_imageSmoothingEnabled, js_ctx2d_set_imageSmoothingEnabled),
     JS_CGETSET_DEF("font", js_ctx2d_get_font, js_ctx2d_set_font),
     JS_CGETSET_DEF("textAlign", js_ctx2d_get_textAlign, js_ctx2d_set_textAlign),
     JS_CGETSET_DEF("textBaseline", js_ctx2d_get_textBaseline, js_ctx2d_set_textBaseline),
@@ -1502,6 +1549,7 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     
     /* Set this as the current canvas for drawing */
     g_ctx2d.canvas_id = id;
+    fprintf(stderr, "[getContext] Set canvas_id=%d\n", id);
 
     /* Return the 2D context object */
     JSValue ctx_obj = JS_NewObject(ctx);
@@ -1516,7 +1564,7 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
 
     /* Store reference to canvas */
     JS_SetPropertyStr(ctx, ctx_obj, "canvas", JS_DupValue(ctx, this_val));
-    
+
     /* Store canvas ID for texture lookup */
     JS_SetPropertyStr(ctx, ctx_obj, "_canvasId", JS_NewInt32(ctx, id));
 
@@ -1771,7 +1819,6 @@ static JSValue js_audio_addEventListener(JSContext *ctx, JSValueConst this_val,
         elem_idx = find_audio_element_by_src(audio->src);
         if (elem_idx < 0) {
             /* Element doesn't exist yet - store listener on JS object for later */
-            char prop_name[64];
             if (strcmp(event, "loadeddata") == 0) {
                 JS_SetPropertyStr(ctx, this_val, "_loadeddata_listener", JS_DupValue(ctx, listener));
             } else if (strcmp(event, "canplaythrough") == 0) {
@@ -2278,18 +2325,22 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
         if (idx >= 0) {
             static int canvas_id_counter = 1000;
             int id = ++canvas_id_counter;
+            fprintf(stderr, "[createElement] Creating canvas: slot=%d, id=%d (before setting)\n", idx, id);
+            fprintf(stderr, "[createElement] g_canvases[%d].id before: %d\n", idx, g_canvases[idx].id);
             g_canvases[idx].id = id;
+            fprintf(stderr, "[createElement] g_canvases[%d].id after: %d\n", idx, g_canvases[idx].id);
             g_canvases[idx].width = 800;
             g_canvases[idx].height = 600;
             g_canvases[idx].style[0] = '\0';
-            
+
             if (g_renderer && g_renderer->create_texture) {
                 g_canvases[idx].tex_handle = g_renderer->create_texture(800, 600);
+                fprintf(stderr, "[createElement] Canvas slot %d, id=%d: tex=%p\n", idx, id, g_canvases[idx].tex_handle);
             }
-            
+
             obj = JS_NewObjectClass(ctx, js_canvas_class_id);
             JS_SetOpaque(obj, (void*)(intptr_t)id);
-            
+
             /* Add canvas methods and properties */
             JS_SetPropertyStr(ctx, obj, "getContext",
                 JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
@@ -2827,6 +2878,7 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_ctx2d.stroke_color[3] = 1;
     g_ctx2d.line_width = 1;
     g_ctx2d.global_alpha = 1.0;
+    g_ctx2d.image_smoothing_enabled = 1;  /* Default to enabled (smoothed) */
     g_ctx2d.canvas_id = 0;  /* Default to main canvas */
     g_ctx2d.font[0] = '\0';
     g_ctx2d.font_size = 16;

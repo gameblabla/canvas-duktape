@@ -280,6 +280,7 @@ static int r_init(int w, int h, const char* title) {
     SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
     SDL_RenderClear(g_sdl_renderer);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
     return 1;
 }
 
@@ -300,6 +301,7 @@ static void* r_create_texture(int w, int h) {
     SDL_Texture* t = SDL_CreateTexture(g_sdl_renderer,
                                        SDL_PIXELFORMAT_RGBA8888,
                                        SDL_TEXTUREACCESS_TARGET, w, h);
+    fprintf(stderr, "[r_create_texture] %dx%d -> %p\n", w, h, t);
     if (!t) return NULL;
     SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
     SDL_SetRenderTarget(g_sdl_renderer, t);
@@ -307,6 +309,7 @@ static void* r_create_texture(int w, int h) {
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_RenderClear(g_sdl_renderer);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
     return t;
 }
 
@@ -412,6 +415,8 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     remove_clip();
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
@@ -431,6 +436,7 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
         }
     }
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_clear_rect(void* target, int x, int y, int w, int h) {
@@ -441,6 +447,7 @@ static void r_clear_rect(void* target, int x, int y, int w, int h) {
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_RenderFillRect(g_sdl_renderer, &((SDL_Rect){x,y,w,h}));
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_stroke_rect(void* target, double x, double y, double w, double h,
@@ -458,6 +465,7 @@ static void r_stroke_rect(void* target, double x, double y, double w, double h,
     }
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_draw_image(void* target, void* img,
@@ -476,6 +484,7 @@ static void r_draw_image(void* target, void* img,
     render_with_transform(src, &srcRect, &dstRect, m, alpha, dx, dy);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
     SDL_SetTextureAlphaMod(src, 255);
 }
 
@@ -517,6 +526,7 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     SDL_Rect dst = {rx, ry, tw, th};
     SDL_RenderCopy(g_sdl_renderer, tt, NULL, &dst);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
     SDL_DestroyTexture(tt);
 }
 
@@ -550,6 +560,7 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
     }
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
     SDL_DestroyTexture(tt);
 }
 
@@ -586,6 +597,7 @@ static void r_draw_arc_points(void* target,
         (int)(cy + radius * sin(end_angle)));
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_fill_polygon(void* target, const double* pts, int count,
@@ -622,6 +634,7 @@ static void r_fill_polygon(void* target, const double* pts, int count,
     }
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_fill_circle(void* target, double cx, double cy, int radius,
@@ -642,6 +655,7 @@ static void r_fill_circle(void* target, double cx, double cy, int radius,
     }
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_stroke_circle(void* target, double cx, double cy, int radius,
@@ -658,6 +672,7 @@ static void r_stroke_circle(void* target, double cx, double cy, int radius,
     }
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_draw_line(void* target, int x1, int y1, int x2, int y2,
@@ -670,6 +685,7 @@ static void r_draw_line(void* target, int x1, int y1, int x2, int y2,
     SDL_RenderDrawLine(g_sdl_renderer, x1, y1, x2, y2);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_set_clip_rect(void* target, int x, int y, int w, int h) {
@@ -681,6 +697,7 @@ static void r_set_clip_rect(void* target, int x, int y, int w, int h) {
         SDL_Rect cr = {x, y, w, h};
         SDL_RenderSetClipRect(g_sdl_renderer, &cr);
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
     }
 }
 
@@ -691,6 +708,7 @@ static void r_clear_clip_rect(void* target) {
         SDL_SetRenderTarget(g_sdl_renderer, tex);
         SDL_RenderSetClipRect(g_sdl_renderer, NULL);
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
     }
 }
 
@@ -718,6 +736,7 @@ static void r_get_pixels(void* target, int x, int y, int w, int h,
         SDL_FreeSurface(sf);
     }
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_put_pixels(void* target, const uint8_t* rgba,
@@ -742,6 +761,7 @@ static void r_put_pixels(void* target, const uint8_t* rgba,
         SDL_Rect dst = {x, y, w, h};
         SDL_RenderCopy(g_sdl_renderer, tmp, NULL, &dst);
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
         SDL_DestroyTexture(tmp);
     }
     free(buf);
@@ -760,9 +780,11 @@ static char* r_to_data_url(void* target, int w, int h) {
                              sf->pixels, sf->pitch) != 0) {
         SDL_FreeSurface(sf);
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
         return NULL;
     }
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 
     /* Build raw PNG data */
     size_t png_cap = 100 + (size_t)w * h * 4;
