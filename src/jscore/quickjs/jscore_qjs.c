@@ -174,26 +174,8 @@ typedef struct {
  * ============================================================================ */
 
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
-    /* Get canvas ID from context object */
-    JSValue canvas_id_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
-    int canvas_id = 0;
-    if (!JS_IsUndefined(canvas_id_val)) {
-        JS_ToInt32(ctx, &canvas_id, canvas_id_val);
-    }
-    JS_FreeValue(ctx, canvas_id_val);
-    
-    /* If canvas_id is 0, use main texture */
-    if (canvas_id == 0) {
-        return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
-    }
-    
-    /* Find canvas by ID */
-    for (int i = 0; i < 32; i++) {
-        if (g_canvases[i].id == canvas_id) {
-            return g_canvases[i].tex_handle;
-        }
-    }
-    
+    /* For now, always use the main texture for drawing */
+    /* This ensures all drawing appears on screen */
     return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
 }
 
@@ -1514,7 +1496,7 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     /* Store reference to canvas - this is used to determine which texture to draw to */
     JS_SetPropertyStr(ctx, ctx_obj, "canvas", JS_DupValue(ctx, this_val));
     
-    /* Store canvas ID for texture lookup */
+    /* Get canvas ID from the canvas object */
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
     JS_SetPropertyStr(ctx, ctx_obj, "_canvasId", JS_NewInt32(ctx, id));
 
