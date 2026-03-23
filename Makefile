@@ -8,20 +8,43 @@
 #   src/input/SDL2/               - SDL2 input backend
 #   src/sound/SDL2/               - SDL2 sound backend
 #   src/jscore/duktape/           - Duktape JS engine backend
+#   src/jscore/quickjs/           - QuickJS JS engine backend
 #
 # To add new backends:
 #   - Create src/renderer/opengl/ with renderer_opengl.c/h
 #   - Create src/jscore/quickjs/ with jscore_quickjs.c/h
 #   - etc.
+#
+# JS Engine Backend Selection:
+#   make                    - Build with default backend (Duktape)
+#   make JSCORE_BACKEND=duktape  - Build with Duktape
+#   make JSCORE_BACKEND=quickjs  - Build with QuickJS
 
 CC = gcc
-CFLAGS = -Wall -c -std=gnu99 -O3 -march=native -flto -DNDEBUG
+CFLAGS = -Wall -c -std=gnu99 -O3 -march=native -DNDEBUG
 LDFLAGS = -lm -lSDL2 -lSDL2_image -lSDL2_ttf -lz -lvorbisfile -lvorbis -logg
 
-# Include paths
+# JS Engine backend selection (default: duktape)
+JSCORE_BACKEND ?= duktape
+
+# Disable LTO for QuickJS backend (causes memory corruption issues)
+ifeq ($(JSCORE_BACKEND),quickjs)
+CFLAGS += -fno-lto -Wno-unused-function -Wno-unused-const-variable
+LDFLAGS += -fno-lto
+endif
+
+# Include paths - base
 INCLUDES = -I. -I/usr/include/SDL2 -D_GNU_SOURCE=1 -D_REENTRANT
-INCLUDES += -Iduktape/src -Iduktape/extras -Iduktape/extras/duk-v1-compat -Iduktape/extras/console
 INCLUDES += -Isrc -Isound/libs
+
+# Backend-specific include paths and flags
+ifeq ($(JSCORE_BACKEND),quickjs)
+INCLUDES += -Iquickjs
+CFLAGS += -DJSCORE_BACKEND_QUICKJS=1
+else
+INCLUDES += -Iduktape/src -Iduktape/extras -Iduktape/extras/duk-v1-compat -Iduktape/extras/console
+CFLAGS += -DJSCORE_BACKEND_DUKTAPE=1
+endif
 
 # ============================================================================
 # Feature Detection
@@ -56,11 +79,18 @@ endif
 # Object Files by Module
 # ============================================================================
 
-# Duktape core
+# Duktape core (only used when JSCORE_BACKEND=duktape)
 DUK_CORE_OBJ = duktape/src/duktape.o \
                duktape/extras/console/duk_console.o \
                duktape/extras/module-node/duk_module_node.o \
                duktape/extras/duk-v1-compat/duk_v1_compat.o
+
+# QuickJS core (only used when JSCORE_BACKEND=quickjs)
+QJS_CORE_OBJ = quickjs/quickjs.o \
+               quickjs/quickjs-libc.o \
+               quickjs/libregexp.o \
+               quickjs/libunicode.o \
+               quickjs/dtoa.o
 
 # SDL2 Renderer backend
 RENDERER_OBJ = src/renderer/sdl2/renderer_sdl2.o
@@ -71,14 +101,18 @@ INPUT_OBJ = src/input/SDL2/input_sdl2.o
 # SDL2 Sound backend
 SOUND_OBJ = src/sound/SDL2/sound_sdl2.o
 
-# Duktape JS core backend
-JSCORE_OBJ = src/jscore/duktape/jscore_duk.o
+# JS core backend - selected by JSCORE_BACKEND
+ifeq ($(JSCORE_BACKEND),quickjs)
+JSCORE_OBJ = src/jscore/quickjs/jscore_qjs.o $(QJS_CORE_OBJ)
+else
+JSCORE_OBJ = src/jscore/duktape/jscore_duk.o $(DUK_CORE_OBJ)
+endif
 
 # Main entry point
 MAIN_OBJ = src/main.o
 
 # All objects
-ALL_OBJ = $(DUK_CORE_OBJ) $(RENDERER_OBJ) $(INPUT_OBJ) $(SOUND_OBJ) $(JSCORE_OBJ) $(MAIN_OBJ)
+ALL_OBJ = $(RENDERER_OBJ) $(INPUT_OBJ) $(SOUND_OBJ) $(JSCORE_OBJ) $(MAIN_OBJ)
 
 TARGET = canvas.elf
 
@@ -145,6 +179,28 @@ src/jscore/duktape/%.o: src/jscore/duktape/%.c src/jscore/duktape/%.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
 
+src/jscore/quickjs/%.o: src/jscore/quickjs/%.c src/jscore/quickjs/%.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
+
+# QuickJS core
+quickjs/%.o: quickjs/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
+
+# QuickJS additional source files need specific flags
+quickjs/libregexp.o: quickjs/libregexp.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -DCONFIG_ALL_UNICODE $< -o $@
+
+quickjs/libunicode.o: quickjs/libunicode.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -DCONFIG_ALL_UNICODE $< -o $@
+
+quickjs/dtoa.o: quickjs/dtoa.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
+
 # ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
@@ -181,6 +237,27 @@ duktape/src:
 clean-duktape:
 	rm -rf duktape
 	@echo "Duktape directory removed"
+
+# ============================================================================
+# QuickJS Management
+# ============================================================================
+
+# QuickJS source should already be present in quickjs/ directory
+# If you need to download it, use the quickjs target
+
+quickjs: quickjs/quickjs.h quickjs/quickjs.c quickjs/quickjs-libc.c
+	@echo "QuickJS is already present"
+
+quickjs/quickjs.h:
+	@echo "QuickJS not found. Please download QuickJS to the quickjs/ directory"
+	@echo "Visit: https://bellard.org/quickjs/"
+	@echo "Or run: git clone https://github.com/bellard/quickjs.git quickjs"
+	@exit 1
+
+# Remove QuickJS build artifacts (not source)
+clean-quickjs:
+	rm -f quickjs/*.o
+	@echo "QuickJS object files removed"
 
 # ============================================================================
 # Tests
@@ -279,11 +356,16 @@ test-run: $(TARGET)
 	@echo "Running tests from testsuite/ directory..."
 	@(cd testsuite && ../$(TARGET))
 
-.PHONY: all clean duktape clean-duktape test-biolab test-ultra test-tapi2 test-ultra-more test-api test-alpha test-all check-regressions save-baseline test-run
+.PHONY: all clean duktape clean-duktape quickjs clean-quickjs test-biolab test-ultra test-tapi2 test-ultra-more test-api test-alpha test-all check-regressions save-baseline test-run
 
 # ============================================================================
 # Module Interface Documentation
 # ============================================================================
+#
+# JS Engine Backend Selection:
+#   make                    - Build with default backend (Duktape)
+#   make JSCORE_BACKEND=duktape   - Build with Duktape
+#   make JSCORE_BACKEND=quickjs   - Build with QuickJS
 #
 # To add a new renderer backend (e.g., OpenGL):
 #   1. Create src/renderer/opengl/renderer_opengl.h
@@ -300,14 +382,22 @@ test-run: $(TARGET)
 #
 # To add a new JS engine backend (e.g., QuickJS):
 #   1. Create src/jscore/quickjs/jscore_quickjs.h
-#      - Declare: JSContext* jscore_quickjs_init(void);
-#                void jscore_quickjs_register_bindings(...);
-#                etc.
+#      - Declare: void jscore_quickjs_init_iface(JSCoreInterface* iface);
 #   2. Create src/jscore/quickjs/jscore_quickjs.c
-#      - Implement all JS binding functions using QuickJS API
+#      - Implement all JSCoreInterface functions using QuickJS API
+#      - Implement jscore_quickjs_init_iface() to populate function pointers
 #   3. Add to Makefile:
-#      - JSCORE_OBJ = src/jscore/quickjs/jscore_quickjs.o
-#      - Add QuickJS library linking
-#   4. In main.c, change includes and init calls
+#      - Add QJS_CORE_OBJ for QuickJS library objects
+#      - Add JSCORE_OBJ conditional for quickjs backend
+#      - Add build rules for quickjs/%.o
+#      - Add INCLUDES += -Iquickjs when JSCORE_BACKEND=quickjs
+#   4. In main.c, conditionally include based on JSCORE_BACKEND_* macro:
+#      - #if JSCORE_BACKEND_QUICKJS
+#        #include "jscore/quickjs/jscore_qjs.h"
+#        jscore_qjs_init_iface(&g_jscore);
+#      - #else
+#        #include "jscore/duktape/jscore_duk.h"
+#        jscore_duk_init_iface(&g_jscore);
+#      - #endif
 #
 # The interface definitions are in src/common/types.h

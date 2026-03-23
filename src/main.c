@@ -9,7 +9,13 @@
 #include "renderer/sdl2/renderer_sdl2.h"
 #include "input/SDL2/input_sdl2.h"
 #include "sound/SDL2/sound_sdl2.h"
+
+/* Conditional include based on JS backend */
+#if JSCORE_BACKEND_QUICKJS
+#include "jscore/quickjs/jscore_qjs.h"
+#else
 #include "jscore/duktape/jscore_duk.h"
+#endif
 
 /* ============================================================================
  * HTML parse state (filled by parse_html, consumed by main)
@@ -347,7 +353,11 @@ int main(int argc, char** argv) {
     renderer_sdl2_init_iface(&renderer);
     input_sdl2_init_iface(&input);
     sound_sdl2_init_iface(&sound);
+#if JSCORE_BACKEND_QUICKJS
+    jscore_qjs_init_iface(&jscore);
+#else
     jscore_duk_init_iface(&jscore);
+#endif
 
     /* Set base directory for sound (for resolving relative audio paths) */
     sound_set_base_dir(g_base_dir);
