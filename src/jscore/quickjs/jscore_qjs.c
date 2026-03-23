@@ -45,6 +45,7 @@ typedef struct {
     int font_size;
     char text_align[32];
     char text_baseline[32];
+    int canvas_id;  /* ID of canvas we're drawing to (0 = main) */
 
     /* Path tracking */
     double *path_pts;
@@ -62,6 +63,7 @@ typedef struct {
         int font_size;
         char text_align[32];
         char text_baseline[32];
+        int canvas_id;
     } *state_stack;
     int stack_top;
     int stack_capacity;
@@ -174,8 +176,21 @@ typedef struct {
  * ============================================================================ */
 
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
-    /* For now, always use the main texture for drawing */
-    /* This ensures all drawing appears on screen */
+    /* Use the canvas_id stored in the 2D context */
+    int canvas_id = g_ctx2d.canvas_id;
+    
+    /* If canvas_id is 0, use main texture */
+    if (canvas_id == 0) {
+        return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+    }
+    
+    /* Find canvas by ID */
+    for (int i = 0; i < 32; i++) {
+        if (g_canvases[i].id == canvas_id) {
+            return g_canvases[i].tex_handle;
+        }
+    }
+    
     return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
 }
 
@@ -1482,6 +1497,12 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeCString(ctx, type);
 
+    /* Get canvas ID from the canvas object */
+    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    
+    /* Set this as the current canvas for drawing */
+    g_ctx2d.canvas_id = id;
+
     /* Return the 2D context object */
     JSValue ctx_obj = JS_NewObject(ctx);
 
@@ -1493,11 +1514,10 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyFunctionList(ctx, ctx_obj, js_ctx2d_props,
                                sizeof(js_ctx2d_props) / sizeof(js_ctx2d_props[0]));
 
-    /* Store reference to canvas - this is used to determine which texture to draw to */
+    /* Store reference to canvas */
     JS_SetPropertyStr(ctx, ctx_obj, "canvas", JS_DupValue(ctx, this_val));
     
-    /* Get canvas ID from the canvas object */
-    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    /* Store canvas ID for texture lookup */
     JS_SetPropertyStr(ctx, ctx_obj, "_canvasId", JS_NewInt32(ctx, id));
 
     return ctx_obj;
@@ -2807,6 +2827,7 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_ctx2d.stroke_color[3] = 1;
     g_ctx2d.line_width = 1;
     g_ctx2d.global_alpha = 1.0;
+    g_ctx2d.canvas_id = 0;  /* Default to main canvas */
     g_ctx2d.font[0] = '\0';
     g_ctx2d.font_size = 16;
     strcpy(g_ctx2d.text_align, "start");
@@ -3031,7 +3052,10 @@ static void jscore_qjs_setup_globals(int win_w, int win_h,
         strncpy(g_canvases[i].style, canvases[i].id, sizeof(g_canvases[i].style) - 1);
         g_canvases[i].style[sizeof(g_canvases[i].style) - 1] = '\0';
 
-        if (g_renderer && g_renderer->create_texture) {
+        /* First canvas (main) uses the main texture */
+        if (i == 0) {
+            g_canvases[i].tex_handle = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+        } else if (g_renderer && g_renderer->create_texture) {
             g_canvases[i].tex_handle = g_renderer->create_texture(canvases[i].width, canvases[i].height);
         }
     }
