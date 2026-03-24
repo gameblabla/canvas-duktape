@@ -42,6 +42,7 @@ typedef struct {
     int line_width;
     double global_alpha;  /* 0.0 - 1.0 */
     int image_smoothing_enabled;  /* 0 or 1 */
+    int global_composite_lighter;  /* 1 if "lighter", 0 if "source-over" */
     char font[256];
     int font_size;
     char text_align[32];
@@ -61,6 +62,7 @@ typedef struct {
         int line_width;
         double global_alpha;
         int image_smoothing_enabled;
+        int global_composite_lighter;
         char font[256];
         int font_size;
         char text_align[32];
@@ -875,6 +877,19 @@ static JSValue js_ctx2d_get_imageSmoothingEnabled(JSContext *ctx, JSValueConst t
     return JS_NewBool(ctx, g_ctx2d.image_smoothing_enabled ? true : false);
 }
 
+static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    const char *op = JS_ToCString(ctx, val);
+    if (op) {
+        g_ctx2d.global_composite_lighter = (strcmp(op, "lighter") == 0) ? 1 : 0;
+        JS_FreeCString(ctx, op);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, g_ctx2d.global_composite_lighter ? "lighter" : "source-over");
+}
+
 static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
     const char *font = JS_ToCString(ctx, val);
     if (font) {
@@ -1178,7 +1193,7 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
             g_ctx2d.canvas_id, target, x, y, w, h, r, g, b, a);
 
     if (g_renderer->fill_rect) {
-        g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, 0, g_ctx2d.transform);
+        g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.global_composite_lighter, g_ctx2d.transform);
     }
 
     return JS_UNDEFINED;
@@ -1203,7 +1218,7 @@ static JSValue js_ctx2d_strokeRect(JSContext *ctx, JSValueConst this_val,
     if (!target) return JS_UNDEFINED;
     
     if (g_renderer->stroke_rect) {
-        g_renderer->stroke_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.line_width);
+        g_renderer->stroke_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.line_width, g_ctx2d.global_composite_lighter);
     }
     
     return JS_UNDEFINED;
@@ -1610,6 +1625,7 @@ static const JSCFunctionListEntry js_ctx2d_props[] = {
     JS_CGETSET_DEF("lineWidth", js_ctx2d_get_lineWidth, js_ctx2d_set_lineWidth),
     JS_CGETSET_DEF("globalAlpha", js_ctx2d_get_globalAlpha, js_ctx2d_set_globalAlpha),
     JS_CGETSET_DEF("imageSmoothingEnabled", js_ctx2d_get_imageSmoothingEnabled, js_ctx2d_set_imageSmoothingEnabled),
+    JS_CGETSET_DEF("globalCompositeOperation", js_ctx2d_get_globalCompositeOperation, js_ctx2d_set_globalCompositeOperation),
     JS_CGETSET_DEF("font", js_ctx2d_get_font, js_ctx2d_set_font),
     JS_CGETSET_DEF("textAlign", js_ctx2d_get_textAlign, js_ctx2d_set_textAlign),
     JS_CGETSET_DEF("textBaseline", js_ctx2d_get_textBaseline, js_ctx2d_set_textBaseline),
@@ -3064,6 +3080,7 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_ctx2d.line_width = 1;
     g_ctx2d.global_alpha = 1.0;
     g_ctx2d.image_smoothing_enabled = 1;  /* Default to enabled (smoothed) */
+    g_ctx2d.global_composite_lighter = 0;  /* Default to source-over */
     g_ctx2d.canvas_id = 0;  /* Default to main canvas */
     g_ctx2d.font[0] = '\0';
     g_ctx2d.font_size = 16;

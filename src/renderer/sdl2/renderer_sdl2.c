@@ -451,12 +451,13 @@ static void r_clear_rect(void* target, int x, int y, int w, int h) {
 }
 
 static void r_stroke_rect(void* target, double x, double y, double w, double h,
-                           uint8_t r, uint8_t g, uint8_t b, uint8_t a, int lw) {
+                           uint8_t r, uint8_t g, uint8_t b, uint8_t a, int lw,
+                           int blend_add) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex) return;
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
-    SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawBlendMode(g_sdl_renderer, blend_add ? SDL_BLENDMODE_ADD : SDL_BLENDMODE_BLEND);
     int half_lw = lw / 2;
     for (int i = 0; i < lw; i++) {
         int off = i - half_lw;

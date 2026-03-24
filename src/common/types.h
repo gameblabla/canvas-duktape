@@ -61,7 +61,8 @@ typedef struct {
                                 void* img);
     void   (*clear_rect)(void* target, int x, int y, int w, int h);
     void   (*stroke_rect)(void* target, double x, double y, double w, double h,
-                          uint8_t r, uint8_t g, uint8_t b, uint8_t a, int lw);
+                          uint8_t r, uint8_t g, uint8_t b, uint8_t a, int lw,
+                          int blend_add);
 
     /* Image / canvas blitting */
     void   (*draw_image)(void* target, void* img,
