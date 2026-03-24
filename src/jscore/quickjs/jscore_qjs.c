@@ -37,6 +37,9 @@ static SoundInterface *g_sound = NULL;
 static int g_win_w = 800;
 static int g_win_h = 600;
 
+/* Track whether the first createElement("canvas") has been claimed as the stage canvas */
+static int g_stage_canvas_claimed = 0;
+
 /* Canvas 2D context state */
 typedef struct {
     double transform[6];  /* [a, b, c, d, e, f] for affine transform */
@@ -184,6 +187,9 @@ typedef struct {
 /* ============================================================================
  * Helper Functions
  * ============================================================================ */
+
+/* Forward declaration */
+static JSValue js_noop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     /* Get canvas ID from the context object's _canvasId property */
@@ -679,7 +685,13 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
             } else {
                 /* Try to load the image */
                 if (g_renderer && g_renderer->load_image_file) {
-                    g_images[idx].img_handle = g_renderer->load_image_file(src);
+                    /* Strip query string (e.g. ?v=1.7.7) before loading */
+                    char src_clean[512];
+                    strncpy(src_clean, src, sizeof(src_clean) - 1);
+                    src_clean[sizeof(src_clean) - 1] = '\0';
+                    char *qs = strchr(src_clean, '?');
+                    if (qs) *qs = '\0';
+                    g_images[idx].img_handle = g_renderer->load_image_file(src_clean);
                     if (g_images[idx].img_handle && g_renderer->get_image_size) {
                         g_renderer->get_image_size(g_images[idx].img_handle,
                                                    &g_images[idx].width,
@@ -1796,18 +1808,22 @@ static JSValue js_canvas_get_width(JSContext *ctx, JSValueConst this_val,
 static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    int new_width;
+    int new_width = 0;
     if (argc > 0) JS_ToInt32(ctx, &new_width, argv[0]);
     for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == id) {
             if (g_canvases[i].width != new_width) {
-                /* Destroy old texture and create new one */
-                if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
-                    g_renderer->destroy_texture(g_canvases[i].tex_handle);
-                }
-                g_canvases[i].width = new_width;
-                if (g_renderer && g_renderer->create_texture) {
-                    g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
+                /* Don't recreate main canvas (id=1) texture - it's managed by the renderer */
+                if (id != 1) {
+                    if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
+                        g_renderer->destroy_texture(g_canvases[i].tex_handle);
+                    }
+                    g_canvases[i].width = new_width;
+                    if (g_renderer && g_renderer->create_texture) {
+                        g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
+                    }
+                } else {
+                    g_canvases[i].width = new_width;
                 }
             }
             break;
@@ -1830,18 +1846,22 @@ static JSValue js_canvas_get_height(JSContext *ctx, JSValueConst this_val,
 static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    int new_height;
+    int new_height = 0;
     if (argc > 0) JS_ToInt32(ctx, &new_height, argv[0]);
     for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == id) {
             if (g_canvases[i].height != new_height) {
-                /* Destroy old texture and create new one */
-                if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
-                    g_renderer->destroy_texture(g_canvases[i].tex_handle);
-                }
-                g_canvases[i].height = new_height;
-                if (g_renderer && g_renderer->create_texture) {
-                    g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
+                /* Don't recreate main canvas (id=1) texture - it's managed by the renderer */
+                if (id != 1) {
+                    if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
+                        g_renderer->destroy_texture(g_canvases[i].tex_handle);
+                    }
+                    g_canvases[i].height = new_height;
+                    if (g_renderer && g_renderer->create_texture) {
+                        g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
+                    }
+                } else {
+                    g_canvases[i].height = new_height;
                 }
             }
             break;
@@ -2572,13 +2592,9 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    /* For non-canvas elements, return a stub object to prevent test failures */
-    JSValue stub = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, stub, "innerHTML", JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, stub, "value", JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, stub, "style", JS_NewObject(ctx));
+    /* Element not found - return null like real DOM */
     JS_FreeCString(ctx, id);
-    return stub;
+    return JS_NULL;
 }
 
 static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst this_val,
@@ -2629,71 +2645,99 @@ static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst thi
     return arr;
 }
 
+/* Helper: build a DOM element stub with common methods (no-ops) */
+static JSValue js_make_element_stub(JSContext *ctx) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "innerHTML",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "value",            JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "style",            JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, obj, "className",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "appendChild",      JS_NewCFunction(ctx, js_noop, "appendChild", 1));
+    JS_SetPropertyStr(ctx, obj, "removeChild",      JS_NewCFunction(ctx, js_noop, "removeChild", 1));
+    JS_SetPropertyStr(ctx, obj, "insertBefore",     JS_NewCFunction(ctx, js_noop, "insertBefore", 2));
+    JS_SetPropertyStr(ctx, obj, "addEventListener", JS_NewCFunction(ctx, js_noop, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, obj, "removeEventListener", JS_NewCFunction(ctx, js_noop, "removeEventListener", 2));
+    JS_SetPropertyStr(ctx, obj, "getAttribute",     JS_NewCFunction(ctx, js_noop, "getAttribute", 1));
+    JS_SetPropertyStr(ctx, obj, "setAttribute",     JS_NewCFunction(ctx, js_noop, "setAttribute", 2));
+    JS_SetPropertyStr(ctx, obj, "offsetLeft",       JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "offsetTop",        JS_NewInt32(ctx, 0));
+    return obj;
+}
+
+/* Helper: build a canvas JSValue for the given canvas ID */
+static JSValue js_make_canvas_object(JSContext *ctx, int id) {
+    JSValue obj = JS_NewObjectClass(ctx, js_canvas_class_id);
+    JS_SetOpaque(obj, (void*)(intptr_t)id);
+
+    JS_SetPropertyStr(ctx, obj, "getContext",
+        JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
+    JS_SetPropertyStr(ctx, obj, "toDataURL",
+        JS_NewCFunction(ctx, js_canvas_toDataURL, "toDataURL", 0));
+    JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, id));
+    JS_SetPropertyStr(ctx, obj, "style",            JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, obj, "addEventListener", JS_NewCFunction(ctx, js_noop, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, obj, "removeEventListener", JS_NewCFunction(ctx, js_noop, "removeEventListener", 2));
+    JS_SetPropertyStr(ctx, obj, "appendChild",      JS_NewCFunction(ctx, js_noop, "appendChild", 1));
+    JS_SetPropertyStr(ctx, obj, "offsetLeft",       JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "offsetTop",        JS_NewInt32(ctx, 0));
+
+    JSAtom width_atom = JS_NewAtom(ctx, "width");
+    JSValue width_getter = JS_NewCFunction(ctx, js_canvas_get_width, "width", 0);
+    JSValue width_setter = JS_NewCFunction(ctx, js_canvas_set_width, "width", 1);
+    JS_DefineProperty(ctx, obj, width_atom, JS_UNDEFINED,
+        width_getter, width_setter,
+        JS_PROP_HAS_GET | JS_PROP_HAS_SET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, width_atom);
+    JS_FreeValue(ctx, width_getter);
+    JS_FreeValue(ctx, width_setter);
+
+    JSAtom height_atom = JS_NewAtom(ctx, "height");
+    JSValue height_getter = JS_NewCFunction(ctx, js_canvas_get_height, "height", 0);
+    JSValue height_setter = JS_NewCFunction(ctx, js_canvas_set_height, "height", 1);
+    JS_DefineProperty(ctx, obj, height_atom, JS_UNDEFINED,
+        height_getter, height_setter,
+        JS_PROP_HAS_GET | JS_PROP_HAS_SET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, height_atom);
+    JS_FreeValue(ctx, height_getter);
+    JS_FreeValue(ctx, height_setter);
+
+    return obj;
+}
+
 static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NULL;
-    
+
     const char *tag = JS_ToCString(ctx, argv[0]);
     if (!tag) return JS_NULL;
-    
+
     JSValue obj = JS_NULL;
-    
+
     if (strcmp(tag, "canvas") == 0) {
-        /* Create a new canvas element */
-        int idx = -1;
-        for (int i = 0; i < 64; i++) {
-            if (g_canvases[i].id == 0) {
-                idx = i;
-                break;
+        /* First createElement("canvas") returns the main canvas so game renders to display */
+        if (!g_stage_canvas_claimed && g_canvases[0].id == 1) {
+            g_stage_canvas_claimed = 1;
+            obj = js_make_canvas_object(ctx, 1);
+        } else {
+            /* Subsequent canvas creations (buffers etc.) get their own texture */
+            int idx = -1;
+            for (int i = 0; i < 64; i++) {
+                if (g_canvases[i].id == 0) { idx = i; break; }
             }
-        }
-        
-        if (idx >= 0) {
-            static int canvas_id_counter = 1000;
-            int id = ++canvas_id_counter;
-            g_canvases[idx].id = id;
-            g_canvases[idx].width = 800;
-            g_canvases[idx].height = 600;
-            g_canvases[idx].style[0] = '\0';
-
-            if (g_renderer && g_renderer->create_texture) {
-                g_canvases[idx].tex_handle = g_renderer->create_texture(800, 600);
+            if (idx >= 0) {
+                static int canvas_id_counter = 1000;
+                int id = ++canvas_id_counter;
+                g_canvases[idx].id = id;
+                g_canvases[idx].width = 300;
+                g_canvases[idx].height = 150;
+                g_canvases[idx].style[0] = '\0';
+                if (g_renderer && g_renderer->create_texture) {
+                    g_canvases[idx].tex_handle = g_renderer->create_texture(300, 150);
+                }
+                obj = js_make_canvas_object(ctx, id);
             }
-
-            obj = JS_NewObjectClass(ctx, js_canvas_class_id);
-            JS_SetOpaque(obj, (void*)(intptr_t)id);
-
-            /* Add canvas methods and properties */
-            JS_SetPropertyStr(ctx, obj, "getContext",
-                JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
-            JS_SetPropertyStr(ctx, obj, "toDataURL",
-                JS_NewCFunction(ctx, js_canvas_toDataURL, "toDataURL", 0));
-            JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, id));
-
-            /* Define width property with getter/setter */
-            JSAtom width_atom = JS_NewAtom(ctx, "width");
-            JSValue width_getter = JS_NewCFunction(ctx, js_canvas_get_width, "width", 0);
-            JSValue width_setter = JS_NewCFunction(ctx, js_canvas_set_width, "width", 1);
-            int ret = JS_DefineProperty(ctx, obj, width_atom, JS_UNDEFINED,
-                width_getter, width_setter,
-                JS_PROP_HAS_GET | JS_PROP_HAS_SET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
-            JS_FreeAtom(ctx, width_atom);
-            JS_FreeValue(ctx, width_getter);
-            JS_FreeValue(ctx, width_setter);
-            
-            /* Define height property with getter/setter */
-            JSAtom height_atom = JS_NewAtom(ctx, "height");
-            JSValue height_getter = JS_NewCFunction(ctx, js_canvas_get_height, "height", 0);
-            JSValue height_setter = JS_NewCFunction(ctx, js_canvas_set_height, "height", 1);
-            ret = JS_DefineProperty(ctx, obj, height_atom, JS_UNDEFINED,
-                height_getter, height_setter,
-                JS_PROP_HAS_GET | JS_PROP_HAS_SET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
-            JS_FreeAtom(ctx, height_atom);
-            JS_FreeValue(ctx, height_getter);
-            JS_FreeValue(ctx, height_setter);
         }
     } else if (strcmp(tag, "img") == 0 || strcmp(tag, "image") == 0) {
-        /* Create an Image object */
         int slot = find_free_image_slot();
         if (slot >= 0) {
             int id = g_image_next_id++;
@@ -2703,14 +2747,16 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
             g_images[slot].src[0] = '\0';
             g_images[slot].loaded = 0;
             g_images[slot].img_handle = NULL;
-            
             obj = JS_NewObjectClass(ctx, js_image_class_id);
             JS_SetOpaque(obj, (void*)(intptr_t)id);
         }
     } else if (strcmp(tag, "audio") == 0) {
         obj = js_audio_ctor(ctx, JS_UNDEFINED, 0, NULL);
+    } else {
+        /* Generic element stub for div, span, style, link, script, etc. */
+        obj = js_make_element_stub(ctx);
     }
-    
+
     JS_FreeCString(ctx, tag);
     return obj;
 }
@@ -2722,13 +2768,29 @@ static JSValue js_document_createElementNS(JSContext *ctx, JSValueConst this_val
 }
 
 static JSValue js_document_get_body(JSContext *ctx, JSValueConst this_val) {
-    JSValue obj = JS_NewObject(ctx);
-    return obj;
+    return js_make_element_stub(ctx);
 }
 
 static JSValue js_document_get_documentElement(JSContext *ctx, JSValueConst this_val) {
-    JSValue obj = JS_NewObject(ctx);
-    return obj;
+    return js_make_element_stub(ctx);
+}
+
+static JSValue js_document_get_head(JSContext *ctx, JSValueConst this_val) {
+    return js_make_element_stub(ctx);
+}
+
+static JSValue js_document_querySelector(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    return JS_NULL;
+}
+
+static JSValue js_document_querySelectorAll(JSContext *ctx, JSValueConst this_val,
+                                             int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    JSValue arr = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, 0));
+    return arr;
 }
 
 static const JSCFunctionListEntry js_document_funcs[] = {
@@ -2738,11 +2800,14 @@ static const JSCFunctionListEntry js_document_funcs[] = {
     JS_CFUNC_DEF("createElementNS", 2, js_document_createElementNS),
     JS_CFUNC_DEF("getAttribute", 1, js_element_getAttribute),
     JS_CFUNC_DEF("setAttribute", 2, js_element_setAttribute),
+    JS_CFUNC_DEF("querySelector", 1, js_document_querySelector),
+    JS_CFUNC_DEF("querySelectorAll", 1, js_document_querySelectorAll),
 };
 
 static const JSCFunctionListEntry js_document_props[] = {
     JS_CGETSET_DEF("body", js_document_get_body, NULL),
     JS_CGETSET_DEF("documentElement", js_document_get_documentElement, NULL),
+    JS_CGETSET_DEF("head", js_document_get_head, NULL),
     JS_PROP_STRING_DEF("readyState", "complete", JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
 };
 
@@ -2796,20 +2861,19 @@ static JSValue js_window_prompt(JSContext *ctx, JSValueConst this_val,
 }
 
 static JSValue js_window_get_innerWidth(JSContext *ctx, JSValueConst this_val) {
-    /* Return default or from canvas info */
-    return JS_NewInt32(ctx, 800);
+    return JS_NewInt32(ctx, g_win_w);
 }
 
 static JSValue js_window_get_innerHeight(JSContext *ctx, JSValueConst this_val) {
-    return JS_NewInt32(ctx, 600);
+    return JS_NewInt32(ctx, g_win_h);
 }
 
 static JSValue js_window_get_outerWidth(JSContext *ctx, JSValueConst this_val) {
-    return JS_NewInt32(ctx, 800);
+    return JS_NewInt32(ctx, g_win_w);
 }
 
 static JSValue js_window_get_outerHeight(JSContext *ctx, JSValueConst this_val) {
-    return JS_NewInt32(ctx, 600);
+    return JS_NewInt32(ctx, g_win_h);
 }
 
 static JSValue js_window_get_devicePixelRatio(JSContext *ctx, JSValueConst this_val) {
@@ -2918,6 +2982,12 @@ static const JSCFunctionListEntry js_window_funcs[] = {
     JS_CFUNC_DEF("clearTimeout", 1, js_window_clearTimeout_global),
     JS_CFUNC_DEF("getAttribute", 1, js_element_getAttribute),
     JS_CFUNC_DEF("setAttribute", 2, js_element_setAttribute),
+    JS_CFUNC_DEF("scrollTo", 2, js_noop),
+    JS_CFUNC_DEF("scroll", 2, js_noop),
+    JS_CFUNC_DEF("focus", 0, js_noop),
+    JS_CFUNC_DEF("blur", 0, js_noop),
+    JS_CFUNC_DEF("postMessage", 2, js_noop),
+    JS_CFUNC_DEF("close", 0, js_noop),
 };
 
 static const JSCFunctionListEntry js_window_props[] = {
@@ -3656,7 +3726,12 @@ static void jscore_qjs_setup_globals(int win_w, int win_h,
         g_images[i].height = images[i].height;
 
         if (g_renderer && g_renderer->load_image_file) {
-            g_images[i].img_handle = g_renderer->load_image_file(images[i].src);
+            char src_clean[512];
+            strncpy(src_clean, images[i].src, sizeof(src_clean) - 1);
+            src_clean[sizeof(src_clean) - 1] = '\0';
+            char *qs = strchr(src_clean, '?');
+            if (qs) *qs = '\0';
+            g_images[i].img_handle = g_renderer->load_image_file(src_clean);
             if (g_images[i].img_handle && g_renderer->get_image_size) {
                 g_renderer->get_image_size(g_images[i].img_handle,
                                            &g_images[i].width,
@@ -3776,14 +3851,19 @@ static int jscore_qjs_eval_string(const char *code) {
 
 static void jscore_qjs_call_window_onload(void) {
     if (!g_ctx) return;
-    
+
     JSValue global = JS_GetGlobalObject(g_ctx);
     JSValue onload = JS_GetPropertyStr(g_ctx, global, "onload");
-    
+
     if (JS_IsFunction(g_ctx, onload)) {
-        JS_Call(g_ctx, onload, global, 0, NULL);
+        JSValue ret = JS_Call(g_ctx, onload, global, 0, NULL);
+        if (JS_IsException(ret)) {
+            JSValue exc = JS_GetException(g_ctx);
+            JS_FreeValue(g_ctx, exc);
+        }
+        JS_FreeValue(g_ctx, ret);
     }
-    
+
     JS_FreeValue(g_ctx, onload);
     JS_FreeValue(g_ctx, global);
 }
@@ -3796,7 +3876,12 @@ static void jscore_qjs_call_window_load_listeners(void) {
     /* Call listeners registered via addEventListener('load', ...) */
     for (int i = 0; i < g_load_listener_count; i++) {
         if (!JS_IsUndefined(g_load_listeners[i])) {
-            JS_Call(g_ctx, g_load_listeners[i], global, 0, NULL);
+            JSValue ret = JS_Call(g_ctx, g_load_listeners[i], global, 0, NULL);
+            if (JS_IsException(ret)) {
+                JSValue exc = JS_GetException(g_ctx);
+                JS_FreeValue(g_ctx, exc);
+            }
+            JS_FreeValue(g_ctx, ret);
         }
     }
 
@@ -3805,7 +3890,12 @@ static void jscore_qjs_call_window_load_listeners(void) {
     if (JS_IsObject(document)) {
         JSValue onload = JS_GetPropertyStr(g_ctx, document, "onload");
         if (JS_IsFunction(g_ctx, onload)) {
-            JS_Call(g_ctx, onload, document, 0, NULL);
+            JSValue ret = JS_Call(g_ctx, onload, document, 0, NULL);
+            if (JS_IsException(ret)) {
+                JSValue exc = JS_GetException(g_ctx);
+                JS_FreeValue(g_ctx, exc);
+            }
+            JS_FreeValue(g_ctx, ret);
         }
         JS_FreeValue(g_ctx, onload);
     }
@@ -3814,17 +3904,26 @@ static void jscore_qjs_call_window_load_listeners(void) {
     JS_FreeValue(g_ctx, global);
 }
 
+static void jscore_qjs_drain_jobs(void) {
+    JSContext *ctx2;
+    for (;;) {
+        int ret = JS_ExecutePendingJob(g_rt, &ctx2);
+        if (ret <= 0) break;
+    }
+}
+
 static void jscore_qjs_check_timers(void) {
     if (!g_ctx || !g_renderer) return;
-    
+
     int64_t now = (int64_t)g_renderer->get_time_ms();
-    
+    JSValue global = JS_GetGlobalObject(g_ctx);
+
     /* Check interval/timeout timers */
     for (int i = 0; i < MAX_INTERVALS; i++) {
         if (g_timers[i].active && now >= g_timers[i].next_fire) {
             JSValue func = JS_DupValue(g_ctx, g_timers[i].func);
-            JSValue result = JS_Call(g_ctx, func, JS_UNDEFINED, 0, NULL);
-            
+            JSValue result = JS_Call(g_ctx, func, global, 0, NULL);
+
             if (JS_IsException(result)) {
                 JSValue exc = JS_GetException(g_ctx);
                 const char *exc_str = JS_ToCString(g_ctx, exc);
@@ -3832,11 +3931,22 @@ static void jscore_qjs_check_timers(void) {
                     fprintf(stderr, "Timer error: %s\n", exc_str);
                     JS_FreeCString(g_ctx, exc_str);
                 }
+                /* Print stack trace if available */
+                JSValue stack = JS_GetPropertyStr(g_ctx, exc, "stack");
+                if (!JS_IsUndefined(stack)) {
+                    const char *s = JS_ToCString(g_ctx, stack);
+                    if (s) { fprintf(stderr, "  Stack: %s\n", s); JS_FreeCString(g_ctx, s); }
+                }
+                JS_FreeValue(g_ctx, stack);
                 JS_FreeValue(g_ctx, exc);
             }
-            
+
             JS_FreeValue(g_ctx, result);
-            
+            JS_FreeValue(g_ctx, func);
+
+            /* Drain promise microtasks after each timer callback */
+            jscore_qjs_drain_jobs();
+
             if (g_timers[i].repeat) {
                 g_timers[i].next_fire = now + g_timers[i].interval_ms;
             } else {
@@ -3845,13 +3955,13 @@ static void jscore_qjs_check_timers(void) {
             }
         }
     }
-    
+
     /* Check RAF callbacks */
     for (int i = 0; i < 64; i++) {
         if (g_raf_callbacks[i].active && now >= g_raf_callbacks[i].fire_time) {
             JSValue func = JS_DupValue(g_ctx, g_raf_callbacks[i].func);
             JSValue timestamp = JS_NewFloat64(g_ctx, (double)now);
-            JSValue result = JS_Call(g_ctx, func, JS_UNDEFINED, 1, &timestamp);
+            JSValue result = JS_Call(g_ctx, func, global, 1, &timestamp);
 
             if (JS_IsException(result)) {
                 JSValue exc = JS_GetException(g_ctx);
@@ -3866,11 +3976,16 @@ static void jscore_qjs_check_timers(void) {
             JS_FreeValue(g_ctx, result);
             JS_FreeValue(g_ctx, timestamp);
 
+            /* Drain promise microtasks */
+            jscore_qjs_drain_jobs();
+
             /* One-shot RAF */
             JS_FreeValue(g_ctx, g_raf_callbacks[i].func);
             g_raf_callbacks[i].active = 0;
         }
     }
+
+    JS_FreeValue(g_ctx, global);
 }
 
 static JSValue js_noop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
