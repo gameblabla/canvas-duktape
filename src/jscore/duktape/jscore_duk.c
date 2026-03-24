@@ -976,7 +976,8 @@ static duk_ret_t js_strokeRect(duk_context* ctx) {
     uint8_t r=0,g=0,b=0,a=255;
     if(color) parse_color(color,&r,&g,&b,&a);
     void* target=get_current_canvas_texture(ctx);
-    g_R->stroke_rect(target,x,y,w,h,r,g,b,a,lw);
+    int use_lighter = get_global_composite(ctx);
+    g_R->stroke_rect(target,x,y,w,h,r,g,b,a,lw,use_lighter);
     return 0;
 }
 
@@ -1074,8 +1075,9 @@ static duk_ret_t js_stroke(duk_context* ctx) {
     void* target=get_current_canvas_texture(ctx);
     if (!target) return 0;
     if (g_cs.has_rect_path==1) {
+        int use_lighter = get_global_composite(ctx);
         g_R->stroke_rect(target,g_cs.path_x,g_cs.path_y,
-                         g_cs.path_w,g_cs.path_h,r,g,b,a,1);
+                         g_cs.path_w,g_cs.path_h,r,g,b,a,1,use_lighter);
     } else if (g_cs.has_rect_path==2) {
         g_R->stroke_circle(target,g_cs.path_x,g_cs.path_y,(int)g_cs.path_w,r,g,b,a);
     }

@@ -320,14 +320,18 @@ static void r_destroy_texture(void* tex) {
 static void* r_get_main_texture(void) { return g_offscreen; }
 
 static void* r_load_image_file(const char* path) {
-    SDL_Surface* sf = IMG_Load(path);
+    /* Resolve resource path */
+    char full_path[1024];
+    get_resource_path(path, full_path, sizeof(full_path));
+    
+    SDL_Surface* sf = IMG_Load(full_path);
     if (!sf) {
-        fprintf(stderr, "[load_image_file] %s: %s\n", path, IMG_GetError());
+        fprintf(stderr, "[load_image_file] %s: %s\n", full_path, IMG_GetError());
         return NULL;
     }
     SDL_Texture* t = SDL_CreateTextureFromSurface(g_sdl_renderer, sf);
     if (!t)
-        fprintf(stderr, "[load_image_file] texture from %s: %s\n", path, SDL_GetError());
+        fprintf(stderr, "[load_image_file] texture from %s: %s\n", full_path, SDL_GetError());
     SDL_FreeSurface(sf);
     return t;
 }

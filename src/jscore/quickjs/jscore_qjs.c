@@ -898,14 +898,17 @@ static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueC
         /* Try to parse font size */
         const char *p = strstr(font, "px");
         if (p) {
-            char num[32];
-            int i = 0;
-            while (p > font && *(p-1) >= '0' && *(p-1) <= '9' && i < 31) {
-                p--;
-                num[i++] = *p;
+            const char *start = p;
+            while (start > font && *(start-1) >= '0' && *(start-1) <= '9') {
+                start--;
             }
-            num[i] = '\0';
-            g_ctx2d.font_size = atoi(num);
+            int len = p - start;
+            if (len > 0 && len < 32) {
+                char num[32];
+                strncpy(num, start, len);
+                num[len] = '\0';
+                g_ctx2d.font_size = atoi(num);
+            }
         }
         JS_FreeCString(ctx, font);
     }
@@ -1250,13 +1253,24 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
 
     /* Get image object */
     JSValue img_obj = argv[0];
-    int img_id = (int)(intptr_t)JS_GetOpaque(img_obj, js_image_class_id);
+    
+    /* Try to get image ID from _imageId property first (for JS_NewObjectProto images) */
+    JSValue imageIdVal = JS_GetPropertyStr(ctx, img_obj, "_imageId");
+    int img_id = -1;
+    if (!JS_IsUndefined(imageIdVal)) {
+        JS_ToInt32(ctx, &img_id, imageIdVal);
+    }
+    JS_FreeValue(ctx, imageIdVal);
+    
+    /* Fall back to opaque data (for JS_NewObjectClass images) */
+    if (img_id < 0) {
+        img_id = (int)(intptr_t)JS_GetOpaque(img_obj, js_image_class_id);
+    }
+    
     int img_idx = find_image_by_id(img_id);
 
     /* Also check for canvas */
     int canvas_id = (int)(intptr_t)JS_GetOpaque(img_obj, js_canvas_class_id);
-
-    fprintf(stderr, "[drawImage] img_id=%d, img_idx=%d, canvas_id=%d\n", img_id, img_idx, canvas_id);
 
     void *img_handle = NULL;
     int img_w = 0, img_h = 0;
@@ -1265,7 +1279,6 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
         img_handle = g_images[img_idx].img_handle;
         img_w = g_images[img_idx].width;
         img_h = g_images[img_idx].height;
-        fprintf(stderr, "[drawImage] Using image %d: tex=%p, %dx%d\n", img_idx, img_handle, img_w, img_h);
     } else if (canvas_id > 0) {
         /* Canvas as image */
         for (int i = 0; i < 32; i++) {
@@ -1273,8 +1286,6 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
                 img_handle = g_canvases[i].tex_handle;
                 img_w = g_canvases[i].width;
                 img_h = g_canvases[i].height;
-                fprintf(stderr, "[drawImage] Canvas source: id=%d, tex=%p, %dx%d\n", 
-                        canvas_id, img_handle, img_w, img_h);
                 break;
             }
         }
@@ -2238,6 +2249,7 @@ static JSValue js_clearTimeout(JSContext *ctx, JSValueConst this_val,
 typedef struct {
     JSValue func;
     int active;
+    int64_t fire_time;  /* When this RAF should fire (in ms) */
 } RAFEntry;
 
 static RAFEntry g_raf_callbacks[64];
@@ -2248,16 +2260,23 @@ static JSValue js_requestAnimationFrame(JSContext *ctx, JSValueConst this_val,
     if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
         return JS_NewInt32(ctx, 0);
     }
-    
+
+    /* Get current time from renderer */
+    int64_t now = 0;
+    if (g_renderer && g_renderer->get_time_ms) {
+        now = g_renderer->get_time_ms();
+    }
+
     for (int i = 0; i < 64; i++) {
         if (!g_raf_callbacks[i].active) {
             g_raf_callbacks[i].func = JS_DupValue(ctx, argv[0]);
             g_raf_callbacks[i].active = 1;
+            g_raf_callbacks[i].fire_time = now + 16;  /* Fire after ~16ms */
             int id = g_raf_next_id++;
             return JS_NewInt32(ctx, id);
         }
     }
-    
+
     return JS_NewInt32(ctx, 0);
 }
 
@@ -2482,6 +2501,54 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
     return stub;
 }
 
+static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst this_val,
+                                                int argc, JSValueConst *argv) {
+    if (argc < 1) {
+        /* Return empty array-like object */
+        JSValue arr = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, 0));
+        return arr;
+    }
+
+    const char *tag = JS_ToCString(ctx, argv[0]);
+    if (!tag) {
+        JSValue arr = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, 0));
+        return arr;
+    }
+
+    /* Create array-like object to hold results */
+    JSValue arr = JS_NewArray(ctx);
+    int count = 0;
+
+    /* Check canvases */
+    if (strcmp(tag, "canvas") == 0 || strcmp(tag, "*") == 0) {
+        for (int i = 0; i < 32; i++) {
+            if (g_canvases[i].id != 0) {
+                JSValue obj = JS_NewObjectClass(ctx, js_canvas_class_id);
+                JS_SetOpaque(obj, (void*)(intptr_t)g_canvases[i].id);
+                /* Add canvas methods and properties */
+                JS_SetPropertyStr(ctx, obj, "getContext",
+                    JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
+                JS_SetPropertyStr(ctx, obj, "toDataURL",
+                    JS_NewCFunction(ctx, js_canvas_toDataURL, "toDataURL", 0));
+                JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, g_canvases[i].id));
+                JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, g_canvases[i].width));
+                JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, g_canvases[i].height));
+                
+                char idx_str[16];
+                snprintf(idx_str, sizeof(idx_str), "%d", count);
+                JS_SetPropertyStr(ctx, arr, idx_str, obj);
+                count++;
+            }
+        }
+    }
+
+    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, count));
+    JS_FreeCString(ctx, tag);
+    return arr;
+}
+
 static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NULL;
@@ -2586,6 +2653,7 @@ static JSValue js_document_get_documentElement(JSContext *ctx, JSValueConst this
 
 static const JSCFunctionListEntry js_document_funcs[] = {
     JS_CFUNC_DEF("getElementById", 1, js_document_getElementById),
+    JS_CFUNC_DEF("getElementsByTagName", 1, js_document_getElementsByTagName),
     JS_CFUNC_DEF("createElement", 1, js_document_createElement),
     JS_CFUNC_DEF("createElementNS", 2, js_document_createElementNS),
     JS_CFUNC_DEF("getAttribute", 1, js_element_getAttribute),
@@ -3514,11 +3582,11 @@ static void jscore_qjs_check_timers(void) {
     
     /* Check RAF callbacks */
     for (int i = 0; i < 64; i++) {
-        if (g_raf_callbacks[i].active) {
+        if (g_raf_callbacks[i].active && now >= g_raf_callbacks[i].fire_time) {
             JSValue func = JS_DupValue(g_ctx, g_raf_callbacks[i].func);
             JSValue timestamp = JS_NewFloat64(g_ctx, (double)now);
             JSValue result = JS_Call(g_ctx, func, JS_UNDEFINED, 1, &timestamp);
-            
+
             if (JS_IsException(result)) {
                 JSValue exc = JS_GetException(g_ctx);
                 const char *exc_str = JS_ToCString(g_ctx, exc);
@@ -3528,10 +3596,10 @@ static void jscore_qjs_check_timers(void) {
                 }
                 JS_FreeValue(g_ctx, exc);
             }
-            
+
             JS_FreeValue(g_ctx, result);
             JS_FreeValue(g_ctx, timestamp);
-            
+
             /* One-shot RAF */
             JS_FreeValue(g_ctx, g_raf_callbacks[i].func);
             g_raf_callbacks[i].active = 0;
