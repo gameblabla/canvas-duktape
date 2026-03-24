@@ -2486,6 +2486,8 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
                 JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, g_canvases[i].id));
                 JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, g_canvases[i].width));
                 JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, g_canvases[i].height));
+                /* Add style property for biolab.js compatibility */
+                JS_SetPropertyStr(ctx, obj, "style", JS_NewObject(ctx));
                 JS_FreeCString(ctx, id);
                 return obj;
             }
@@ -2663,6 +2665,7 @@ static const JSCFunctionListEntry js_document_funcs[] = {
 static const JSCFunctionListEntry js_document_props[] = {
     JS_CGETSET_DEF("body", js_document_get_body, NULL),
     JS_CGETSET_DEF("documentElement", js_document_get_documentElement, NULL),
+    JS_PROP_STRING_DEF("readyState", "complete", JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
 };
 
 /* ============================================================================
@@ -3255,6 +3258,13 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyFunctionList(ctx, console, js_console_funcs,
                                sizeof(js_console_funcs) / sizeof(js_console_funcs[0]));
     JS_SetPropertyStr(ctx, global, "console", console);
+
+    /* HTMLElement stub constructor (for biolab.js compatibility) */
+    JSValue HTMLElement = JS_NewCFunction2(ctx, NULL, "HTMLElement", 0,
+                                           JS_CFUNC_constructor, 0);
+    JSValue HTMLElement_proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, HTMLElement, "prototype", HTMLElement_proto);
+    JS_SetPropertyStr(ctx, global, "HTMLElement", HTMLElement);
 
     /* Image constructor */
     JSValue image_ctor = JS_NewCFunction2(ctx, js_image_ctor, "Image", 2,
