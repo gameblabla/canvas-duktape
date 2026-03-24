@@ -3834,28 +3834,48 @@ static void jscore_qjs_check_timers(void) {
     }
 }
 
+static JSValue js_noop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
 static void jscore_qjs_dispatch_key(int keycode, int is_down) {
     if (!g_ctx) return;
-    
-    JSValue global = JS_GetGlobalObject(g_ctx);
-    
-    /* Create event object */
+
+    const char *evtype = is_down ? "keydown" : "keyup";
+
+    /* Build target object: {tagName: "BODY"} */
+    JSValue target = JS_NewObject(g_ctx);
+    JS_SetPropertyStr(g_ctx, target, "tagName", JS_NewString(g_ctx, "BODY"));
+
+    /* Build event object matching what ig.Input.keydown/keyup expects */
     JSValue event = JS_NewObject(g_ctx);
-    JS_SetPropertyStr(g_ctx, event, "keyCode", JS_NewInt32(g_ctx, keycode));
-    JS_SetPropertyStr(g_ctx, event, "which", JS_NewInt32(g_ctx, keycode));
-    JS_SetPropertyStr(g_ctx, event, "key", JS_NewInt32(g_ctx, keycode));
-    
+    JS_SetPropertyStr(g_ctx, event, "type",             JS_NewString(g_ctx, evtype));
+    JS_SetPropertyStr(g_ctx, event, "keyCode",          JS_NewInt32(g_ctx, keycode));
+    JS_SetPropertyStr(g_ctx, event, "which",            JS_NewInt32(g_ctx, keycode));
+    JS_SetPropertyStr(g_ctx, event, "target",           target);
+    JS_SetPropertyStr(g_ctx, event, "preventDefault",   JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
+    JS_SetPropertyStr(g_ctx, event, "stopPropagation",  JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
+
     JSValue *listeners = is_down ? g_keydown_listeners : g_keyup_listeners;
     int count = is_down ? g_keydown_count : g_keyup_count;
-    
+
+    JSValue global = JS_GetGlobalObject(g_ctx);
     for (int i = 0; i < count; i++) {
-        if (!JS_IsUndefined(listeners[i])) {
-            JS_Call(g_ctx, listeners[i], global, 1, &event);
+        if (JS_IsFunction(g_ctx, listeners[i])) {
+            JSValue ret = JS_Call(g_ctx, listeners[i], global, 1, &event);
+            if (JS_IsException(ret)) {
+                JSValue exc = JS_GetException(g_ctx);
+                const char *s = JS_ToCString(g_ctx, exc);
+                fprintf(stderr, "[key] %s exception: %s\n", evtype, s ? s : "?");
+                JS_FreeCString(g_ctx, s);
+                JS_FreeValue(g_ctx, exc);
+            }
+            JS_FreeValue(g_ctx, ret);
         }
     }
-    
-    JS_FreeValue(g_ctx, event);
     JS_FreeValue(g_ctx, global);
+    JS_FreeValue(g_ctx, event);
 }
 
 /* ============================================================================
