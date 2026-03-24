@@ -421,6 +421,10 @@ int main(int argc, char** argv) {
                 jscore.dispatch_key(ev.keycode, 1);
             } else if (ev.type == INPUT_EVENT_KEYUP) {
                 jscore.dispatch_key(ev.keycode, 0);
+            } else if (ev.type == INPUT_EVENT_MOUSEMOVE ||
+                       ev.type == INPUT_EVENT_MOUSEDOWN ||
+                       ev.type == INPUT_EVENT_MOUSEUP) {
+                jscore.dispatch_mouse(ev.type, ev.x, ev.y, ev.button);
             }
         }
 

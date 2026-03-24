@@ -105,6 +105,17 @@ typedef struct {
 
 static KeyListener g_key_listeners[MAX_KEY_LISTENERS];
 
+/* Mouse event listeners on canvas elements */
+#define MAX_MOUSE_LISTENERS 32
+typedef struct {
+    int canvas_id;
+    char event_type[32];
+    JSValue func;
+    int active;
+} CanvasMouseListener;
+
+static CanvasMouseListener g_mouse_listeners[MAX_MOUSE_LISTENERS];
+
 /* localStorage */
 typedef struct {
     char key[256];
@@ -188,8 +199,10 @@ typedef struct {
  * Helper Functions
  * ============================================================================ */
 
-/* Forward declaration */
+/* Forward declarations */
 static JSValue js_noop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_make_canvas_object(JSContext *ctx, int id);
+static JSValue js_make_element_stub(JSContext *ctx);
 
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     /* Get canvas ID from the context object's _canvasId property */
@@ -2562,33 +2575,31 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
     const char *id = JS_ToCString(ctx, argv[0]);
     if (!id) return JS_NULL;
 
-    /* Check canvases */
+    /* Check canvases — match by HTML id="canvas" or style name */
     for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id != 0) {
             char buf[256];
             snprintf(buf, sizeof(buf), "canvas%d", g_canvases[i].id);
-            if (strcmp(buf, id) == 0 || strcmp(g_canvases[i].style, id) == 0) {
-                JSValue obj = JS_NewObjectClass(ctx, js_canvas_class_id);
-                JS_SetOpaque(obj, (void*)(intptr_t)g_canvases[i].id);
-                /* Add canvas methods and properties */
-                JS_SetPropertyStr(ctx, obj, "getContext",
-                    JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
-                JS_SetPropertyStr(ctx, obj, "toDataURL",
-                    JS_NewCFunction(ctx, js_canvas_toDataURL, "toDataURL", 0));
-                JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, g_canvases[i].id));
-                JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, g_canvases[i].width));
-                JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, g_canvases[i].height));
-                /* Add style property for biolab.js compatibility */
-                JS_SetPropertyStr(ctx, obj, "style", JS_NewObject(ctx));
+            /* Also match the bare name "canvas" for the main canvas */
+            int match = (strcmp(buf, id) == 0) ||
+                        (g_canvases[i].style[0] && strcmp(g_canvases[i].style, id) == 0) ||
+                        (g_canvases[i].id == 1 && strcmp(id, "canvas") == 0);
+            if (match) {
+                JSValue obj = js_make_canvas_object(ctx, g_canvases[i].id);
                 JS_FreeCString(ctx, id);
                 return obj;
             }
         }
     }
 
-    /* Element not found - return null like real DOM */
+    /* Return null for missing/garbage ids so || fallbacks work (e.g. e || document.body) */
+    if (!id[0] || strcmp(id, "undefined") == 0 || strcmp(id, "null") == 0) {
+        JS_FreeCString(ctx, id);
+        return JS_NULL;
+    }
+    /* Unknown element — return a stub that silently absorbs property sets */
     JS_FreeCString(ctx, id);
-    return JS_NULL;
+    return js_make_element_stub(ctx);
 }
 
 static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst this_val,
@@ -2643,6 +2654,7 @@ static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst thi
 static JSValue js_make_element_stub(JSContext *ctx) {
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "innerHTML",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "textContent",      JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "value",            JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "style",            JS_NewObject(ctx));
     JS_SetPropertyStr(ctx, obj, "className",        JS_NewString(ctx, ""));
@@ -2658,6 +2670,64 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     return obj;
 }
 
+/* canvas.addEventListener — stores mouse event listeners */
+static JSValue js_canvas_addEventListener(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    const char *evtype = JS_ToCString(ctx, argv[0]);
+    if (!evtype) return JS_UNDEFINED;
+
+    /* Get canvas id */
+    JSValue idv = JS_GetPropertyStr(ctx, this_val, "_canvasId");
+    int canvas_id = 0;
+    if (!JS_IsUndefined(idv)) JS_ToInt32(ctx, &canvas_id, idv);
+    JS_FreeValue(ctx, idv);
+
+    /* Store mouse event listeners */
+    if (JS_IsFunction(ctx, argv[1])) {
+        int slot = -1;
+        for (int i = 0; i < MAX_MOUSE_LISTENERS; i++) {
+            if (!g_mouse_listeners[i].active) { slot = i; break; }
+        }
+        if (slot >= 0) {
+            g_mouse_listeners[slot].canvas_id = canvas_id;
+            strncpy(g_mouse_listeners[slot].event_type, evtype,
+                    sizeof(g_mouse_listeners[slot].event_type) - 1);
+            g_mouse_listeners[slot].event_type[sizeof(g_mouse_listeners[slot].event_type)-1] = '\0';
+            g_mouse_listeners[slot].func = JS_DupValue(ctx, argv[1]);
+            g_mouse_listeners[slot].active = 1;
+        }
+    }
+    JS_FreeCString(ctx, evtype);
+    return JS_UNDEFINED;
+}
+
+/* canvas.getBoundingClientRect — returns {left,top,right,bottom,width,height} */
+static JSValue js_canvas_getBoundingClientRect(JSContext *ctx, JSValueConst this_val,
+                                               int argc, JSValueConst *argv) {
+    JSValue idv = JS_GetPropertyStr(ctx, this_val, "_canvasId");
+    int canvas_id = 1;
+    if (!JS_IsUndefined(idv)) JS_ToInt32(ctx, &canvas_id, idv);
+    JS_FreeValue(ctx, idv);
+
+    int w = g_win_w, h = g_win_h;
+    for (int i = 0; i < 64; i++) {
+        if (g_canvases[i].id == canvas_id) {
+            w = g_canvases[i].width;
+            h = g_canvases[i].height;
+            break;
+        }
+    }
+    JSValue rect = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, rect, "left",   JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "top",    JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "right",  JS_NewInt32(ctx, w));
+    JS_SetPropertyStr(ctx, rect, "bottom", JS_NewInt32(ctx, h));
+    JS_SetPropertyStr(ctx, rect, "width",  JS_NewInt32(ctx, w));
+    JS_SetPropertyStr(ctx, rect, "height", JS_NewInt32(ctx, h));
+    return rect;
+}
+
 /* Helper: build a canvas JSValue for the given canvas ID */
 static JSValue js_make_canvas_object(JSContext *ctx, int id) {
     JSValue obj = JS_NewObjectClass(ctx, js_canvas_class_id);
@@ -2669,9 +2739,12 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
         JS_NewCFunction(ctx, js_canvas_toDataURL, "toDataURL", 0));
     JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, id));
     JS_SetPropertyStr(ctx, obj, "style",            JS_NewObject(ctx));
-    JS_SetPropertyStr(ctx, obj, "addEventListener", JS_NewCFunction(ctx, js_noop, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, obj, "addEventListener",
+        JS_NewCFunction(ctx, js_canvas_addEventListener, "addEventListener", 2));
     JS_SetPropertyStr(ctx, obj, "removeEventListener", JS_NewCFunction(ctx, js_noop, "removeEventListener", 2));
     JS_SetPropertyStr(ctx, obj, "appendChild",      JS_NewCFunction(ctx, js_noop, "appendChild", 1));
+    JS_SetPropertyStr(ctx, obj, "getBoundingClientRect",
+        JS_NewCFunction(ctx, js_canvas_getBoundingClientRect, "getBoundingClientRect", 0));
     JS_SetPropertyStr(ctx, obj, "offsetLeft",       JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "offsetTop",        JS_NewInt32(ctx, 0));
 
@@ -3421,6 +3494,9 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_input = input;
     g_sound = sound;
 
+    g_stage_canvas_claimed = 0;
+    memset(g_mouse_listeners, 0, sizeof(g_mouse_listeners));
+
     /* Initialize QuickJS runtime */
     g_rt = JS_NewRuntime();
     if (!g_rt) {
@@ -4028,6 +4104,70 @@ static void jscore_qjs_dispatch_key(int keycode, int is_down) {
     JS_FreeValue(g_ctx, event);
 }
 
+static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) {
+    if (!g_ctx) return;
+
+    /* Map event_type int to string */
+    const char *evtype;
+    switch (event_type) {
+        case 4: evtype = "mousemove";  break;
+        case 5: evtype = "mousedown";  break;
+        case 6: evtype = "mouseup";    break;
+        default: return;
+    }
+
+    /* Build a mouse event object */
+    JSValue event = JS_NewObject(g_ctx);
+    JS_SetPropertyStr(g_ctx, event, "type",     JS_NewString(g_ctx, evtype));
+    JS_SetPropertyStr(g_ctx, event, "clientX",  JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, event, "clientY",  JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, event, "pageX",    JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, event, "pageY",    JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, event, "screenX",  JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, event, "screenY",  JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, event, "button",   JS_NewInt32(g_ctx, button));
+    JS_SetPropertyStr(g_ctx, event, "buttons",  JS_NewInt32(g_ctx, event_type == 5 ? (1 << button) : 0));
+    JS_SetPropertyStr(g_ctx, event, "preventDefault",  JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
+    JS_SetPropertyStr(g_ctx, event, "stopPropagation", JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
+
+    JSValue global = JS_GetGlobalObject(g_ctx);
+
+    /* Fire listeners registered via canvas.addEventListener */
+    for (int i = 0; i < MAX_MOUSE_LISTENERS; i++) {
+        if (!g_mouse_listeners[i].active) continue;
+        if (strcmp(g_mouse_listeners[i].event_type, evtype) != 0) continue;
+        JSValue ret = JS_Call(g_ctx, g_mouse_listeners[i].func, global, 1, &event);
+        if (JS_IsException(ret)) {
+            JSValue exc = JS_GetException(g_ctx);
+            const char *s = JS_ToCString(g_ctx, exc);
+            if (s) { fprintf(stderr, "Mouse event error: %s\n", s); JS_FreeCString(g_ctx, s); }
+            JS_FreeValue(g_ctx, exc);
+        }
+        JS_FreeValue(g_ctx, ret);
+    }
+
+    /* Also fire "click" listeners on mouseup (left button) */
+    if (event_type == 6 && button == 0) {
+        JS_SetPropertyStr(g_ctx, event, "type", JS_NewString(g_ctx, "click"));
+        for (int i = 0; i < MAX_MOUSE_LISTENERS; i++) {
+            if (!g_mouse_listeners[i].active) continue;
+            if (strcmp(g_mouse_listeners[i].event_type, "click") != 0) continue;
+            JSValue ret = JS_Call(g_ctx, g_mouse_listeners[i].func, global, 1, &event);
+            if (JS_IsException(ret)) {
+                JSValue exc = JS_GetException(g_ctx);
+                const char *s = JS_ToCString(g_ctx, exc);
+                if (s) { fprintf(stderr, "Click event error: %s\n", s); JS_FreeCString(g_ctx, s); }
+                JS_FreeValue(g_ctx, exc);
+            }
+            JS_FreeValue(g_ctx, ret);
+        }
+    }
+
+    jscore_qjs_drain_jobs();
+    JS_FreeValue(g_ctx, global);
+    JS_FreeValue(g_ctx, event);
+}
+
 /* ============================================================================
  * Interface Implementation
  * ============================================================================ */
@@ -4045,4 +4185,5 @@ void jscore_qjs_init_iface(JSCoreInterface *iface) {
     iface->call_window_load_listeners = jscore_qjs_call_window_load_listeners;
     iface->check_timers = jscore_qjs_check_timers;
     iface->dispatch_key = jscore_qjs_dispatch_key;
+    iface->dispatch_mouse = jscore_qjs_dispatch_mouse;
 }

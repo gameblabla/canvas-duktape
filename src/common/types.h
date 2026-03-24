@@ -129,15 +129,20 @@ typedef struct {
  * Implemented by: src/input/SDL2/input_sdl2.c
  * ============================================================================ */
 typedef enum {
-    INPUT_EVENT_NONE    = 0,
-    INPUT_EVENT_QUIT    = 1,
-    INPUT_EVENT_KEYDOWN = 2,
-    INPUT_EVENT_KEYUP   = 3
+    INPUT_EVENT_NONE      = 0,
+    INPUT_EVENT_QUIT      = 1,
+    INPUT_EVENT_KEYDOWN   = 2,
+    INPUT_EVENT_KEYUP     = 3,
+    INPUT_EVENT_MOUSEMOVE = 4,
+    INPUT_EVENT_MOUSEDOWN = 5,
+    INPUT_EVENT_MOUSEUP   = 6
 } InputEventType;
 
 typedef struct {
     InputEventType type;
     int keycode;   /* browser-style keyCode */
+    int x, y;     /* mouse position in window pixels */
+    int button;   /* mouse button: 0=left, 1=middle, 2=right */
 } InputEvent;
 
 typedef struct {
@@ -178,4 +183,5 @@ typedef struct {
 
     void (*check_timers)(void);
     void (*dispatch_key)(int keycode, int is_down);
+    void (*dispatch_mouse)(int event_type, int x, int y, int button);
 } JSCoreInterface;

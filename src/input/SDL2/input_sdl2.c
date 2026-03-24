@@ -71,6 +71,29 @@ static int i_poll(InputEvent* out) {
                 return 1;
             }
         }
+        if (e.type == SDL_MOUSEMOTION) {
+            out->type = INPUT_EVENT_MOUSEMOVE;
+            out->x = e.motion.x;
+            out->y = e.motion.y;
+            out->button = 0;
+            return 1;
+        }
+        if (e.type == SDL_MOUSEBUTTONDOWN) {
+            out->type = INPUT_EVENT_MOUSEDOWN;
+            out->x = e.button.x;
+            out->y = e.button.y;
+            out->button = (e.button.button == SDL_BUTTON_RIGHT) ? 2 :
+                          (e.button.button == SDL_BUTTON_MIDDLE) ? 1 : 0;
+            return 1;
+        }
+        if (e.type == SDL_MOUSEBUTTONUP) {
+            out->type = INPUT_EVENT_MOUSEUP;
+            out->x = e.button.x;
+            out->y = e.button.y;
+            out->button = (e.button.button == SDL_BUTTON_RIGHT) ? 2 :
+                          (e.button.button == SDL_BUTTON_MIDDLE) ? 1 : 0;
+            return 1;
+        }
     }
     out->type = INPUT_EVENT_NONE;
     out->keycode = 0;
