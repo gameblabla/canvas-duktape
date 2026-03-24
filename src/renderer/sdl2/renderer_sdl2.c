@@ -9,6 +9,9 @@
 #include <zlib.h>
 #include "renderer_sdl2.h"
 
+/* Extra debug logging - define EXTRA_DEBUG to enable verbose debug messages */
+/* #define EXTRA_DEBUG */
+
 /* ============================================================================
  * SDL2 State
  * ============================================================================ */
@@ -301,7 +304,9 @@ static void* r_create_texture(int w, int h) {
     SDL_Texture* t = SDL_CreateTexture(g_sdl_renderer,
                                        SDL_PIXELFORMAT_RGBA8888,
                                        SDL_TEXTUREACCESS_TARGET, w, h);
+#ifdef EXTRA_DEBUG
     fprintf(stderr, "[r_create_texture] %dx%d -> %p\n", w, h, t);
+#endif
     if (!t) return NULL;
     SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
     SDL_SetRenderTarget(g_sdl_renderer, t);
