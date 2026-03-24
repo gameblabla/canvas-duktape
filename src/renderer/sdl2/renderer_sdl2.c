@@ -426,9 +426,20 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     if (!tex) return;
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
     apply_clip();
-    SDL_SetRenderDrawBlendMode(g_sdl_renderer,
-        blend_add ? SDL_BLENDMODE_ADD :
-        (a < 255  ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE));
+    SDL_BlendMode bm;
+    if (blend_add == 1) {
+        bm = SDL_BLENDMODE_ADD;
+    } else if (blend_add == 2) {
+        /* destination-over: new pixels go behind existing opaque pixels */
+        bm = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 3) {
+        bm = SDL_BLENDMODE_NONE; /* copy: replace */
+    } else {
+        bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    }
+    SDL_SetRenderDrawBlendMode(g_sdl_renderer, bm);
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
 
     int is_identity = (m[0]==1 && m[1]==0 && m[2]==0 &&

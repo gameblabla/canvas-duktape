@@ -48,13 +48,23 @@ typedef struct {
     int line_width;
     double global_alpha;  /* 0.0 - 1.0 */
     int image_smoothing_enabled;  /* 0 or 1 */
-    int global_composite_lighter;  /* 1 if "lighter", 0 if "source-over" */
+    int global_composite;  /* 0=source-over, 1=lighter, 2=destination-over, 3=copy */
     char font[256];
     int font_size;
     char font_family[64];
     char text_align[32];
     char text_baseline[32];
     int canvas_id;  /* ID of canvas we're drawing to (0 = main) */
+
+    /* Shadow */
+    double shadow_color[4]; /* RGBA 0-1 */
+    int shadow_blur;
+    int shadow_offset_x;
+    int shadow_offset_y;
+
+    /* Clip rect */
+    int has_clip;
+    int clip_x, clip_y, clip_w, clip_h;
 
     /* Path tracking */
     double *path_pts;
@@ -69,13 +79,19 @@ typedef struct {
         int line_width;
         double global_alpha;
         int image_smoothing_enabled;
-        int global_composite_lighter;
+        int global_composite;
         char font[256];
         int font_size;
         char font_family[64];
         char text_align[32];
         char text_baseline[32];
         int canvas_id;
+        double shadow_color[4];
+        int shadow_blur;
+        int shadow_offset_x;
+        int shadow_offset_y;
+        int has_clip;
+        int clip_x, clip_y, clip_w, clip_h;
     } *state_stack;
     int stack_top;
     int stack_capacity;
@@ -302,6 +318,15 @@ static void pop_state(void) {
     if (g_ctx2d.stack_top > 0) {
         g_ctx2d.stack_top--;
         memcpy(&g_ctx2d, &g_ctx2d.state_stack[g_ctx2d.stack_top], STATE_SIZE);
+        /* Apply restored clip state to renderer */
+        if (g_renderer) {
+            void *target = g_canvases[g_ctx2d.canvas_id].tex_handle;
+            if (g_ctx2d.has_clip && g_renderer->set_clip_rect)
+                g_renderer->set_clip_rect(target, g_ctx2d.clip_x, g_ctx2d.clip_y,
+                                          g_ctx2d.clip_w, g_ctx2d.clip_h);
+            else if (!g_ctx2d.has_clip && g_renderer->clear_clip_rect)
+                g_renderer->clear_clip_rect(target);
+        }
     }
 }
 
@@ -963,14 +988,58 @@ static JSValue js_ctx2d_get_imageSmoothingEnabled(JSContext *ctx, JSValueConst t
 static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
     const char *op = JS_ToCString(ctx, val);
     if (op) {
-        g_ctx2d.global_composite_lighter = (strcmp(op, "lighter") == 0) ? 1 : 0;
+        if (strcmp(op, "lighter") == 0)       g_ctx2d.global_composite = 1;
+        else if (strcmp(op, "destination-over") == 0) g_ctx2d.global_composite = 2;
+        else if (strcmp(op, "copy") == 0)     g_ctx2d.global_composite = 3;
+        else                                   g_ctx2d.global_composite = 0; /* source-over */
         JS_FreeCString(ctx, op);
     }
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueConst this_val) {
-    return JS_NewString(ctx, g_ctx2d.global_composite_lighter ? "lighter" : "source-over");
+    switch (g_ctx2d.global_composite) {
+        case 1: return JS_NewString(ctx, "lighter");
+        case 2: return JS_NewString(ctx, "destination-over");
+        case 3: return JS_NewString(ctx, "copy");
+        default: return JS_NewString(ctx, "source-over");
+    }
+}
+
+static JSValue js_ctx2d_set_shadowColor(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    color_from_js(val, g_ctx2d.shadow_color);
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_shadowColor(JSContext *ctx, JSValueConst this_val) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,%.2f)",
+        (int)(g_ctx2d.shadow_color[0]*255), (int)(g_ctx2d.shadow_color[1]*255),
+        (int)(g_ctx2d.shadow_color[2]*255), g_ctx2d.shadow_color[3]);
+    return JS_NewString(ctx, buf);
+}
+static JSValue js_ctx2d_set_shadowBlur(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    double v = 0; JS_ToFloat64(ctx, &v, val);
+    g_ctx2d.shadow_blur = (int)v;
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_shadowBlur(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewFloat64(ctx, g_ctx2d.shadow_blur);
+}
+static JSValue js_ctx2d_set_shadowOffsetX(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    double v = 0; JS_ToFloat64(ctx, &v, val);
+    g_ctx2d.shadow_offset_x = (int)v;
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_shadowOffsetX(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewFloat64(ctx, g_ctx2d.shadow_offset_x);
+}
+static JSValue js_ctx2d_set_shadowOffsetY(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    double v = 0; JS_ToFloat64(ctx, &v, val);
+    g_ctx2d.shadow_offset_y = (int)v;
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_shadowOffsetY(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewFloat64(ctx, g_ctx2d.shadow_offset_y);
 }
 
 static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
@@ -1296,8 +1365,22 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
             g_ctx2d.canvas_id, target, x, y, w, h, r, g, b, a);
 #endif
 
+    /* Draw shadow first if configured */
+    if (g_renderer->fill_rect && g_ctx2d.shadow_color[3] > 0 &&
+        (g_ctx2d.shadow_offset_x != 0 || g_ctx2d.shadow_offset_y != 0 || g_ctx2d.shadow_blur > 0)) {
+        uint8_t sr = color_to_byte(g_ctx2d.shadow_color[0]);
+        uint8_t sg = color_to_byte(g_ctx2d.shadow_color[1]);
+        uint8_t sb = color_to_byte(g_ctx2d.shadow_color[2]);
+        uint8_t sa = color_to_byte(g_ctx2d.shadow_color[3]);
+        double shadow_m[6];
+        memcpy(shadow_m, g_ctx2d.transform, sizeof(shadow_m));
+        shadow_m[4] += g_ctx2d.shadow_offset_x;
+        shadow_m[5] += g_ctx2d.shadow_offset_y;
+        g_renderer->fill_rect(target, x, y, w, h, sr, sg, sb, sa, 0, shadow_m);
+    }
+
     if (g_renderer->fill_rect) {
-        g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.global_composite_lighter, g_ctx2d.transform);
+        g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.global_composite, g_ctx2d.transform);
     }
 
     return JS_UNDEFINED;
@@ -1322,7 +1405,7 @@ static JSValue js_ctx2d_strokeRect(JSContext *ctx, JSValueConst this_val,
     if (!target) return JS_UNDEFINED;
     
     if (g_renderer->stroke_rect) {
-        g_renderer->stroke_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.line_width, g_ctx2d.global_composite_lighter);
+        g_renderer->stroke_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.line_width, g_ctx2d.global_composite);
     }
     
     return JS_UNDEFINED;
@@ -1656,7 +1739,42 @@ static JSValue js_ctx2d_putImageData(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_clip(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
-    /* Simplified clip - would need proper path handling */
+    if (g_ctx2d.path_count < 2 || !g_renderer) return JS_UNDEFINED;
+    /* Compute bounding box of transformed path points */
+    double min_x, max_x, min_y, max_y;
+    double px, py;
+    transform_point(&px, &py, g_ctx2d.transform, g_ctx2d.path_pts[0], g_ctx2d.path_pts[1]);
+    min_x = max_x = px;
+    min_y = max_y = py;
+    for (int i = 1; i < g_ctx2d.path_count; i++) {
+        transform_point(&px, &py, g_ctx2d.transform, g_ctx2d.path_pts[i*2], g_ctx2d.path_pts[i*2+1]);
+        if (px < min_x) min_x = px;
+        if (px > max_x) max_x = px;
+        if (py < min_y) min_y = py;
+        if (py > max_y) max_y = py;
+    }
+    int cx = (int)floor(min_x);
+    int cy = (int)floor(min_y);
+    int cw = (int)ceil(max_x) - cx;
+    int ch = (int)ceil(max_y) - cy;
+    /* If we already have a clip, intersect */
+    if (g_ctx2d.has_clip) {
+        int x2 = g_ctx2d.clip_x + g_ctx2d.clip_w;
+        int y2 = g_ctx2d.clip_y + g_ctx2d.clip_h;
+        int nx = cx > g_ctx2d.clip_x ? cx : g_ctx2d.clip_x;
+        int ny = cy > g_ctx2d.clip_y ? cy : g_ctx2d.clip_y;
+        int nx2 = (cx+cw) < x2 ? (cx+cw) : x2;
+        int ny2 = (cy+ch) < y2 ? (cy+ch) : y2;
+        cx = nx; cy = ny;
+        cw = nx2 - nx; if (cw < 0) cw = 0;
+        ch = ny2 - ny; if (ch < 0) ch = 0;
+    }
+    g_ctx2d.has_clip = 1;
+    g_ctx2d.clip_x = cx; g_ctx2d.clip_y = cy;
+    g_ctx2d.clip_w = cw; g_ctx2d.clip_h = ch;
+    void *target = g_canvases[g_ctx2d.canvas_id].tex_handle;
+    if (g_renderer->set_clip_rect)
+        g_renderer->set_clip_rect(target, cx, cy, cw, ch);
     return JS_UNDEFINED;
 }
 
@@ -1747,6 +1865,10 @@ static const JSCFunctionListEntry js_ctx2d_props[] = {
     JS_CGETSET_DEF("globalAlpha", js_ctx2d_get_globalAlpha, js_ctx2d_set_globalAlpha),
     JS_CGETSET_DEF("imageSmoothingEnabled", js_ctx2d_get_imageSmoothingEnabled, js_ctx2d_set_imageSmoothingEnabled),
     JS_CGETSET_DEF("globalCompositeOperation", js_ctx2d_get_globalCompositeOperation, js_ctx2d_set_globalCompositeOperation),
+    JS_CGETSET_DEF("shadowColor", js_ctx2d_get_shadowColor, js_ctx2d_set_shadowColor),
+    JS_CGETSET_DEF("shadowBlur", js_ctx2d_get_shadowBlur, js_ctx2d_set_shadowBlur),
+    JS_CGETSET_DEF("shadowOffsetX", js_ctx2d_get_shadowOffsetX, js_ctx2d_set_shadowOffsetX),
+    JS_CGETSET_DEF("shadowOffsetY", js_ctx2d_get_shadowOffsetY, js_ctx2d_set_shadowOffsetY),
     JS_CGETSET_DEF("font", js_ctx2d_get_font, js_ctx2d_set_font),
     JS_CGETSET_DEF("textAlign", js_ctx2d_get_textAlign, js_ctx2d_set_textAlign),
     JS_CGETSET_DEF("textBaseline", js_ctx2d_get_textBaseline, js_ctx2d_set_textBaseline),
@@ -3564,7 +3686,14 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_ctx2d.line_width = 1;
     g_ctx2d.global_alpha = 1.0;
     g_ctx2d.image_smoothing_enabled = 1;  /* Default to enabled (smoothed) */
-    g_ctx2d.global_composite_lighter = 0;  /* Default to source-over */
+    g_ctx2d.global_composite = 0;  /* Default to source-over */
+    g_ctx2d.shadow_color[0] = 0; g_ctx2d.shadow_color[1] = 0;
+    g_ctx2d.shadow_color[2] = 0; g_ctx2d.shadow_color[3] = 0;
+    g_ctx2d.shadow_blur = 0;
+    g_ctx2d.shadow_offset_x = 0;
+    g_ctx2d.shadow_offset_y = 0;
+    g_ctx2d.has_clip = 0;
+    g_ctx2d.clip_x = 0; g_ctx2d.clip_y = 0; g_ctx2d.clip_w = 0; g_ctx2d.clip_h = 0;
     g_ctx2d.canvas_id = 0;  /* Default to main canvas */
     g_ctx2d.font[0] = '\0';
     g_ctx2d.font_size = 16;
