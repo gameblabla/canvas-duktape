@@ -17,6 +17,9 @@
 #include "common/types.h"
 #include "sound/SDL2/sound_sdl2.h"
 
+/* Extra debug logging - define EXTRA_DEBUG to enable verbose debug messages */
+/* #define EXTRA_DEBUG */
+
 /* ============================================================================
  * Module State
  * ============================================================================ */
@@ -193,25 +196,33 @@ static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     
     /* Update global canvas_id for other functions */
     g_ctx2d.canvas_id = canvas_id;
-    
+
+#ifdef EXTRA_DEBUG
     fprintf(stderr, "[get_current_canvas_texture] canvas_id=%d\n", canvas_id);
-    
+#endif
+
     /* If canvas_id is 0, use main texture */
     if (canvas_id == 0) {
         void *main_tex = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[get_current_canvas_texture] Using main texture %p\n", main_tex);
+#endif
         return main_tex;
     }
-    
+
     /* Find canvas by ID */
     for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == canvas_id) {
+#ifdef EXTRA_DEBUG
             fprintf(stderr, "[get_current_canvas_texture] Found canvas %d: tex=%p\n", i, g_canvases[i].tex_handle);
+#endif
             return g_canvases[i].tex_handle;
         }
     }
-    
+
+#ifdef EXTRA_DEBUG
     fprintf(stderr, "[get_current_canvas_texture] Canvas %d not found, using main texture\n", canvas_id);
+#endif
     return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
 }
 
@@ -657,7 +668,9 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                     if (JS_IsException(result)) {
                         JSValue exc = JS_GetException(ctx);
                         const char *exc_str = JS_ToCString(ctx, exc);
+#ifdef EXTRA_DEBUG
                         fprintf(stderr, "[Image] onload exception: %s\n", exc_str);
+#endif
                         JS_FreeCString(ctx, exc_str);
                     }
                     JS_FreeValue(ctx, result);
@@ -694,7 +707,9 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                             if (JS_IsException(result)) {
                                 JSValue exc = JS_GetException(ctx);
                                 const char *exc_str = JS_ToCString(ctx, exc);
+#ifdef EXTRA_DEBUG
                                 fprintf(stderr, "[Image] onload exception: %s\n", exc_str);
+#endif
                                 JS_FreeCString(ctx, exc_str);
                             }
                             JS_FreeValue(ctx, result);
@@ -1235,12 +1250,16 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
 
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[fillRect] No target texture (canvas_id=%d)\n", g_ctx2d.canvas_id);
+#endif
         return JS_UNDEFINED;
     }
 
+#ifdef EXTRA_DEBUG
     fprintf(stderr, "[fillRect] canvas_id=%d, target=%p, rect=(%d,%d,%d,%d), color=(%d,%d,%d,%d)\n",
             g_ctx2d.canvas_id, target, x, y, w, h, r, g, b, a);
+#endif
 
     if (g_renderer->fill_rect) {
         g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.global_composite_lighter, g_ctx2d.transform);
@@ -1339,7 +1358,9 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
     }
 
     if (!img_handle) {
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[drawImage] No image handle (img_id=%d, canvas_id=%d)\n", img_id, canvas_id);
+#endif
         return JS_UNDEFINED;
     }
 
@@ -1529,10 +1550,12 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
     uint8_t *pixels = malloc(sw * sh * 4);
     if (g_renderer->get_pixels) {
         g_renderer->get_pixels(target, sx, sy, sw, sh, pixels);
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[getImageData] canvas_id=%d, target=%p, rect=(%d,%d,%d,%d), pixel[0]=(%d,%d,%d,%d)\n",
                 g_ctx2d.canvas_id, target, sx, sy, sw, sh, pixels[0], pixels[1], pixels[2], pixels[3]);
+#endif
     }
-    
+
     JSValue data_arr = JS_NewArray(ctx);
     for (int i = 0; i < sw * sh * 4; i++) {
         JS_SetPropertyUint32(ctx, data_arr, i, JS_NewInt32(ctx, pixels[i]));
@@ -1735,7 +1758,9 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     
     /* Set this as the current canvas for drawing */
     g_ctx2d.canvas_id = id;
+#ifdef EXTRA_DEBUG
     fprintf(stderr, "[getContext] Set canvas_id=%d\n", id);
+#endif
 
     /* Return the 2D context object */
     JSValue ctx_obj = JS_NewObject(ctx);
@@ -2099,7 +2124,9 @@ static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val,
         if (elem_idx < 0) {
             elem_idx = alloc_audio_element();
             if (elem_idx < 0) {
+#ifdef EXTRA_DEBUG
                 fprintf(stderr, "[Audio] Too many audio elements\n");
+#endif
                 return JS_UNDEFINED;
             }
             memset(&g_audio_elements[elem_idx], 0, sizeof(Html5AudioElement));
@@ -2121,8 +2148,10 @@ static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val,
         elem->paused = 0;
         elem->duration = sound_get_duration(native_index);
         audio->elem_index = elem_idx;
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[Audio] Loaded: %s (native slot %d, element %d)\n",
                 src, native_index, elem_idx);
+#endif
 
         /* Update JS object properties */
         JS_SetPropertyStr(ctx, this_val, "duration", JS_NewFloat64(ctx, elem->duration));
@@ -2158,7 +2187,9 @@ static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val,
             JS_Call(ctx, elem->canplaythrough_listener, this_val, 0, NULL);
         }
     } else {
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[Audio] Failed to load: %s\n", src);
+#endif
         elem->native_index = -1;
     }
 
@@ -3329,14 +3360,18 @@ static int jscore_qjs_init(RendererInterface *renderer,
     /* Initialize QuickJS runtime */
     g_rt = JS_NewRuntime();
     if (!g_rt) {
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[QuickJS] JS_NewRuntime failed\n");
+#endif
         return 0;
     }
 
     /* Initialize context */
     g_ctx = JS_NewContext(g_rt);
     if (!g_ctx) {
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[QuickJS] JS_NewContext failed\n");
+#endif
         JS_FreeRuntime(g_rt);
         g_rt = NULL;
         return 0;
@@ -3669,11 +3704,15 @@ static int jscore_qjs_eval_file(const char *path) {
     char *buf = (char *)js_load_file(g_ctx, &buf_len, path);
     
     if (!buf) {
+#ifdef EXTRA_DEBUG
         fprintf(stderr, "[QuickJS] Failed to load: %s\n", path);
+#endif
         return 0;
     }
 
+#ifdef EXTRA_DEBUG
     fprintf(stderr, "[QuickJS] Eval %s (%zu bytes)\n", path, buf_len);
+#endif
 
     /* Evaluate with error location */
     JSValue result = JS_Eval(g_ctx, buf, buf_len, path, JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_BACKTRACE_BARRIER);
@@ -3867,7 +3906,9 @@ static void jscore_qjs_dispatch_key(int keycode, int is_down) {
             if (JS_IsException(ret)) {
                 JSValue exc = JS_GetException(g_ctx);
                 const char *s = JS_ToCString(g_ctx, exc);
+#ifdef EXTRA_DEBUG
                 fprintf(stderr, "[key] %s exception: %s\n", evtype, s ? s : "?");
+#endif
                 JS_FreeCString(g_ctx, s);
                 JS_FreeValue(g_ctx, exc);
             }

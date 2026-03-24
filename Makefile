@@ -27,6 +27,12 @@ LDFLAGS = -lm -lSDL2 -lSDL2_image -lSDL2_ttf -lz -lvorbisfile -lvorbis -logg
 # JS Engine backend selection (default: duktape)
 JSCORE_BACKEND ?= duktape
 
+# Extra debug logging (set to 1 to enable verbose debug messages)
+EXTRA_DEBUG ?= 0
+ifeq ($(EXTRA_DEBUG),1)
+CFLAGS += -DEXTRA_DEBUG
+endif
+
 # Disable LTO for QuickJS backend (causes memory corruption issues)
 ifeq ($(JSCORE_BACKEND),quickjs)
 CFLAGS += -fno-lto -Wno-unused-function -Wno-unused-const-variable
