@@ -1592,7 +1592,8 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     return ctx_obj;
 }
 
-static JSValue js_canvas_get_width(JSContext *ctx, JSValueConst this_val) {
+static JSValue js_canvas_get_width(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
     for (int i = 0; i < 32; i++) {
         if (g_canvases[i].id == id) {
@@ -1602,7 +1603,31 @@ static JSValue js_canvas_get_width(JSContext *ctx, JSValueConst this_val) {
     return JS_NewInt32(ctx, 0);
 }
 
-static JSValue js_canvas_get_height(JSContext *ctx, JSValueConst this_val) {
+static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    int new_width;
+    if (argc > 0) JS_ToInt32(ctx, &new_width, argv[0]);
+    for (int i = 0; i < 32; i++) {
+        if (g_canvases[i].id == id) {
+            if (g_canvases[i].width != new_width) {
+                /* Destroy old texture and create new one */
+                if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
+                    g_renderer->destroy_texture(g_canvases[i].tex_handle);
+                }
+                g_canvases[i].width = new_width;
+                if (g_renderer && g_renderer->create_texture) {
+                    g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
+                }
+            }
+            break;
+        }
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_canvas_get_height(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
     for (int i = 0; i < 32; i++) {
         if (g_canvases[i].id == id) {
@@ -1610,6 +1635,29 @@ static JSValue js_canvas_get_height(JSContext *ctx, JSValueConst this_val) {
         }
     }
     return JS_NewInt32(ctx, 0);
+}
+
+static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    int new_height;
+    if (argc > 0) JS_ToInt32(ctx, &new_height, argv[0]);
+    for (int i = 0; i < 32; i++) {
+        if (g_canvases[i].id == id) {
+            if (g_canvases[i].height != new_height) {
+                /* Destroy old texture and create new one */
+                if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
+                    g_renderer->destroy_texture(g_canvases[i].tex_handle);
+                }
+                g_canvases[i].height = new_height;
+                if (g_renderer && g_renderer->create_texture) {
+                    g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
+                }
+            }
+            break;
+        }
+    }
+    return JS_UNDEFINED;
 }
 
 static JSValue js_canvas_get_style(JSContext *ctx, JSValueConst this_val) {
@@ -2307,8 +2355,8 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
                 /* Add canvas methods */
                 JS_SetPropertyStr(ctx, obj, "getContext",
                     JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
-                JS_SetPropertyStr(ctx, obj, "width", js_canvas_get_width(ctx, obj));
-                JS_SetPropertyStr(ctx, obj, "height", js_canvas_get_height(ctx, obj));
+                JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, g_canvases[i].width));
+                JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, g_canvases[i].height));
                 JS_FreeCString(ctx, id);
                 return obj;
             }
@@ -2346,27 +2394,43 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
         if (idx >= 0) {
             static int canvas_id_counter = 1000;
             int id = ++canvas_id_counter;
-            fprintf(stderr, "[createElement] Creating canvas: slot=%d, id=%d (before setting)\n", idx, id);
-            fprintf(stderr, "[createElement] g_canvases[%d].id before: %d\n", idx, g_canvases[idx].id);
             g_canvases[idx].id = id;
-            fprintf(stderr, "[createElement] g_canvases[%d].id after: %d\n", idx, g_canvases[idx].id);
             g_canvases[idx].width = 800;
             g_canvases[idx].height = 600;
             g_canvases[idx].style[0] = '\0';
 
             if (g_renderer && g_renderer->create_texture) {
                 g_canvases[idx].tex_handle = g_renderer->create_texture(800, 600);
-                fprintf(stderr, "[createElement] Canvas slot %d, id=%d: tex=%p\n", idx, id, g_canvases[idx].tex_handle);
             }
 
             obj = JS_NewObjectClass(ctx, js_canvas_class_id);
             JS_SetOpaque(obj, (void*)(intptr_t)id);
 
-            /* Add canvas methods and properties */
+            /* Add canvas methods */
             JS_SetPropertyStr(ctx, obj, "getContext",
                 JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
-            JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, g_canvases[idx].width));
-            JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, g_canvases[idx].height));
+            
+            /* Define width property with getter/setter */
+            JSAtom width_atom = JS_NewAtom(ctx, "width");
+            JSValue width_getter = JS_NewCFunction(ctx, js_canvas_get_width, "width", 0);
+            JSValue width_setter = JS_NewCFunction(ctx, js_canvas_set_width, "width", 1);
+            int ret = JS_DefineProperty(ctx, obj, width_atom, JS_UNDEFINED,
+                width_getter, width_setter,
+                JS_PROP_HAS_GET | JS_PROP_HAS_SET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+            JS_FreeAtom(ctx, width_atom);
+            JS_FreeValue(ctx, width_getter);
+            JS_FreeValue(ctx, width_setter);
+            
+            /* Define height property with getter/setter */
+            JSAtom height_atom = JS_NewAtom(ctx, "height");
+            JSValue height_getter = JS_NewCFunction(ctx, js_canvas_get_height, "height", 0);
+            JSValue height_setter = JS_NewCFunction(ctx, js_canvas_set_height, "height", 1);
+            ret = JS_DefineProperty(ctx, obj, height_atom, JS_UNDEFINED,
+                height_getter, height_setter,
+                JS_PROP_HAS_GET | JS_PROP_HAS_SET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+            JS_FreeAtom(ctx, height_atom);
+            JS_FreeValue(ctx, height_getter);
+            JS_FreeValue(ctx, height_setter);
         }
     } else if (strcmp(tag, "img") == 0 || strcmp(tag, "image") == 0) {
         /* Create an Image object */
