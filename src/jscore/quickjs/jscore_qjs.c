@@ -130,7 +130,7 @@ typedef struct {
     char style[512];
 } CanvasObject;
 
-static CanvasObject g_canvases[32];
+static CanvasObject g_canvases[64];
 
 /* Audio elements - HTML5 Audio wrapper */
 #define MAX_HTML5_AUDIO_ELEMENTS 16
@@ -204,7 +204,7 @@ static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     }
     
     /* Find canvas by ID */
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == canvas_id) {
             fprintf(stderr, "[get_current_canvas_texture] Found canvas %d: tex=%p\n", i, g_canvases[i].tex_handle);
             return g_canvases[i].tex_handle;
@@ -460,10 +460,21 @@ static void js_image_finalizer(JSRuntime *rt, JSValue val) {
 }
 
 static void js_canvas_finalizer(JSRuntime *rt, JSValue val) {
-    /* Don't destroy canvas textures when JS object is GC'd.
-     * The canvas persists in g_canvases array until engine shutdown. */
     (void)rt;
-    (void)val;
+    int id = (int)(intptr_t)JS_GetOpaque(val, js_canvas_class_id);
+    if (id <= 0) return;
+    for (int i = 0; i < 64; i++) {
+        if (g_canvases[i].id == id) {
+            /* Don't free the primary rendering canvas (id=1) */
+            if (id == 1) return;
+            if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
+                g_renderer->destroy_texture(g_canvases[i].tex_handle);
+            }
+            g_canvases[i].id = 0;
+            g_canvases[i].tex_handle = NULL;
+            return;
+        }
+    }
 }
 
 static JSClassDef js_image_class = {
@@ -629,9 +640,27 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                 JS_SetPropertyStr(ctx, this_val, "height", JS_NewInt32(ctx, g_images[idx].height));
 
                 /* Call onload if present */
-                JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
+                JSValue dataObj = JS_GetPropertyStr(ctx, this_val, "data");
+                JSValue onload = JS_UNDEFINED;
+                if (JS_IsObject(dataObj)) {
+                    onload = JS_GetPropertyStr(ctx, dataObj, "onload");
+                }
+                if (!JS_IsFunction(ctx, onload)) {
+                    JS_FreeValue(ctx, onload);
+                    onload = JS_GetPropertyStr(ctx, this_val, "onload");
+                }
+                JS_FreeValue(ctx, dataObj);
                 if (JS_IsFunction(ctx, onload)) {
-                    JS_Call(ctx, onload, this_val, 0, NULL);
+                    /* For QuickJS native bound functions, the bound this is preserved.
+                     * Call with JS_UNDEFINED to let QuickJS use the bound this. */
+                    JSValue result = JS_Call(ctx, onload, JS_UNDEFINED, 0, NULL);
+                    if (JS_IsException(result)) {
+                        JSValue exc = JS_GetException(ctx);
+                        const char *exc_str = JS_ToCString(ctx, exc);
+                        fprintf(stderr, "[Image] onload exception: %s\n", exc_str);
+                        JS_FreeCString(ctx, exc_str);
+                    }
+                    JS_FreeValue(ctx, result);
                 }
                 JS_FreeValue(ctx, onload);
             } else {
@@ -648,9 +677,27 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                         JS_SetPropertyStr(ctx, this_val, "height", JS_NewInt32(ctx, g_images[idx].height));
 
                         /* Call onload if present */
-                        JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
+                        JSValue dataObj = JS_GetPropertyStr(ctx, this_val, "data");
+                        JSValue onload = JS_UNDEFINED;
+                        if (JS_IsObject(dataObj)) {
+                            onload = JS_GetPropertyStr(ctx, dataObj, "onload");
+                        }
+                        if (!JS_IsFunction(ctx, onload)) {
+                            JS_FreeValue(ctx, onload);
+                            onload = JS_GetPropertyStr(ctx, this_val, "onload");
+                        }
+                        JS_FreeValue(ctx, dataObj);
                         if (JS_IsFunction(ctx, onload)) {
-                            JS_Call(ctx, onload, this_val, 0, NULL);
+                            /* For QuickJS native bound functions, the bound this is preserved.
+                             * Call with JS_UNDEFINED to let QuickJS use the bound this. */
+                            JSValue result = JS_Call(ctx, onload, JS_UNDEFINED, 0, NULL);
+                            if (JS_IsException(result)) {
+                                JSValue exc = JS_GetException(ctx);
+                                const char *exc_str = JS_ToCString(ctx, exc);
+                                fprintf(stderr, "[Image] onload exception: %s\n", exc_str);
+                                JS_FreeCString(ctx, exc_str);
+                            }
+                            JS_FreeValue(ctx, result);
                         }
                         JS_FreeValue(ctx, onload);
                     }
@@ -1281,7 +1328,7 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
         img_h = g_images[img_idx].height;
     } else if (canvas_id > 0) {
         /* Canvas as image */
-        for (int i = 0; i < 32; i++) {
+        for (int i = 0; i < 64; i++) {
             if (g_canvases[i].id == canvas_id) {
                 img_handle = g_canvases[i].tex_handle;
                 img_w = g_canvases[i].width;
@@ -1655,7 +1702,7 @@ static JSValue js_canvas_toDataURL(JSContext *ctx, JSValueConst this_val,
     if (!JS_IsUndefined(canvasIdVal)) {
         JS_ToInt32(ctx, &id, canvasIdVal);
         /* Get canvas dimensions */
-        for (int i = 0; i < 32; i++) {
+        for (int i = 0; i < 64; i++) {
             if (g_canvases[i].id == id) {
                 width = g_canvases[i].width;
                 height = g_canvases[i].height;
@@ -1713,7 +1760,7 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
 static JSValue js_canvas_get_width(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == id) {
             return JS_NewInt32(ctx, g_canvases[i].width);
         }
@@ -1726,7 +1773,7 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
     int new_width;
     if (argc > 0) JS_ToInt32(ctx, &new_width, argv[0]);
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == id) {
             if (g_canvases[i].width != new_width) {
                 /* Destroy old texture and create new one */
@@ -1747,7 +1794,7 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
 static JSValue js_canvas_get_height(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == id) {
             return JS_NewInt32(ctx, g_canvases[i].height);
         }
@@ -1760,7 +1807,7 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
     int new_height;
     if (argc > 0) JS_ToInt32(ctx, &new_height, argv[0]);
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == id) {
             if (g_canvases[i].height != new_height) {
                 /* Destroy old texture and create new one */
@@ -1780,7 +1827,7 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_canvas_get_style(JSContext *ctx, JSValueConst this_val) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id == id) {
             return JS_NewString(ctx, g_canvases[i].style);
         }
@@ -2471,7 +2518,7 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
     if (!id) return JS_NULL;
 
     /* Check canvases */
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         if (g_canvases[i].id != 0) {
             char buf[256];
             snprintf(buf, sizeof(buf), "canvas%d", g_canvases[i].id);
@@ -2525,7 +2572,7 @@ static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst thi
 
     /* Check canvases */
     if (strcmp(tag, "canvas") == 0 || strcmp(tag, "*") == 0) {
-        for (int i = 0; i < 32; i++) {
+        for (int i = 0; i < 64; i++) {
             if (g_canvases[i].id != 0) {
                 JSValue obj = JS_NewObjectClass(ctx, js_canvas_class_id);
                 JS_SetOpaque(obj, (void*)(intptr_t)g_canvases[i].id);
@@ -2563,7 +2610,7 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
     if (strcmp(tag, "canvas") == 0) {
         /* Create a new canvas element */
         int idx = -1;
-        for (int i = 0; i < 32; i++) {
+        for (int i = 0; i < 64; i++) {
             if (g_canvases[i].id == 0) {
                 idx = i;
                 break;
@@ -2893,6 +2940,176 @@ static JSValue js_performance_now(JSContext *ctx, JSValueConst this_val,
 static const JSCFunctionListEntry js_performance_funcs[] = {
     JS_CFUNC_DEF("now", 0, js_performance_now),
 };
+
+/* ============================================================================
+ * Function.prototype.bind implementation
+ * ============================================================================ */
+
+static JSValue js_bound_function_call(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    /* Check if this is our bound function by looking for _boundFn */
+    JSValue fn = JS_GetPropertyStr(ctx, this_val, "_boundFn");
+    
+    /* If no _boundFn property, this is not our bound function - call it normally.
+     * This handles: regular functions, QuickJS native bound functions, etc. */
+    if (!JS_IsFunction(ctx, fn)) {
+        JS_FreeValue(ctx, fn);
+        /* Call the function normally with the passed this */
+        return JS_Call(ctx, this_val, argv[0], argc - 1, argc > 1 ? &argv[1] : NULL);
+    }
+    JS_FreeValue(ctx, fn);
+    
+    /* This is our bound function - extract bound data */
+    JSValue thisArg = JS_GetPropertyStr(ctx, this_val, "_boundThis");
+    JSValue argsArray = JS_GetPropertyStr(ctx, this_val, "_boundArgs");
+    
+    int boundArgc = 0;
+    JSValue *boundArgs = NULL;
+    if (JS_IsArray(argsArray)) {
+        JSValue lenVal = JS_GetPropertyStr(ctx, argsArray, "length");
+        JS_ToInt32(ctx, &boundArgc, lenVal);
+        JS_FreeValue(ctx, lenVal);
+        if (boundArgc > 0) {
+            boundArgs = malloc(boundArgc * sizeof(JSValue));
+            for (int i = 0; i < boundArgc; i++) {
+                boundArgs[i] = JS_GetPropertyUint32(ctx, argsArray, i);
+            }
+        }
+    }
+    
+    int totalArgc = boundArgc + argc;
+    JSValue *totalArgs = NULL;
+    if (totalArgc > 0) {
+        totalArgs = malloc(totalArgc * sizeof(JSValue));
+        for (int i = 0; i < boundArgc; i++) {
+            totalArgs[i] = JS_DupValue(ctx, boundArgs[i]);
+        }
+        for (int i = 0; i < argc; i++) {
+            totalArgs[boundArgc + i] = JS_DupValue(ctx, argv[i]);
+        }
+    }
+    
+    JSValue result = JS_Call(ctx, fn, thisArg, totalArgc, totalArgs);
+    
+    JS_FreeValue(ctx, fn);
+    JS_FreeValue(ctx, thisArg);
+    JS_FreeValue(ctx, argsArray);
+    if (boundArgs) free(boundArgs);
+    if (totalArgs) free(totalArgs);
+    
+    return result;
+}
+
+static JSValue js_function_bind(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    if (!JS_IsFunction(ctx, this_val)) {
+        return JS_ThrowTypeError(ctx, "Function.prototype.bind called on non-function");
+    }
+    
+    JSValue thisArg = argc > 0 ? argv[0] : JS_UNDEFINED;
+    
+    JSValue boundFunc = JS_NewCFunction(ctx, js_bound_function_call, "", 1);
+    
+    JS_SetPropertyStr(ctx, boundFunc, "_boundFn", JS_DupValue(ctx, this_val));
+    JS_SetPropertyStr(ctx, boundFunc, "_boundThis", JS_DupValue(ctx, thisArg));
+    
+    if (argc > 1) {
+        JSValue argsArray = JS_NewArray(ctx);
+        for (int i = 1; i < argc; i++) {
+            JS_SetPropertyUint32(ctx, argsArray, i - 1, JS_DupValue(ctx, argv[i]));
+        }
+        JS_SetPropertyStr(ctx, boundFunc, "_boundArgs", argsArray);
+    } else {
+        JS_SetPropertyStr(ctx, boundFunc, "_boundArgs", JS_NewArray(ctx));
+    }
+    
+    JSValue len = JS_GetPropertyStr(ctx, this_val, "length");
+    if (JS_IsNumber(len)) {
+        int32_t lenVal;
+        JS_ToInt32(ctx, &lenVal, len);
+        if (lenVal > 0) lenVal--;
+        JS_SetPropertyStr(ctx, boundFunc, "length", JS_NewInt32(ctx, lenVal));
+    }
+    JS_FreeValue(ctx, len);
+    
+    return boundFunc;
+}
+
+static JSValue js_function_call(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    if (!JS_IsFunction(ctx, this_val)) {
+        return JS_ThrowTypeError(ctx, "Function.prototype.call called on non-function");
+    }
+    
+    JSValue thisArg = argc > 0 ? argv[0] : JS_UNDEFINED;
+    JSValue *callArgs = NULL;
+    int callArgc = 0;
+    
+    if (argc > 1) {
+        callArgc = argc - 1;
+        callArgs = malloc(callArgc * sizeof(JSValue));
+        if (!callArgs) return JS_EXCEPTION;
+        for (int i = 1; i < argc; i++) {
+            callArgs[i - 1] = argv[i];
+        }
+    }
+    
+    JSValue result = JS_Call(ctx, this_val, thisArg, callArgc, callArgs);
+    
+    if (callArgs) free(callArgs);
+    return result;
+}
+
+static JSValue js_function_apply(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    if (!JS_IsFunction(ctx, this_val)) {
+        return JS_ThrowTypeError(ctx, "Function.prototype.apply called on non-function");
+    }
+    
+    JSValue thisArg = argc > 0 ? argv[0] : JS_UNDEFINED;
+    JSValue argsArray = argc > 1 ? argv[1] : JS_UNDEFINED;
+    
+    int callArgc = 0;
+    JSValue *callArgs = NULL;
+    
+    if (JS_IsArray(argsArray)) {
+        JSValue lenVal = JS_GetPropertyStr(ctx, argsArray, "length");
+        JS_ToInt32(ctx, &callArgc, lenVal);
+        JS_FreeValue(ctx, lenVal);
+        
+        if (callArgc > 0) {
+            callArgs = malloc(callArgc * sizeof(JSValue));
+            if (!callArgs) return JS_EXCEPTION;
+            for (int i = 0; i < callArgc; i++) {
+                callArgs[i] = JS_GetPropertyUint32(ctx, argsArray, i);
+            }
+        }
+    } else if (!JS_IsUndefined(argsArray) && !JS_IsNull(argsArray)) {
+        JSValue lenVal = JS_GetPropertyStr(ctx, argsArray, "length");
+        if (!JS_IsUndefined(lenVal)) {
+            JS_ToInt32(ctx, &callArgc, lenVal);
+            JS_FreeValue(ctx, lenVal);
+            
+            if (callArgc > 0) {
+                callArgs = malloc(callArgc * sizeof(JSValue));
+                if (!callArgs) return JS_EXCEPTION;
+                for (int i = 0; i < callArgc; i++) {
+                    callArgs[i] = JS_GetPropertyUint32(ctx, argsArray, i);
+                }
+            }
+        }
+    }
+    
+    JSValue result = JS_Call(ctx, this_val, thisArg, callArgc, callArgs);
+    
+    if (callArgs) {
+        for (int i = 0; i < callArgc; i++) {
+            JS_FreeValue(ctx, callArgs[i]);
+        }
+        free(callArgs);
+    }
+    return result;
+}
 
 /* ============================================================================
  * Global Functions
@@ -3379,7 +3596,7 @@ static void jscore_qjs_setup_globals(int win_w, int win_h,
     setup_globals_object(g_ctx);
 
     /* Pre-setup canvases */
-    for (int i = 0; i < canvas_count && i < 32; i++) {
+    for (int i = 0; i < canvas_count && i < 64; i++) {
         g_canvases[i].id = i + 1;
         g_canvases[i].width = canvases[i].width;
         g_canvases[i].height = canvases[i].height;
