@@ -25,9 +25,10 @@ static int           g_win_h            = 160;
 static char g_resource_dir[1024] = {0};
 
 /* Font cache */
-#define MAX_FONTS 16
+#define MAX_FONTS 64
 static TTF_Font* g_font_default = NULL;
-static struct { int size; TTF_Font* font; } g_font_cache[MAX_FONTS];
+typedef struct { char family[32]; int size; TTF_Font* font; } FontCacheEntry;
+static FontCacheEntry g_font_cache[MAX_FONTS];
 static int g_font_cache_count = 0;
 
 /* Clip state */
@@ -57,14 +58,56 @@ static void get_resource_path(const char* filename, char* out, size_t out_size) 
     }
 }
 
-static TTF_Font* get_font_for_size(int size) {
-    for (int i = 0; i < g_font_cache_count; i++)
-        if (g_font_cache[i].size == size) return g_font_cache[i].font;
+static TTF_Font* get_font(const char* family, int size) {
+    /* Normalize family name */
+    char family_norm[32] = "sans-serif";
+    if (family && family[0]) {
+        if (strcmp(family, "Arial") == 0 || strcmp(family, "Helvetica") == 0 ||
+            strcmp(family, "Helvetica Neue") == 0 || strcmp(family, "sans-serif") == 0) {
+            strncpy(family_norm, "sans-serif", sizeof(family_norm) - 1);
+        } else if (strcmp(family, "Times") == 0 || strcmp(family, "Times New Roman") == 0 ||
+                   strcmp(family, "Georgia") == 0 || strcmp(family, "serif") == 0) {
+            strncpy(family_norm, "serif", sizeof(family_norm) - 1);
+        } else if (strcmp(family, "Courier") == 0 || strcmp(family, "Courier New") == 0 ||
+                   strcmp(family, "monospace") == 0 || strcmp(family, "Lucida Console") == 0) {
+            strncpy(family_norm, "monospace", sizeof(family_norm) - 1);
+        } else {
+            strncpy(family_norm, "sans-serif", sizeof(family_norm) - 1);
+        }
+    }
+
+    /* Map normalized family to TTF file */
+    const char* ttf_file;
+    if (strcmp(family_norm, "serif") == 0) {
+        ttf_file = "TTF/DejaVuSerif.ttf";
+    } else if (strcmp(family_norm, "monospace") == 0) {
+        ttf_file = "TTF/DejaVuSansMono.ttf";
+    } else {
+        ttf_file = "TTF/DejaVuSans.ttf";
+    }
+
+    /* Look up (family_norm, size) in cache */
+    for (int i = 0; i < g_font_cache_count; i++) {
+        if (g_font_cache[i].size == size &&
+            strcmp(g_font_cache[i].family, family_norm) == 0) {
+            return g_font_cache[i].font;
+        }
+    }
+
+    /* Not found; open if cache not full */
     if (g_font_cache_count < MAX_FONTS) {
         char font_path[1024];
-        get_resource_path("Arial.ttf", font_path, sizeof(font_path));
+        get_resource_path(ttf_file, font_path, sizeof(font_path));
         TTF_Font* f = TTF_OpenFont(font_path, size);
+        if (!f) {
+            /* Fallback: try Arial.ttf */
+            get_resource_path("Arial.ttf", font_path, sizeof(font_path));
+            f = TTF_OpenFont(font_path, size);
+        }
         if (f) {
+            strncpy(g_font_cache[g_font_cache_count].family, family_norm,
+                    sizeof(g_font_cache[g_font_cache_count].family) - 1);
+            g_font_cache[g_font_cache_count].family[sizeof(g_font_cache[g_font_cache_count].family) - 1] = '\0';
             g_font_cache[g_font_cache_count].size = size;
             g_font_cache[g_font_cache_count].font = f;
             g_font_cache_count++;
@@ -72,6 +115,10 @@ static TTF_Font* get_font_for_size(int size) {
         }
     }
     return g_font_default;
+}
+
+static TTF_Font* get_font_for_size(int size) {
+    return get_font("sans-serif", size);
 }
 
 /* Apply transform matrix to a destination rect (bounding box). */
@@ -508,10 +555,10 @@ static void r_draw_canvas(void* target, void* src_tex,
 static void r_fill_text(void* target, const char* text, double x, double y,
                          uint8_t r, uint8_t g, uint8_t b, uint8_t a,
                          int font_size, const char* align,
-                         const char* baseline) {
+                         const char* baseline, const char* font_family) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || !text || !text[0]) return;
-    TTF_Font* font = get_font_for_size(font_size);
+    TTF_Font* font = get_font(font_family, font_size);
     if (!font) return;
     SDL_Color fg = {r, g, b, 255};
     SDL_Surface* sf = TTF_RenderText_Blended(font, text, fg);
@@ -542,10 +589,10 @@ static void r_fill_text(void* target, const char* text, double x, double y,
 
 static void r_stroke_text(void* target, const char* text, double x, double y,
                            uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                           int font_size, int lw) {
+                           int font_size, int lw, const char* font_family) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || !text || !text[0]) return;
-    TTF_Font* font = get_font_for_size(font_size);
+    TTF_Font* font = get_font(font_family, font_size);
     if (!font) return;
     SDL_Color fg = {r, g, b, 255};
     SDL_Surface* sf = TTF_RenderText_Blended(font, text, fg);
@@ -574,13 +621,50 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
     SDL_DestroyTexture(tt);
 }
 
-static int r_measure_text(const char* text, int font_size) {
+static int is_monospace_family(const char* family) {
+    if (!family) return 0;
+    return (strcmp(family, "Courier") == 0 || strcmp(family, "Courier New") == 0 ||
+            strcmp(family, "monospace") == 0 || strcmp(family, "Lucida Console") == 0);
+}
+
+/* Count UTF-8 code points (non-continuation bytes) */
+static int utf8_char_count(const char* s) {
+    int n = 0;
+    while (*s) { if ((*s & 0xC0) != 0x80) n++; s++; }
+    return n;
+}
+
+static int r_measure_text(const char* text, int font_size, const char* font_family) {
     if (!text) return 0;
-    TTF_Font* font = get_font_for_size(font_size);
+    TTF_Font* font = get_font(font_family, font_size);
     if (!font) return (int)(strlen(text) * 8);
+    if (is_monospace_family(font_family)) {
+        int cw = 0, ch = 0;
+        TTF_SizeUTF8(font, "M", &cw, &ch);
+        return cw * utf8_char_count(text);
+    }
     int w = 0, h = 0;
-    TTF_SizeText(font, text, &w, &h);
+    TTF_SizeUTF8(font, text, &w, &h);
     return w;
+}
+
+static void r_measure_text_ex(const char* text, int font_size, const char* font_family,
+                               int* out_width, int* out_ascent, int* out_descent) {
+    if (!text || !out_width || !out_ascent || !out_descent) return;
+    *out_width = 0; *out_ascent = 0; *out_descent = 0;
+    TTF_Font* font = get_font(font_family, font_size);
+    if (!font) { *out_width = (int)(strlen(text) * 8); return; }
+    if (is_monospace_family(font_family)) {
+        int cw = 0, ch = 0;
+        TTF_SizeUTF8(font, "M", &cw, &ch);
+        *out_width = cw * utf8_char_count(text);
+    } else {
+        int w = 0, h = 0;
+        TTF_SizeUTF8(font, text, &w, &h);
+        *out_width = w;
+    }
+    *out_ascent = TTF_FontAscent(font);
+    *out_descent = -TTF_FontDescent(font);  /* TTF returns negative, we want positive */
 }
 
 static void r_draw_arc_points(void* target,
@@ -883,6 +967,7 @@ void renderer_sdl2_init_iface(RendererInterface* iface) {
     iface->fill_text        = r_fill_text;
     iface->stroke_text      = r_stroke_text;
     iface->measure_text     = r_measure_text;
+    iface->measure_text_ex  = r_measure_text_ex;
     iface->draw_arc_points  = r_draw_arc_points;
     iface->fill_polygon     = r_fill_polygon;
     iface->fill_circle      = r_fill_circle;

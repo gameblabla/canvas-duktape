@@ -928,7 +928,7 @@ static duk_ret_t js_fillText(duk_context* ctx) {
     if(baseline) strncpy(base_buf,baseline,15);
     duk_pop_2(ctx);
     void* target=get_current_canvas_texture(ctx);
-    g_R->fill_text(target,text,x,y,r,g,b,a,fs,align_buf,base_buf);
+    g_R->fill_text(target,text,x,y,r,g,b,a,fs,align_buf,base_buf,"sans-serif");
     return 0;
 }
 
@@ -950,14 +950,14 @@ static duk_ret_t js_strokeText(duk_context* ctx) {
     int lw=(int)duk_get_number(ctx,-1);
     duk_pop_2(ctx);
     void* target=get_current_canvas_texture(ctx);
-    g_R->stroke_text(target,text,x,y,r,g,b,a,fs,lw);
+    g_R->stroke_text(target,text,x,y,r,g,b,a,fs,lw,"sans-serif");
     return 0;
 }
 
 static duk_ret_t js_measureText(duk_context* ctx) {
     const char* text=duk_get_string(ctx,0);
     duk_push_object(ctx);
-    duk_push_number(ctx, (double)g_R->measure_text(text ? text : "", 20));
+    duk_push_number(ctx, (double)g_R->measure_text(text ? text : "", 20, "sans-serif"));
     duk_put_prop_string(ctx,-2,"width");
     return 1;
 }

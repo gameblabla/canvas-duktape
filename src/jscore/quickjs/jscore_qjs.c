@@ -51,6 +51,7 @@ typedef struct {
     int global_composite_lighter;  /* 1 if "lighter", 0 if "source-over" */
     char font[256];
     int font_size;
+    char font_family[64];
     char text_align[32];
     char text_baseline[32];
     int canvas_id;  /* ID of canvas we're drawing to (0 = main) */
@@ -71,6 +72,7 @@ typedef struct {
         int global_composite_lighter;
         char font[256];
         int font_size;
+        char font_family[64];
         char text_align[32];
         char text_baseline[32];
         int canvas_id;
@@ -991,6 +993,20 @@ static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueC
                 g_ctx2d.font_size = atoi(num);
             }
         }
+        /* Extract font family: everything after the "px" token */
+        const char *fam = strstr(font, "px");
+        if (fam) {
+            fam += 2; /* skip "px" */
+            while (*fam == ' ') fam++; /* skip spaces */
+            strncpy(g_ctx2d.font_family, fam, sizeof(g_ctx2d.font_family) - 1);
+            g_ctx2d.font_family[sizeof(g_ctx2d.font_family) - 1] = '\0';
+            /* Remove trailing whitespace */
+            int flen = strlen(g_ctx2d.font_family);
+            while (flen > 0 && (g_ctx2d.font_family[flen-1] == ' ' || g_ctx2d.font_family[flen-1] == '\t'))
+                g_ctx2d.font_family[--flen] = '\0';
+        } else {
+            strncpy(g_ctx2d.font_family, "sans-serif", sizeof(g_ctx2d.font_family) - 1);
+        }
         JS_FreeCString(ctx, font);
     }
     return JS_UNDEFINED;
@@ -1451,7 +1467,8 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
     
     if (g_renderer->fill_text) {
         g_renderer->fill_text(target, text, tx, ty, r, g, b, a,
-                              g_ctx2d.font_size, g_ctx2d.text_align, g_ctx2d.text_baseline);
+                              g_ctx2d.font_size, g_ctx2d.text_align, g_ctx2d.text_baseline,
+                              g_ctx2d.font_family);
     }
     
     JS_FreeCString(ctx, text);
@@ -1485,7 +1502,8 @@ static JSValue js_ctx2d_strokeText(JSContext *ctx, JSValueConst this_val,
     
     if (g_renderer->stroke_text) {
         g_renderer->stroke_text(target, text, tx, ty, r, g, b, a,
-                                g_ctx2d.font_size, g_ctx2d.line_width);
+                                g_ctx2d.font_size, g_ctx2d.line_width,
+                                g_ctx2d.font_family);
     }
     
     JS_FreeCString(ctx, text);
@@ -1494,28 +1512,31 @@ static JSValue js_ctx2d_strokeText(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_measureText(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
+    JSValue obj = JS_NewObject(ctx);
     if (argc < 1 || !g_renderer) {
-        JSValue obj = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, obj, "width", JS_NewFloat64(ctx, 0));
         return obj;
     }
-    
     const char *text = JS_ToCString(ctx, argv[0]);
     if (!text) {
-        JSValue obj = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, obj, "width", JS_NewFloat64(ctx, 0));
         return obj;
     }
-    
-    int width = 0;
-    if (g_renderer->measure_text) {
-        width = g_renderer->measure_text(text, g_ctx2d.font_size);
+    int width = 0, ascent = 0, descent = 0;
+    if (g_renderer->measure_text_ex) {
+        g_renderer->measure_text_ex(text, g_ctx2d.font_size, g_ctx2d.font_family,
+                                    &width, &ascent, &descent);
+    } else if (g_renderer->measure_text) {
+        width = g_renderer->measure_text(text, g_ctx2d.font_size, g_ctx2d.font_family);
     }
-    
     JS_FreeCString(ctx, text);
-    
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "width", JS_NewFloat64(ctx, width));
+    JS_SetPropertyStr(ctx, obj, "width",                   JS_NewFloat64(ctx, width));
+    JS_SetPropertyStr(ctx, obj, "actualBoundingBoxAscent",  JS_NewFloat64(ctx, ascent));
+    JS_SetPropertyStr(ctx, obj, "actualBoundingBoxDescent", JS_NewFloat64(ctx, descent));
+    JS_SetPropertyStr(ctx, obj, "actualBoundingBoxLeft",    JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "actualBoundingBoxRight",   JS_NewFloat64(ctx, width));
+    JS_SetPropertyStr(ctx, obj, "fontBoundingBoxAscent",    JS_NewFloat64(ctx, ascent));
+    JS_SetPropertyStr(ctx, obj, "fontBoundingBoxDescent",   JS_NewFloat64(ctx, descent));
     return obj;
 }
 
@@ -3547,6 +3568,7 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_ctx2d.canvas_id = 0;  /* Default to main canvas */
     g_ctx2d.font[0] = '\0';
     g_ctx2d.font_size = 16;
+    strncpy(g_ctx2d.font_family, "sans-serif", sizeof(g_ctx2d.font_family) - 1);
     strcpy(g_ctx2d.text_align, "start");
     strcpy(g_ctx2d.text_baseline, "alphabetic");
 

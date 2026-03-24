@@ -24,8 +24,8 @@ CC = gcc
 CFLAGS = -Wall -c -std=gnu99 -O3 -march=native -DNDEBUG
 LDFLAGS = -lm -lSDL2 -lSDL2_image -lSDL2_ttf -lz -lvorbisfile -lvorbis -logg
 
-# JS Engine backend selection (default: duktape)
-JSCORE_BACKEND ?= duktape
+# JS Engine backend selection (default: quickjs)
+JSCORE_BACKEND ?= quickjs
 
 # Extra debug logging (set to 1 to enable verbose debug messages)
 EXTRA_DEBUG ?= 0
