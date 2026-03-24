@@ -299,6 +299,23 @@ static int find_timer_by_id(int id) {
     return -1;
 }
 
+/* Schedule a one-shot 0ms timer to call func asynchronously (deferred).
+ * Used to make image onload/onerror async like a real browser. */
+static void schedule_deferred_call(JSContext *ctx, JSValue func) {
+    int slot = -1;
+    for (int i = 0; i < MAX_INTERVALS; i++) {
+        if (!g_timers[i].active) { slot = i; break; }
+    }
+    if (slot < 0) return; /* no room - drop */
+    int id = g_timer_next_id++;
+    g_timers[slot].id = id;
+    g_timers[slot].func = JS_DupValue(ctx, func);
+    g_timers[slot].interval_ms = 0;
+    g_timers[slot].next_fire = 0; /* fire ASAP */
+    g_timers[slot].repeat = 0;
+    g_timers[slot].active = 1;
+}
+
 static int find_free_timer_slot(void) {
     for (int i = 0; i < MAX_INTERVALS; i++) {
         if (!g_timers[i].active) {
@@ -668,18 +685,8 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                 }
                 JS_FreeValue(ctx, dataObj);
                 if (JS_IsFunction(ctx, onload)) {
-                    /* For QuickJS native bound functions, the bound this is preserved.
-                     * Call with JS_UNDEFINED to let QuickJS use the bound this. */
-                    JSValue result = JS_Call(ctx, onload, JS_UNDEFINED, 0, NULL);
-                    if (JS_IsException(result)) {
-                        JSValue exc = JS_GetException(ctx);
-                        const char *exc_str = JS_ToCString(ctx, exc);
-#ifdef EXTRA_DEBUG
-                        fprintf(stderr, "[Image] onload exception: %s\n", exc_str);
-#endif
-                        JS_FreeCString(ctx, exc_str);
-                    }
-                    JS_FreeValue(ctx, result);
+                    /* Defer onload via 0ms timer to be async like a real browser */
+                    schedule_deferred_call(ctx, onload);
                 }
                 JS_FreeValue(ctx, onload);
             } else {
@@ -701,32 +708,19 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                         JS_SetPropertyStr(ctx, this_val, "width", JS_NewInt32(ctx, g_images[idx].width));
                         JS_SetPropertyStr(ctx, this_val, "height", JS_NewInt32(ctx, g_images[idx].height));
 
-                        /* Call onload if present */
-                        JSValue dataObj = JS_GetPropertyStr(ctx, this_val, "data");
-                        JSValue onload = JS_UNDEFINED;
-                        if (JS_IsObject(dataObj)) {
-                            onload = JS_GetPropertyStr(ctx, dataObj, "onload");
-                        }
-                        if (!JS_IsFunction(ctx, onload)) {
-                            JS_FreeValue(ctx, onload);
-                            onload = JS_GetPropertyStr(ctx, this_val, "onload");
-                        }
-                        JS_FreeValue(ctx, dataObj);
+                        /* Defer onload via 0ms timer to be async like a real browser */
+                        JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
                         if (JS_IsFunction(ctx, onload)) {
-                            /* For QuickJS native bound functions, the bound this is preserved.
-                             * Call with JS_UNDEFINED to let QuickJS use the bound this. */
-                            JSValue result = JS_Call(ctx, onload, JS_UNDEFINED, 0, NULL);
-                            if (JS_IsException(result)) {
-                                JSValue exc = JS_GetException(ctx);
-                                const char *exc_str = JS_ToCString(ctx, exc);
-#ifdef EXTRA_DEBUG
-                                fprintf(stderr, "[Image] onload exception: %s\n", exc_str);
-#endif
-                                JS_FreeCString(ctx, exc_str);
-                            }
-                            JS_FreeValue(ctx, result);
+                            schedule_deferred_call(ctx, onload);
                         }
                         JS_FreeValue(ctx, onload);
+                    } else {
+                        /* Load failed - defer onerror */
+                        JSValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
+                        if (JS_IsFunction(ctx, onerror)) {
+                            schedule_deferred_call(ctx, onerror);
+                        }
+                        JS_FreeValue(ctx, onerror);
                     }
                 }
             }
