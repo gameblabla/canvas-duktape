@@ -561,7 +561,7 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     TTF_Font* font = get_font(font_family, font_size);
     if (!font) return;
     SDL_Color fg = {r, g, b, 255};
-    SDL_Surface* sf = TTF_RenderText_Blended(font, text, fg);
+    SDL_Surface* sf = TTF_RenderUTF8_Blended(font, text, fg);
     if (!sf) return;
     SDL_Texture* tt = SDL_CreateTextureFromSurface(g_sdl_renderer, sf);
     SDL_FreeSurface(sf);
@@ -571,14 +571,22 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     int rx = (int)x;
     if (align && strcmp(align, "center") == 0) rx -= tw / 2;
     else if (align && (strcmp(align, "right")==0 || strcmp(align,"end")==0)) rx -= tw;
+    /* SDL_TTF: ascent is positive, descent is negative.
+     * Surface top pixel = baseline - ascent.
+     * Baseline calculations to match HTML5 Canvas spec: */
     int ascent  = TTF_FontAscent(font);
-    int descent = TTF_FontDescent(font);
-    int ry = (int)y - ascent;
-    if (baseline && strcmp(baseline, "middle") == 0)
-        ry -= (ascent + descent) / 2;
-    else if (baseline && strcmp(baseline, "bottom") == 0)
-        ry -= (ascent + descent);
-    /* "top" baseline: y is already at top */
+    int descent = TTF_FontDescent(font); /* negative in SDL_TTF */
+    int ry;
+    if (baseline && (strcmp(baseline, "top") == 0 || strcmp(baseline, "hanging") == 0)) {
+        ry = (int)y;
+    } else if (baseline && strcmp(baseline, "middle") == 0) {
+        ry = (int)y - (ascent - descent) / 2; /* descent negative → ascent - descent = total height */
+    } else if (baseline && (strcmp(baseline, "bottom") == 0 || strcmp(baseline, "ideographic") == 0)) {
+        ry = (int)y + descent - ascent; /* descent negative: y - |descent| - ascent */
+    } else {
+        /* "alphabetic" (default) and anything else */
+        ry = (int)y - ascent;
+    }
     SDL_SetRenderTarget(g_sdl_renderer, tex);
     SDL_Rect dst = {rx, ry, tw, th};
     SDL_RenderCopy(g_sdl_renderer, tt, NULL, &dst);
@@ -595,7 +603,7 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
     TTF_Font* font = get_font(font_family, font_size);
     if (!font) return;
     SDL_Color fg = {r, g, b, 255};
-    SDL_Surface* sf = TTF_RenderText_Blended(font, text, fg);
+    SDL_Surface* sf = TTF_RenderUTF8_Blended(font, text, fg);
     if (!sf) return;
     SDL_Texture* tt = SDL_CreateTextureFromSurface(g_sdl_renderer, sf);
     SDL_FreeSurface(sf);
@@ -603,7 +611,7 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
     int tw, th;
     SDL_QueryTexture(tt, NULL, NULL, &tw, &th);
     int ascent = TTF_FontAscent(font);
-    int ry = (int)y - ascent;
+    int ry = (int)y - ascent; /* stroke_text uses alphabetic baseline */
     if (lw < 1) lw = 1;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
