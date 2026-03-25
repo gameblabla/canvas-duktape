@@ -765,6 +765,10 @@ static void r_fill_polygon(void* target, const double* pts, int count,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 8) {
         bm = SDL_BLENDMODE_MOD;
+    } else if (blend_add == 9) {
+        /* clear: set destination to transparent black */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
     } else {
         bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     }

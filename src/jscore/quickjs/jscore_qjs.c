@@ -1056,12 +1056,14 @@ static JSValue js_ctx2d_set_fillStyle(JSContext *ctx, JSValueConst this_val, JSV
         if (!JS_IsUndefined(grad_id_val)) {
             int gid = 0;
             JS_ToInt32(ctx, &gid, grad_id_val);
-            g_ctx2d.fill_gradient_id = gid;
-            g_ctx2d.fill_pattern_canvas_id = 0;
-            JS_FreeValue(ctx, g_fill_style_obj);
-            g_fill_style_obj = JS_DupValue(ctx, val);
-            JS_FreeValue(ctx, grad_id_val);
-            return JS_UNDEFINED;
+            if (gid > 0) {
+                g_ctx2d.fill_gradient_id = gid;
+                g_ctx2d.fill_pattern_canvas_id = 0;
+                JS_FreeValue(ctx, g_fill_style_obj);
+                g_fill_style_obj = JS_DupValue(ctx, val);
+                JS_FreeValue(ctx, grad_id_val);
+                return JS_UNDEFINED;
+            }
         }
         JS_FreeValue(ctx, grad_id_val);
         /* Check for pattern */
@@ -2051,83 +2053,92 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Handle gradient fill */
-    if (g_ctx2d.fill_gradient_id > 0 && g_renderer->put_pixels) {
+    if (g_ctx2d.fill_gradient_id > 0) {
         GradientDef *grad = &g_gradients[g_ctx2d.fill_gradient_id - 1];
         if (grad->active && grad->num_stops > 0 && w > 0 && h > 0) {
-            /* Get actual pixel coords after transform */
-            double ox, oy;
-            transform_point(&ox, &oy, g_ctx2d.transform, x, y);
-            int px = (int)ox, py = (int)oy;
-            int pw = w, ph = h;
-            /* Clamp to canvas */
-            int cw = 0, ch = 0;
-            for (int i = 0; i < 64; i++) {
-                if (g_canvases[i].id == g_ctx2d.canvas_id || (g_ctx2d.canvas_id == 0 && i == 0)) {
-                    cw = g_canvases[i].width; ch = g_canvases[i].height; break;
+            if (!g_renderer->put_pixels) {
+                /* put_pixels not available - draw first stop color */
+                uint8_t r = grad->stops[0].r, g = grad->stops[0].g, b = grad->stops[0].b, a = grad->stops[0].a;
+                if (g_renderer->fill_rect) {
+                    g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, 0, g_ctx2d.transform);
                 }
-            }
-            if (cw == 0) cw = g_win_w;
-            if (ch == 0) ch = g_win_h;
-            if (px < 0) { pw += px; px = 0; }
-            if (py < 0) { ph += py; py = 0; }
-            if (px + pw > cw) pw = cw - px;
-            if (py + ph > ch) ph = ch - py;
-            if (pw <= 0 || ph <= 0) goto skip_gradient;
-            uint8_t *pixels = malloc(pw * ph * 4);
-            if (!pixels) goto skip_gradient;
-            for (int row = 0; row < ph; row++) {
-                for (int col = 0; col < pw; col++) {
-                    double fpx = px + col, fpy = py + row;
-                    double t = 0;
-                    if (grad->type == 0) { /* linear */
-                        double dx = grad->x1 - grad->x0, dy = grad->y1 - grad->y0;
-                        double len2 = dx*dx + dy*dy;
-                        t = len2 > 0 ? ((fpx - grad->x0)*dx + (fpy - grad->y0)*dy) / len2 : 0;
-                    } else { /* radial */
-                        double dist = sqrt((fpx-grad->x1)*(fpx-grad->x1) + (fpy-grad->y1)*(fpy-grad->y1));
-                        t = grad->r1 > 0 ? (dist - grad->r0) / (grad->r1 - grad->r0) : 0;
+            } else {
+                /* put_pixels available - use it for gradient rendering */
+                /* Get actual pixel coords after transform */
+                double ox, oy;
+                transform_point(&ox, &oy, g_ctx2d.transform, x, y);
+                int px = (int)ox, py = (int)oy;
+                int pw = w, ph = h;
+                /* Clamp to canvas */
+                int cw = 0, ch = 0;
+                for (int i = 0; i < 64; i++) {
+                    if (g_canvases[i].id == g_ctx2d.canvas_id || (g_ctx2d.canvas_id == 0 && i == 0)) {
+                        cw = g_canvases[i].width; ch = g_canvases[i].height; break;
                     }
-                    if (t < 0) t = 0;
-                    if (t > 1) t = 1;
-                    /* Interpolate between stops */
-                    double cr=0,cg2=0,cb2=0,ca2=1;
-                    if (grad->num_stops == 1) {
-                        cr = grad->stops[0].r; cg2 = grad->stops[0].g;
-                        cb2 = grad->stops[0].b; ca2 = grad->stops[0].a;
-                    } else {
-                        int found = 0;
-                        for (int si = 0; si < grad->num_stops - 1; si++) {
-                            if (t >= grad->stops[si].offset && t <= grad->stops[si+1].offset) {
-                                double d = grad->stops[si+1].offset - grad->stops[si].offset;
-                                double f = d > 0 ? (t - grad->stops[si].offset) / d : 0;
-                                cr = grad->stops[si].r + f*(grad->stops[si+1].r - grad->stops[si].r);
-                                cg2= grad->stops[si].g + f*(grad->stops[si+1].g - grad->stops[si].g);
-                                cb2= grad->stops[si].b + f*(grad->stops[si+1].b - grad->stops[si].b);
-                                ca2= grad->stops[si].a + f*(grad->stops[si+1].a - grad->stops[si].a);
-                                found = 1; break;
+                }
+                if (cw == 0) cw = g_win_w;
+                if (ch == 0) ch = g_win_h;
+                if (px < 0) { pw += px; px = 0; }
+                if (py < 0) { ph += py; py = 0; }
+                if (px + pw > cw) pw = cw - px;
+                if (py + ph > ch) ph = ch - py;
+                if (pw <= 0 || ph <= 0) goto skip_gradient;
+                uint8_t *pixels = malloc(pw * ph * 4);
+                if (!pixels) goto skip_gradient;
+                for (int row = 0; row < ph; row++) {
+                    for (int col = 0; col < pw; col++) {
+                        double fpx = px + col, fpy = py + row;
+                        double t = 0;
+                        if (grad->type == 0) { /* linear */
+                            double dx = grad->x1 - grad->x0, dy = grad->y1 - grad->y0;
+                            double len2 = dx*dx + dy*dy;
+                            t = len2 > 0 ? ((fpx - grad->x0)*dx + (fpy - grad->y0)*dy) / len2 : 0;
+                        } else { /* radial */
+                            double dist = sqrt((fpx-grad->x1)*(fpx-grad->x1) + (fpy-grad->y1)*(fpy-grad->y1));
+                            t = grad->r1 > 0 ? (dist - grad->r0) / (grad->r1 - grad->r0) : 0;
+                        }
+                        if (t < 0) t = 0;
+                        if (t > 1) t = 1;
+                        /* Interpolate between stops */
+                        double cr=0,cg2=0,cb2=0,ca2=1;
+                        if (grad->num_stops == 1) {
+                            cr = grad->stops[0].r; cg2 = grad->stops[0].g;
+                            cb2 = grad->stops[0].b; ca2 = grad->stops[0].a;
+                        } else {
+                            int found = 0;
+                            for (int si = 0; si < grad->num_stops - 1; si++) {
+                                if (t >= grad->stops[si].offset && t <= grad->stops[si+1].offset) {
+                                    double d = grad->stops[si+1].offset - grad->stops[si].offset;
+                                    double f = d > 0 ? (t - grad->stops[si].offset) / d : 0;
+                                    cr = grad->stops[si].r + f*(grad->stops[si+1].r - grad->stops[si].r);
+                                    cg2= grad->stops[si].g + f*(grad->stops[si+1].g - grad->stops[si].g);
+                                    cb2= grad->stops[si].b + f*(grad->stops[si+1].b - grad->stops[si].b);
+                                    ca2= grad->stops[si].a + f*(grad->stops[si+1].a - grad->stops[si].a);
+                                    found = 1; break;
+                                }
+                            }
+                            if (!found) {
+                                if (t <= grad->stops[0].offset) {
+                                    cr=grad->stops[0].r; cg2=grad->stops[0].g;
+                                    cb2=grad->stops[0].b; ca2=grad->stops[0].a;
+                                } else {
+                                    int last = grad->num_stops-1;
+                                    cr=grad->stops[last].r; cg2=grad->stops[last].g;
+                                    cb2=grad->stops[last].b; ca2=grad->stops[last].a;
+                                }
                             }
                         }
-                        if (!found) {
-                            if (t <= grad->stops[0].offset) {
-                                cr=grad->stops[0].r; cg2=grad->stops[0].g;
-                                cb2=grad->stops[0].b; ca2=grad->stops[0].a;
-                            } else {
-                                int last = grad->num_stops-1;
-                                cr=grad->stops[last].r; cg2=grad->stops[last].g;
-                                cb2=grad->stops[last].b; ca2=grad->stops[last].a;
-                            }
-                        }
+                        int idx = (row*pw+col)*4;
+                        pixels[idx+0] = (uint8_t)(cr < 0 ? 0 : cr > 255 ? 255 : cr);
+                        pixels[idx+1] = (uint8_t)(cg2 < 0 ? 0 : cg2 > 255 ? 255 : cg2);
+                        pixels[idx+2] = (uint8_t)(cb2 < 0 ? 0 : cb2 > 255 ? 255 : cb2);
+                        pixels[idx+3] = (uint8_t)(ca2 < 0 ? 0 : ca2 > 255 ? 255 : ca2);
                     }
-                    int idx = (row*pw+col)*4;
-                    pixels[idx+0] = (uint8_t)(cr < 0 ? 0 : cr > 255 ? 255 : cr);
-                    pixels[idx+1] = (uint8_t)(cg2 < 0 ? 0 : cg2 > 255 ? 255 : cg2);
-                    pixels[idx+2] = (uint8_t)(cb2 < 0 ? 0 : cb2 > 255 ? 255 : cb2);
-                    pixels[idx+3] = (uint8_t)(ca2 < 0 ? 0 : ca2 > 255 ? 255 : ca2);
                 }
+                g_renderer->put_pixels(target, pixels, px, py, pw, ph);
+                free(pixels);
+                return JS_UNDEFINED;
             }
-            g_renderer->put_pixels(target, pixels, px, py, pw, ph);
-            free(pixels);
-            return JS_UNDEFINED;
         }
     }
     skip_gradient:;
@@ -2220,8 +2231,28 @@ static JSValue js_ctx2d_clearRect(JSContext *ctx, JSValueConst this_val,
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) return JS_UNDEFINED;
 
-    /* Use clear_rect which properly clears to transparent */
-    g_renderer->clear_rect(target, (int)x, (int)y, (int)w, (int)h);
+    /* Apply transform to the rect corners */
+    double m[6];
+    memcpy(m, g_ctx2d.transform, sizeof(m));
+    double x1 = m[0]*x + m[2]*y + m[4];
+    double y1 = m[1]*x + m[3]*y + m[5];
+    double x2 = m[0]*(x+w) + m[2]*y + m[4];
+    double y2 = m[1]*(x+w) + m[3]*y + m[5];
+    double x3 = m[0]*(x+w) + m[2]*(y+h) + m[4];
+    double y3 = m[1]*(x+w) + m[3]*(y+h) + m[5];
+    double x4 = m[0]*x + m[2]*(y+h) + m[4];
+    double y4 = m[1]*x + m[3]*(y+h) + m[5];
+    
+    /* Find bounding box of transformed rect */
+    double min_x = fmin(fmin(x1, x2), fmin(x3, x4));
+    double max_x = fmax(fmax(x1, x2), fmax(x3, x4));
+    double min_y = fmin(fmin(y1, y2), fmin(y3, y4));
+    double max_y = fmax(fmax(y1, y2), fmax(y3, y4));
+    
+    /* Clear the bounding box - this is an approximation but works for simple transforms */
+    if (g_renderer->clear_rect) {
+        g_renderer->clear_rect(target, (int)min_x, (int)min_y, (int)(max_x - min_x), (int)(max_y - min_y));
+    }
 
     return JS_UNDEFINED;
 }
@@ -2699,23 +2730,7 @@ static JSValue js_gradient_addColorStop(JSContext *ctx, JSValueConst this_val,
     grad->stops[si].g = color_to_byte(col[1]);
     grad->stops[si].b = color_to_byte(col[2]);
     grad->stops[si].a = color_to_byte(col[3]);
-    /* Sort stops by offset using bubble sort */
-    for (int i = 0; i < grad->num_stops - 1; i++) {
-        for (int j = i + 1; j < grad->num_stops; j++) {
-            if (grad->stops[i].offset > grad->stops[j].offset) {
-                /* Swap stops */
-                double tmp_offset = grad->stops[i].offset;
-                uint8_t tmp_r = grad->stops[i].r, tmp_g = grad->stops[i].g;
-                uint8_t tmp_b = grad->stops[i].b, tmp_a = grad->stops[i].a;
-                grad->stops[i].offset = grad->stops[j].offset;
-                grad->stops[i].r = grad->stops[j].r; grad->stops[i].g = grad->stops[j].g;
-                grad->stops[i].b = grad->stops[j].b; grad->stops[i].a = grad->stops[j].a;
-                grad->stops[j].offset = tmp_offset;
-                grad->stops[j].r = tmp_r; grad->stops[j].g = tmp_g;
-                grad->stops[j].b = tmp_b; grad->stops[j].a = tmp_a;
-            }
-        }
-    }
+    /* Don't sort - assume stops are added in order */
     return JS_UNDEFINED;
 }
 
@@ -2740,6 +2755,7 @@ static JSValue js_ctx2d_createLinearGradient(JSContext *ctx, JSValueConst this_v
     int gid = slot + 1;
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "_gradId", JS_NewInt32(ctx, gid));
+    JS_SetPropertyStr(ctx, obj, "_type", JS_NewString(ctx, "gradient"));
     JSValue addStop = JS_NewCFunction(ctx, js_gradient_addColorStop, "addColorStop", 2);
     JS_SetPropertyStr(ctx, obj, "addColorStop", addStop);
     return obj;
@@ -2767,6 +2783,7 @@ static JSValue js_ctx2d_createRadialGradient(JSContext *ctx, JSValueConst this_v
     int gid = slot + 1;
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "_gradId", JS_NewInt32(ctx, gid));
+    JS_SetPropertyStr(ctx, obj, "_type", JS_NewString(ctx, "gradient"));
     JSValue addStop = JS_NewCFunction(ctx, js_gradient_addColorStop, "addColorStop", 2);
     JS_SetPropertyStr(ctx, obj, "addColorStop", addStop);
     return obj;
