@@ -288,6 +288,26 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id);
 static int point_in_path_evenodd(double x, double y, const double *pts, int count);
 static JSValue js_make_element_stub(JSContext *ctx);
 
+/* Web Audio API stub forward declarations */
+static JSValue js_audiocontext_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_addEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_removeEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_getListener(JSContext *ctx);
+static JSValue js_audiocontext_listener_setPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_listener_setOrientation(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_createGain(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_createBufferSource(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_createPanner(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_panner_setPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_node_connect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_node_disconnect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_source_start(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_source_stop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_decodeAudioData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_close(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_suspend(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_resume(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     /* Get canvas ID from the context object's _canvasId property */
     JSValue canvas_id_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
@@ -5183,7 +5203,10 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
     if (success) {
         cb = JS_GetPropertyStr(ctx, this_val, "onload");
         if (JS_IsFunction(ctx, cb)) {
+            /* Build event object with target pointing to XHR */
             JSValue ev = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
+            JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "load"));
             JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
             if (JS_IsException(ret)) JS_GetException(ctx);
             JS_FreeValue(ctx, ret);
@@ -5193,7 +5216,10 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
     } else {
         cb = JS_GetPropertyStr(ctx, this_val, "onerror");
         if (JS_IsFunction(ctx, cb)) {
+            /* Build event object with target pointing to XHR */
             JSValue ev = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
+            JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "error"));
             JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
             if (JS_IsException(ret)) JS_GetException(ctx);
             JS_FreeValue(ctx, ret);
@@ -5318,6 +5344,169 @@ static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JS
     return obj;
 }
 
+/* ============================================================================
+ * Web Audio API Stub Implementation
+ * ============================================================================ */
+
+/* Persistent listener object for AudioContext */
+static JSValue g_audiocontext_listener = JS_UNDEFINED;
+/* Persistent AudioContext prototype */
+static JSValue g_audiocontext_proto = JS_UNDEFINED;
+
+static JSValue js_audiocontext_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
+    (void)argc; (void)argv; (void)new_target;
+    /* Create instance with prototype */
+    JSValue obj = JS_NewObjectProto(ctx, g_audiocontext_proto);
+    JS_SetPropertyStr(ctx, obj, "currentTime", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, obj, "sampleRate", JS_NewFloat64(ctx, 44100.0));
+    JS_SetPropertyStr(ctx, obj, "state", JS_NewString(ctx, "running"));
+    /* Create persistent listener if not already created */
+    if (JS_IsUndefined(g_audiocontext_listener)) {
+        g_audiocontext_listener = js_audiocontext_getListener(ctx);
+    }
+    JS_SetPropertyStr(ctx, obj, "listener", JS_DupValue(ctx, g_audiocontext_listener));
+    /* destination - a gain node that connects to output */
+    JS_SetPropertyStr(ctx, obj, "destination", js_audiocontext_createGain(ctx, JS_UNDEFINED, 0, NULL));
+    return obj;
+}
+
+static JSValue js_audiocontext_addEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_removeEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_getListener(JSContext *ctx) {
+    JSValue listener = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, listener, "positionX", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, listener, "positionY", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, listener, "positionZ", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, listener, "forwardX", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, listener, "forwardY", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, listener, "forwardZ", JS_NewFloat64(ctx, -1.0));
+    JS_SetPropertyStr(ctx, listener, "upX", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, listener, "upY", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, listener, "upZ", JS_NewFloat64(ctx, 0.0));
+    /* setPosition method */
+    JS_SetPropertyStr(ctx, listener, "setPosition", JS_NewCFunction(ctx, js_audiocontext_listener_setPosition, "setPosition", 3));
+    /* setOrientation method */
+    JS_SetPropertyStr(ctx, listener, "setOrientation", JS_NewCFunction(ctx, js_audiocontext_listener_setOrientation, "setOrientation", 6));
+    return listener;
+}
+
+static JSValue js_audiocontext_listener_setOrientation(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_listener_setPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_createGain(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc;
+    JSValue gain = JS_NewObject(ctx);
+    /* gain.gain is an object with a value property */
+    JSValue gain_param = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, gain_param, "value", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, gain, "gain", gain_param);
+    /* Add connect method */
+    JSValue connect_func = JS_NewCFunction2(ctx, js_audiocontext_node_connect, "connect", 1, JS_CFUNC_generic, 0);
+    JS_SetPropertyStr(ctx, gain, "connect", connect_func);
+    /* Add disconnect method */
+    JSValue disconnect_func = JS_NewCFunction2(ctx, js_audiocontext_node_disconnect, "disconnect", 0, JS_CFUNC_generic, 0);
+    JS_SetPropertyStr(ctx, gain, "disconnect", disconnect_func);
+    return gain;
+}
+
+static JSValue js_audiocontext_createBufferSource(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc;
+    JSValue source = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, source, "buffer", JS_NULL);
+    JS_SetPropertyStr(ctx, source, "playbackRate", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, source, "loop", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, source, "connect", JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
+    JS_SetPropertyStr(ctx, source, "disconnect", JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
+    JS_SetPropertyStr(ctx, source, "start", JS_NewCFunction(ctx, js_audiocontext_source_start, "start", 1));
+    JS_SetPropertyStr(ctx, source, "stop", JS_NewCFunction(ctx, js_audiocontext_source_stop, "stop", 1));
+    return source;
+}
+
+static JSValue js_audiocontext_createPanner(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc;
+    JSValue panner = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, panner, "positionX", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, panner, "positionY", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, panner, "positionZ", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, panner, "orientationX", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, panner, "orientationY", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, panner, "orientationZ", JS_NewFloat64(ctx, -1.0));
+    JS_SetPropertyStr(ctx, panner, "distanceModel", JS_NewString(ctx, "inverse"));
+    JS_SetPropertyStr(ctx, panner, "refDistance", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, panner, "maxDistance", JS_NewFloat64(ctx, 10000.0));
+    JS_SetPropertyStr(ctx, panner, "rolloffFactor", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, panner, "connect", JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
+    JS_SetPropertyStr(ctx, panner, "disconnect", JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
+    JS_SetPropertyStr(ctx, panner, "setPosition", JS_NewCFunction(ctx, js_audiocontext_panner_setPosition, "setPosition", 3));
+    return panner;
+}
+
+static JSValue js_audiocontext_panner_setPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_node_connect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_node_disconnect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_source_start(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_source_stop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_decodeAudioData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    /* Stub: immediately call success callback with null buffer */
+    if (argc >= 1 && JS_IsFunction(ctx, argv[0])) {
+        JSValue null_buffer = JS_NULL;
+        JSValue ret = JS_Call(ctx, argv[0], JS_UNDEFINED, 1, &null_buffer);
+        if (JS_IsException(ret)) JS_GetException(ctx);
+        JS_FreeValue(ctx, ret);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_close(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_suspend(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_resume(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
 static void setup_globals_object(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
 
@@ -5389,9 +5578,14 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, document, "location", js_window_get_location(ctx, JS_UNDEFINED));
     /* Add URL property (GMS2 checks document.URL.substring(0,5)) */
     JS_SetPropertyStr(ctx, document, "URL", JS_NewString(ctx, ""));
-    /* Add addEventListener/removeEventListener to document (copied from global) */
-    JS_SetPropertyStr(ctx, document, "addEventListener", JS_GetPropertyStr(ctx, global, "addEventListener"));
-    JS_SetPropertyStr(ctx, document, "removeEventListener", JS_GetPropertyStr(ctx, global, "removeEventListener"));
+    /* Add visibility properties for visibilitychange event */
+    JS_SetPropertyStr(ctx, document, "hidden", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "webkitHidden", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "mozHidden", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "msHidden", JS_NewBool(ctx, 0));
+    /* Add addEventListener/removeEventListener to document directly */
+    JS_SetPropertyStr(ctx, document, "addEventListener", JS_NewCFunction2(ctx, js_window_addEventListener, "addEventListener", 2, JS_CFUNC_generic, 0));
+    JS_SetPropertyStr(ctx, document, "removeEventListener", JS_NewCFunction2(ctx, js_window_removeEventListener, "removeEventListener", 2, JS_CFUNC_generic, 0));
     JS_SetPropertyStr(ctx, global, "document", document);
 
     /* Navigator */
@@ -5443,6 +5637,28 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, xhr_ctor, "DONE",             JS_NewInt32(ctx, 4));
     JS_SetPropertyStr(ctx, xhr_ctor, "_hs2",             JS_NewInt32(ctx, 4)); /* GMS2-obfuscated DONE */
     JS_SetPropertyStr(ctx, global, "XMLHttpRequest", xhr_ctor);
+
+    /* Web Audio API stub - makes games think Web Audio is supported */
+    /* This allows audio loading callbacks to run properly */
+    JSValue AudioContext_ctor = JS_NewCFunction2(ctx, js_audiocontext_ctor, "AudioContext", 0, JS_CFUNC_constructor, 0);
+    g_audiocontext_proto = JS_NewObject(ctx);
+    /* Add stub methods */
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createGain", JS_NewCFunction(ctx, js_audiocontext_createGain, "createGain", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createBufferSource", JS_NewCFunction(ctx, js_audiocontext_createBufferSource, "createBufferSource", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createPanner", JS_NewCFunction(ctx, js_audiocontext_createPanner, "createPanner", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "decodeAudioData", JS_NewCFunction(ctx, js_audiocontext_decodeAudioData, "decodeAudioData", 1));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "close", JS_NewCFunction(ctx, js_audiocontext_close, "close", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "suspend", JS_NewCFunction(ctx, js_audiocontext_suspend, "suspend", 1));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "resume", JS_NewCFunction(ctx, js_audiocontext_resume, "suspend", 1));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "currentTime", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "sampleRate", JS_NewFloat64(ctx, 44100.0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "state", JS_NewString(ctx, "running"));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "listener", js_audiocontext_getListener(ctx));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "addEventListener", JS_NewCFunction(ctx, js_audiocontext_addEventListener, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "removeEventListener", JS_NewCFunction(ctx, js_audiocontext_removeEventListener, "removeEventListener", 2));
+    JS_SetPropertyStr(ctx, AudioContext_ctor, "prototype", JS_DupValue(ctx, g_audiocontext_proto));
+    JS_SetPropertyStr(ctx, global, "AudioContext", AudioContext_ctor);
+    JS_SetPropertyStr(ctx, global, "webkitAudioContext", JS_DupValue(ctx, AudioContext_ctor));
 
     /* Global utility functions */
     JS_SetPropertyStr(ctx, global, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));
