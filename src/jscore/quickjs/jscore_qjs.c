@@ -288,6 +288,16 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id);
 static int point_in_path_evenodd(double x, double y, const double *pts, int count);
 static JSValue js_make_element_stub(JSContext *ctx);
 
+/* jQuery support forward declarations */
+static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_insertBefore(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_removeChild(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_cloneNode(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_getAttribute(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_setAttribute(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_compareDocumentPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_textNode_get_textContent(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+
 /* Web Audio API stub forward declarations */
 static JSValue js_audiocontext_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_addEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
@@ -3899,40 +3909,6 @@ static const JSCFunctionListEntry js_storage_props[] = {
  * Document Object
  * ============================================================================ */
 
-static JSValue js_element_getAttribute(JSContext *ctx, JSValueConst this_val,
-                                       int argc, JSValueConst *argv) {
-    if (argc < 1) return JS_NULL;
-    
-    const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) return JS_NULL;
-    
-    JSValue val = JS_GetPropertyStr(ctx, this_val, key);
-    JS_FreeCString(ctx, key);
-    
-    if (JS_IsUndefined(val)) {
-        JS_FreeValue(ctx, val);
-        return JS_NULL;
-    }
-    return val;
-}
-
-static JSValue js_element_setAttribute(JSContext *ctx, JSValueConst this_val,
-                                       int argc, JSValueConst *argv) {
-    if (argc < 2) return JS_UNDEFINED;
-    
-    const char *key = JS_ToCString(ctx, argv[0]);
-    const char *val = JS_ToCString(ctx, argv[1]);
-    
-    if (key && val) {
-        JS_SetPropertyStr(ctx, this_val, key, JS_NewString(ctx, val));
-    }
-    
-    if (key) JS_FreeCString(ctx, key);
-    if (val) JS_FreeCString(ctx, val);
-    
-    return JS_UNDEFINED;
-}
-
 static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NULL;
@@ -4024,17 +4000,53 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     JS_SetPropertyStr(ctx, obj, "innerHTML",        JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "textContent",      JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "value",            JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, obj, "style",            JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, obj, "nodeValue",        JS_NewString(ctx, ""));
+    /* Style object with common CSS properties */
+    JSValue style = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, style, "zoom",           JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "top",            JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "left",           JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "marginTop",      JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "opacity",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "display",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "position",       JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "float",          JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "cssText",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "style",            style);
     JS_SetPropertyStr(ctx, obj, "className",        JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, obj, "appendChild",      JS_NewCFunction(ctx, js_noop, "appendChild", 1));
-    JS_SetPropertyStr(ctx, obj, "removeChild",      JS_NewCFunction(ctx, js_noop, "removeChild", 1));
-    JS_SetPropertyStr(ctx, obj, "insertBefore",     JS_NewCFunction(ctx, js_noop, "insertBefore", 2));
+    JS_SetPropertyStr(ctx, obj, "nodeName",         JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "tagName",          JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "nodeType",         JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, obj, "appendChild",      JS_NewCFunction(ctx, js_element_appendChild, "appendChild", 1));
+    JS_SetPropertyStr(ctx, obj, "removeChild",      JS_NewCFunction(ctx, js_element_removeChild, "removeChild", 1));
+    JS_SetPropertyStr(ctx, obj, "insertBefore",     JS_NewCFunction(ctx, js_element_insertBefore, "insertBefore", 2));
     JS_SetPropertyStr(ctx, obj, "addEventListener", JS_NewCFunction(ctx, js_noop, "addEventListener", 2));
     JS_SetPropertyStr(ctx, obj, "removeEventListener", JS_NewCFunction(ctx, js_noop, "removeEventListener", 2));
-    JS_SetPropertyStr(ctx, obj, "getAttribute",     JS_NewCFunction(ctx, js_noop, "getAttribute", 1));
-    JS_SetPropertyStr(ctx, obj, "setAttribute",     JS_NewCFunction(ctx, js_noop, "setAttribute", 2));
+    JS_SetPropertyStr(ctx, obj, "getAttribute",     JS_NewCFunction(ctx, js_element_getAttribute, "getAttribute", 1));
+    JS_SetPropertyStr(ctx, obj, "setAttribute",     JS_NewCFunction(ctx, js_element_setAttribute, "setAttribute", 2));
+    JS_SetPropertyStr(ctx, obj, "getElementsByTagName", JS_NewCFunction(ctx, js_document_getElementsByTagName, "getElementsByTagName", 1));
     JS_SetPropertyStr(ctx, obj, "offsetLeft",       JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "offsetTop",        JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "offsetWidth",      JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "offsetHeight",     JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "clientLeft",       JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "clientTop",        JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "clientWidth",      JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "clientHeight",     JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "scrollLeft",       JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "scrollTop",        JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "scrollWidth",      JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "scrollHeight",     JS_NewInt32(ctx, 0));
+    /* childNodes array */
+    JSValue childNodes = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, childNodes, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "childNodes", childNodes);
+    JS_SetPropertyStr(ctx, obj, "firstChild", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "lastChild", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "nextSibling", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "previousSibling", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "parentNode", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "ownerDocument", JS_NULL);
     return obj;
 }
 
@@ -4146,6 +4158,116 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
     return obj;
 }
 
+/* ============================================================================
+ * jQuery Support: Element methods
+ * ============================================================================ */
+
+static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    /* Simplified - just return the newChild */
+    if (argc >= 1) {
+        /* Handle audio source element append */
+        JSValue child = argv[0];
+        JSValue src_val = JS_GetPropertyStr(ctx, child, "src");
+        if (!JS_IsUndefined(src_val) && !JS_IsNull(src_val)) {
+            const char* src = JS_ToCString(ctx, src_val);
+            if (src && src[0] != '\0') {
+                /* Update parent's src */
+                JS_SetPropertyStr(ctx, this_val, "src", JS_NewString(ctx, src));
+                /* Trigger load if available */
+                JSValue load_func = JS_GetPropertyStr(ctx, this_val, "load");
+                if (JS_IsFunction(ctx, load_func)) {
+                    JS_Call(ctx, load_func, this_val, 0, NULL);
+                }
+                JS_FreeValue(ctx, load_func);
+            }
+            if (src) JS_FreeCString(ctx, src);
+        }
+        JS_FreeValue(ctx, src_val);
+        return JS_DupValue(ctx, child);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_element_insertBefore(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    /* Simplified - just return the newChild */
+    if (argc >= 1) {
+        return JS_DupValue(ctx, argv[0]);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_element_removeChild(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    /* Simplified - just return the child */
+    if (argc >= 1) {
+        return JS_DupValue(ctx, argv[0]);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_element_cloneNode(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    /* Simplified - return a new generic object */
+    (void)argc; (void)argv;
+    JSValue clone = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, clone, "nodeType", JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, clone, "innerHTML", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, clone, "appendChild", JS_NewCFunction(ctx, js_element_appendChild, "appendChild", 1));
+    return clone;
+}
+
+static JSValue js_element_getAttribute(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NULL;
+    const char* key = JS_ToCString(ctx, argv[0]);
+    if (!key) return JS_NULL;
+    JSValue val = JS_GetPropertyStr(ctx, this_val, key);
+    JS_FreeCString(ctx, key);
+    if (JS_IsUndefined(val)) {
+        JS_FreeValue(ctx, val);
+        return JS_NULL;
+    }
+    return val;
+}
+
+static JSValue js_element_setAttribute(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    const char* key = JS_ToCString(ctx, argv[0]);
+    if (!key) return JS_UNDEFINED;
+    JS_SetPropertyStr(ctx, this_val, key, JS_DupValue(ctx, argv[1]));
+    JS_FreeCString(ctx, key);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_element_compareDocumentPosition(JSContext *ctx, JSValueConst this_val,
+                                                   int argc, JSValueConst *argv) {
+    /* Simplified - always return 0 (no relationship) */
+    (void)argc; (void)argv; (void)this_val;
+    return JS_NewInt32(ctx, 0);
+}
+
+/* Text node textContent getter/setter */
+static JSValue js_textNode_get_textContent(JSContext *ctx, JSValueConst this_val,
+                                            int argc, JSValueConst *argv) {
+    /* Getter if argc == 0 */
+    if (argc == 0) {
+        JSValue val = JS_GetPropertyStr(ctx, this_val, "\xFF""textValue");
+        if (JS_IsUndefined(val)) {
+            JS_FreeValue(ctx, val);
+            return JS_NewString(ctx, "");
+        }
+        return val;
+    }
+    /* Setter if argc >= 1 */
+    const char* text = JS_ToCString(ctx, argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "\xFF""textValue", JS_NewString(ctx, text ? text : ""));
+    if (text) JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+}
+
 static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NULL;
@@ -4235,11 +4357,76 @@ static JSValue js_document_querySelectorAll(JSContext *ctx, JSValueConst this_va
     return arr;
 }
 
+/* jQuery support: createDocumentFragment */
+static JSValue js_document_createDocumentFragment(JSContext *ctx, JSValueConst this_val,
+                                                   int argc, JSValueConst *argv) {
+    (void)argc; (void)argv; (void)this_val;
+    JSValue frag = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, frag, "nodeType", JS_NewInt32(ctx, 11)); /* DOCUMENT_FRAGMENT_NODE */
+    JS_SetPropertyStr(ctx, frag, "nodeName", JS_NewString(ctx, "#document-fragment"));
+    JS_SetPropertyStr(ctx, frag, "appendChild", JS_NewCFunction(ctx, js_element_appendChild, "appendChild", 1));
+    JS_SetPropertyStr(ctx, frag, "insertBefore", JS_NewCFunction(ctx, js_element_insertBefore, "insertBefore", 2));
+    JS_SetPropertyStr(ctx, frag, "removeChild", JS_NewCFunction(ctx, js_element_removeChild, "removeChild", 1));
+    JS_SetPropertyStr(ctx, frag, "cloneNode", JS_NewCFunction(ctx, js_element_cloneNode, "cloneNode", 0));
+    return frag;
+}
+
+/* jQuery support: createComment */
+static JSValue js_document_createComment(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    const char* text = (argc >= 1) ? JS_ToCString(ctx, argv[0]) : "";
+    JSValue comment = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, comment, "nodeType", JS_NewInt32(ctx, 8)); /* COMMENT_NODE */
+    JS_SetPropertyStr(ctx, comment, "nodeName", JS_NewString(ctx, "#comment"));
+    /* Store text value in hidden property */
+    JS_SetPropertyStr(ctx, comment, "\xFF""textValue", JS_NewString(ctx, text ? text : ""));
+    /* textContent getter/setter */
+    JS_SetPropertyStr(ctx, comment, "textContent", JS_NewCFunction(ctx, js_textNode_get_textContent, "textContent", 1));
+    JS_SetPropertyStr(ctx, comment, "nodeValue", JS_NewCFunction(ctx, js_textNode_get_textContent, "nodeValue", 1));
+    if (text) JS_FreeCString(ctx, text);
+    return comment;
+}
+
+/* jQuery support: createTextNode */
+static JSValue js_document_createTextNode(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    const char* text = (argc >= 1) ? JS_ToCString(ctx, argv[0]) : "";
+    JSValue textNode = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, textNode, "nodeType", JS_NewInt32(ctx, 3)); /* TEXT_NODE */
+    JS_SetPropertyStr(ctx, textNode, "nodeName", JS_NewString(ctx, "#text"));
+    /* Store text value in hidden property */
+    JS_SetPropertyStr(ctx, textNode, "\xFF""textValue", JS_NewString(ctx, text ? text : ""));
+    /* textContent getter/setter */
+    JS_SetPropertyStr(ctx, textNode, "textContent", JS_NewCFunction(ctx, js_textNode_get_textContent, "textContent", 1));
+    JS_SetPropertyStr(ctx, textNode, "nodeValue", JS_NewCFunction(ctx, js_textNode_get_textContent, "nodeValue", 1));
+    if (text) JS_FreeCString(ctx, text);
+    return textNode;
+}
+
+/* jQuery support: createEvent */
+static JSValue js_document_createEvent(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    const char* event_type = (argc >= 1) ? JS_ToCString(ctx, argv[0]) : "";
+    JSValue event = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, event, "type", JS_NewString(ctx, event_type ? event_type : ""));
+    JS_SetPropertyStr(ctx, event, "bubbles", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, event, "cancelable", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, event, "preventDefault", JS_NewCFunction(ctx, js_noop, "preventDefault", 0));
+    JS_SetPropertyStr(ctx, event, "stopPropagation", JS_NewCFunction(ctx, js_noop, "stopPropagation", 0));
+    JS_SetPropertyStr(ctx, event, "initEvent", JS_NewCFunction(ctx, js_noop, "initEvent", 1));
+    if (event_type) JS_FreeCString(ctx, event_type);
+    return event;
+}
+
 static const JSCFunctionListEntry js_document_funcs[] = {
     JS_CFUNC_DEF("getElementById", 1, js_document_getElementById),
     JS_CFUNC_DEF("getElementsByTagName", 1, js_document_getElementsByTagName),
     JS_CFUNC_DEF("createElement", 1, js_document_createElement),
     JS_CFUNC_DEF("createElementNS", 2, js_document_createElementNS),
+    JS_CFUNC_DEF("createDocumentFragment", 0, js_document_createDocumentFragment),
+    JS_CFUNC_DEF("createComment", 1, js_document_createComment),
+    JS_CFUNC_DEF("createTextNode", 1, js_document_createTextNode),
+    JS_CFUNC_DEF("createEvent", 1, js_document_createEvent),
     JS_CFUNC_DEF("getAttribute", 1, js_element_getAttribute),
     JS_CFUNC_DEF("setAttribute", 2, js_element_setAttribute),
     JS_CFUNC_DEF("querySelector", 1, js_document_querySelector),
