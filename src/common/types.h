@@ -8,7 +8,7 @@
 
 #define MAX_INTERVALS     64
 #define MAX_SCRIPTS       32
-#define MAX_IMAGES        32
+#define MAX_IMAGES        1024
 #define MAX_STORAGE_ITEMS 256
 #define MAX_KEY_LISTENERS 16
 

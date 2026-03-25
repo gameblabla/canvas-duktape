@@ -210,10 +210,11 @@ typedef struct { char id[64]; char innerHTML[512]; } HtmlElementEntry;
 static HtmlElementEntry g_element_registry[MAX_ELEMENT_REGISTRY];
 static int g_element_registry_count = 0;
 
-/* Cached DOM elements (body, head, documentElement) */
+/* Cached DOM elements (body, head, documentElement, document) */
 static JSValue g_cached_body = JS_UNDEFINED;
 static JSValue g_cached_head = JS_UNDEFINED;
 static JSValue g_cached_documentElement = JS_UNDEFINED;
+static JSValue g_cached_document = JS_UNDEFINED;
 
 /* localStorage */
 typedef struct {
@@ -4623,8 +4624,21 @@ static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst thi
     JSValue arr = JS_NewArray(ctx);
     int count = 0;
 
-    /* Check canvases */
-    if (strcmp(tag, "canvas") == 0 || strcmp(tag, "*") == 0) {
+    /* Return cached structural elements for known tag names */
+    if (strcmp(tag, "head") == 0) {
+        /* Ensure head is initialized (mirrors document.head getter) */
+        if (JS_IsUndefined(g_cached_head)) {
+            g_cached_head = js_make_element_stub(ctx);
+            JS_SetPropertyStr(ctx, g_cached_head, "nodeName", JS_NewString(ctx, "HEAD"));
+        }
+        JS_SetPropertyStr(ctx, arr, "0", JS_DupValue(ctx, g_cached_head));
+        count = 1;
+    } else if (strcmp(tag, "body") == 0) {
+        if (!JS_IsUndefined(g_cached_body)) {
+            JS_SetPropertyStr(ctx, arr, "0", JS_DupValue(ctx, g_cached_body));
+            count = 1;
+        }
+    } else if (strcmp(tag, "canvas") == 0 || strcmp(tag, "*") == 0) {
         for (int i = 0; i < g_canvases_cap; i++) {
             if (g_canvases[i].id != 0) {
                 JSValue obj = JS_NewObjectClass(ctx, js_canvas_class_id);
@@ -4637,13 +4651,20 @@ static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst thi
                 JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, g_canvases[i].id));
                 JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, g_canvases[i].width));
                 JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, g_canvases[i].height));
-                
                 char idx_str[16];
                 snprintf(idx_str, sizeof(idx_str), "%d", count);
                 JS_SetPropertyStr(ctx, arr, idx_str, obj);
                 count++;
             }
         }
+    }
+    /* For unknown tags: return one stub element so [0] is never undefined.
+     * This lets jQuery capability probes access .style/.checked etc. without crashing.
+     * (We have no real DOM tree, so returning a stub is as correct as returning nothing.) */
+    if (count == 0 &&
+        strcmp(tag, "canvas") != 0 && strcmp(tag, "*") != 0) {
+        JS_SetPropertyStr(ctx, arr, "0", js_make_element_stub(ctx));
+        count = 1;
     }
 
     JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, count));
@@ -4738,12 +4759,19 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     JSValue childNodes = JS_NewArray(ctx);
     JS_SetPropertyStr(ctx, childNodes, "length", JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "childNodes", childNodes);
-    JS_SetPropertyStr(ctx, obj, "firstChild", JS_UNDEFINED);
-    JS_SetPropertyStr(ctx, obj, "lastChild", JS_UNDEFINED);
+    /* firstChild/lastChild: return minimal node stub so .nodeType access doesn't throw */
+    JSValue firstChildStub = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, firstChildStub, "nodeType",  JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, firstChildStub, "nodeName",  JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, firstChildStub, "nodeValue", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "firstChild", firstChildStub);
+    JS_SetPropertyStr(ctx, obj, "lastChild",  JS_UNDEFINED);
     JS_SetPropertyStr(ctx, obj, "nextSibling", JS_UNDEFINED);
     JS_SetPropertyStr(ctx, obj, "previousSibling", JS_UNDEFINED);
     JS_SetPropertyStr(ctx, obj, "parentNode", JS_UNDEFINED);
-    JS_SetPropertyStr(ctx, obj, "ownerDocument", JS_UNDEFINED);
+    /* ownerDocument: point to cached document so el.ownerDocument.defaultView.getComputedStyle works */
+    JS_SetPropertyStr(ctx, obj, "ownerDocument",
+        JS_IsUndefined(g_cached_document) ? JS_UNDEFINED : JS_DupValue(ctx, g_cached_document));
     /* Add nodeType to avoid "cannot read property nodeType of undefined" */
     JS_SetPropertyStr(ctx, obj, "nodeType", JS_NewInt32(ctx, 1));
     /* Add scroll properties (jQuery checks these - use non-zero values) */
@@ -4765,12 +4793,26 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     /* Add id, className */
     JS_SetPropertyStr(ctx, obj, "id", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "className", JS_NewString(ctx, ""));
+    /* attributes map — populated by setAttribute; needed for jQuery's capability probes */
+    JS_SetPropertyStr(ctx, obj, "attributes", JS_NewObject(ctx));
     /* Add title */
     JS_SetPropertyStr(ctx, obj, "title", JS_NewString(ctx, ""));
     /* Add lang */
     JS_SetPropertyStr(ctx, obj, "lang", JS_NewString(ctx, ""));
     /* Add dir */
     JS_SetPropertyStr(ctx, obj, "dir", JS_NewString(ctx, ""));
+    /* cloneNode: returns a new element stub */
+    JS_SetPropertyStr(ctx, obj, "cloneNode", JS_NewCFunction(ctx, js_element_cloneNode, "cloneNode", 1));
+    /* outerHTML stub */
+    JS_SetPropertyStr(ctx, obj, "outerHTML", JS_NewString(ctx, ""));
+    /* contains/hasChildNodes/compareDocumentPosition stubs */
+    JS_SetPropertyStr(ctx, obj, "contains",                 JS_NewCFunction(ctx, js_noop, "contains", 1));
+    JS_SetPropertyStr(ctx, obj, "hasChildNodes",            JS_NewCFunction(ctx, js_noop, "hasChildNodes", 0));
+    JS_SetPropertyStr(ctx, obj, "compareDocumentPosition",  JS_NewCFunction(ctx, js_noop, "compareDocumentPosition", 1));
+    JS_SetPropertyStr(ctx, obj, "getBoundingClientRect",    JS_NewCFunction(ctx, js_noop, "getBoundingClientRect", 0));
+    JS_SetPropertyStr(ctx, obj, "focus",                    JS_NewCFunction(ctx, js_noop, "focus", 0));
+    JS_SetPropertyStr(ctx, obj, "blur",                     JS_NewCFunction(ctx, js_noop, "blur", 0));
+    JS_SetPropertyStr(ctx, obj, "click",                    JS_NewCFunction(ctx, js_noop, "click", 0));
     return obj;
 }
 
@@ -4844,7 +4886,13 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
     JS_SetPropertyStr(ctx, obj, "toBlob",
         JS_NewCFunction(ctx, js_canvas_toBlob, "toBlob", 1));
     JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, id));
-    JS_SetPropertyStr(ctx, obj, "style",            JS_NewObject(ctx));
+    {
+        JSValue style = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, style, "width",   JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, style, "height",  JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, style, "cssText", JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, obj, "style", style);
+    }
     JS_SetPropertyStr(ctx, obj, "addEventListener",
         JS_NewCFunction(ctx, js_canvas_addEventListener, "addEventListener", 2));
     JS_SetPropertyStr(ctx, obj, "removeEventListener", JS_NewCFunction(ctx, js_noop, "removeEventListener", 2));
@@ -5007,9 +5055,20 @@ static JSValue js_element_cloneNode(JSContext *ctx, JSValueConst this_val,
     /* Simplified - return a new generic object */
     (void)argc; (void)argv;
     JSValue clone = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, clone, "nodeType", JS_NewInt32(ctx, 1));
-    JS_SetPropertyStr(ctx, clone, "innerHTML", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, clone, "nodeType",   JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, clone, "innerHTML",  JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, clone, "outerHTML",  JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, clone, "style",      JS_NewObject(ctx));
     JS_SetPropertyStr(ctx, clone, "appendChild", JS_NewCFunction(ctx, js_element_appendChild, "appendChild", 1));
+    /* cloneNode on the clone itself (jQuery chains: el.cloneNode(true).cloneNode(true)) */
+    JS_SetPropertyStr(ctx, clone, "cloneNode", JS_NewCFunction(ctx, js_element_cloneNode, "cloneNode", 1));
+    /* lastChild stub for jQuery probes: clone.lastChild.defaultValue / .checked */
+    JSValue lastChildStub = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, lastChildStub, "nodeType",     JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, lastChildStub, "defaultValue", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, lastChildStub, "nodeValue",    JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, lastChildStub, "checked",      JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, clone, "lastChild", lastChildStub);
     return clone;
 }
 
@@ -5033,6 +5092,15 @@ static JSValue js_element_setAttribute(JSContext *ctx, JSValueConst this_val,
     const char* key = JS_ToCString(ctx, argv[0]);
     if (!key) return JS_UNDEFINED;
     JS_SetPropertyStr(ctx, this_val, key, JS_DupValue(ctx, argv[1]));
+    /* Also update attributes[key] so jQuery's d.attributes[name].expando check works */
+    JSValue attribs = JS_GetPropertyStr(ctx, this_val, "attributes");
+    if (!JS_IsUndefined(attribs) && !JS_IsNull(attribs)) {
+        JSValue attrNode = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, attrNode, "value",   JS_DupValue(ctx, argv[1]));
+        JS_SetPropertyStr(ctx, attrNode, "expando", JS_FALSE);
+        JS_SetPropertyStr(ctx, attribs, key, attrNode);
+    }
+    JS_FreeValue(ctx, attribs);
     JS_FreeCString(ctx, key);
     return JS_UNDEFINED;
 }
@@ -5495,8 +5563,14 @@ static JSValue js_window_get_closed(JSContext *ctx, JSValueConst this_val) {
     return JS_NewBool(ctx, 0);
 }
 
+static char g_window_name[256] = {0};
 static JSValue js_window_get_name(JSContext *ctx, JSValueConst this_val) {
-    return JS_NewString(ctx, "");
+    return JS_NewString(ctx, g_window_name);
+}
+static JSValue js_window_set_name(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    const char *s = JS_ToCString(ctx, val);
+    if (s) { strncpy(g_window_name, s, sizeof(g_window_name) - 1); JS_FreeCString(ctx, s); }
+    return JS_UNDEFINED;
 }
 
 static JSValue js_window_get_pageXOffset(JSContext *ctx, JSValueConst this_val) {
@@ -5519,7 +5593,7 @@ static const JSCFunctionListEntry js_window_props[] = {
     JS_CGETSET_DEF("parent", js_window_get_parent, NULL),
     JS_CGETSET_DEF("length", js_window_get_length, NULL),
     JS_CGETSET_DEF("closed", js_window_get_closed, NULL),
-    JS_CGETSET_DEF("name", js_window_get_name, NULL),
+    JS_CGETSET_DEF("name", js_window_get_name, js_window_set_name),
     JS_CGETSET_DEF("pageXOffset", js_window_get_pageXOffset, NULL),
     JS_CGETSET_DEF("pageYOffset", js_window_get_pageYOffset, NULL),
 };
@@ -5994,6 +6068,9 @@ static int jscore_qjs_init(RendererInterface *renderer,
 #endif
         return 0;
     }
+    /* No memory limit (default 0 = unlimited in QuickJS-ng) */
+    JS_SetMemoryLimit(g_rt, 0); /* 0 = unlimited */
+    JS_SetMaxStackSize(g_rt, 8 * 1024 * 1024);           /* 8 MB stack */
 
     /* Initialize context */
     g_ctx = JS_NewContext(g_rt);
@@ -6149,6 +6226,10 @@ static void jscore_qjs_quit(void) {
     if (!JS_IsUndefined(g_cached_documentElement)) {
         JS_FreeValue(g_ctx, g_cached_documentElement);
         g_cached_documentElement = JS_UNDEFINED;
+    }
+    if (!JS_IsUndefined(g_cached_document)) {
+        JS_FreeValue(g_ctx, g_cached_document);
+        g_cached_document = JS_UNDEFINED;
     }
 
     /* Free path and state stack */
@@ -6402,6 +6483,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     }
     JS_FreeCString(ctx, url);
 
+    fprintf(stderr, "[xhr] loading: %s\n", filepath);
     FILE *fp = fopen(filepath, "rb");
     if (!fp) {
         JS_SetPropertyStr(ctx, this_val, "readyState",  JS_NewInt32(ctx, 4));
@@ -6435,6 +6517,8 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     free(data);
 
     xhr_fire_callbacks(ctx, this_val, 1);
+    /* Run GC after each XHR response to free jQuery Deferred objects and parsed JSON intermediates */
+    JS_RunGC(g_rt);
     return JS_UNDEFINED;
 }
 
@@ -6641,6 +6725,19 @@ static JSValue js_audiocontext_resume(JSContext *ctx, JSValueConst this_val, int
     return JS_UNDEFINED;
 }
 
+static JSValue js_getComputedStyle(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val;
+    /* Return the element's style object (or a new empty object) */
+    if (argc < 1) return JS_NewObject(ctx);
+    JSValue style = JS_GetPropertyStr(ctx, argv[0], "style");
+    if (JS_IsUndefined(style) || JS_IsNull(style)) {
+        JS_FreeValue(ctx, style);
+        return JS_NewObject(ctx);
+    }
+    return style;
+}
+
 static void setup_globals_object(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
 
@@ -6702,6 +6799,9 @@ static void setup_globals_object(JSContext *ctx) {
     /* Set window to reference global */
     JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global));
     JS_SetPropertyStr(ctx, global, "self", JS_DupValue(ctx, global));
+    /* getComputedStyle: needed by jQuery/CSS code: el.ownerDocument.defaultView.getComputedStyle(el) */
+    JS_SetPropertyStr(ctx, global, "getComputedStyle",
+        JS_NewCFunction(ctx, js_getComputedStyle, "getComputedStyle", 2));
     /* Note: location is provided by js_window_get_location getter in js_window_props */
 
     /* Document with functions - now addEventListener is available on global */
@@ -6851,7 +6951,11 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, document, "evaluate", JS_UNDEFINED);
     /* Add uniqueID (IE) */
     JS_SetPropertyStr(ctx, document, "uniqueID", JS_NewInt32(ctx, 0));
+    /* document.defaultView = window (global) for jQuery: el.ownerDocument.defaultView.getComputedStyle */
+    JS_SetPropertyStr(ctx, document, "defaultView", JS_DupValue(ctx, global));
     JS_SetPropertyStr(ctx, global, "document", document);
+    /* Cache document for use in element stubs (ownerDocument) */
+    g_cached_document = JS_DupValue(ctx, document);
 
     /* Navigator */
     JSValue navigator = JS_NewObject(ctx);
@@ -6931,7 +7035,7 @@ static void setup_globals_object(JSContext *ctx) {
     JSValue windowObj = JS_GetPropertyStr(ctx, global, "window");
     JS_SetPropertyStr(ctx, windowObj, "frameElement", JS_NULL);
     /* Add other window properties */
-    JS_SetPropertyStr(ctx, windowObj, "name", JS_NewString(ctx, ""));
+    /* window.name is set via CGETSET accessor above — do not override with data property */
     JS_SetPropertyStr(ctx, windowObj, "closed", JS_NewBool(ctx, 0));
     JS_SetPropertyStr(ctx, windowObj, "length", JS_NewInt32(ctx, 0));
     JS_FreeValue(ctx, windowObj);
@@ -6970,6 +7074,18 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global, "isFinite", JS_NewCFunction(ctx, js_isFinite, "isFinite", 1));
     JS_SetPropertyStr(ctx, global, "encodeURIComponent", JS_NewCFunction(ctx, js_encodeURIComponent, "encodeURIComponent", 1));
     JS_SetPropertyStr(ctx, global, "decodeURIComponent", JS_NewCFunction(ctx, js_decodeURIComponent, "decodeURIComponent", 1));
+
+    /* Compatibility stub: BrowserDetect — missing library used by some page scripts
+     * to gate browser-specific warnings before starting the game.
+     * Report "Chrome" so capability checks pass and onConfirm() is called. */
+    {
+        JSValue bd = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, bd, "browser",  JS_NewString(ctx, "Chrome"));
+        JS_SetPropertyStr(ctx, bd, "version",  JS_NewInt32(ctx, 120));
+        JS_SetPropertyStr(ctx, bd, "OS",       JS_NewString(ctx, "Windows"));
+        JS_SetPropertyStr(ctx, bd, "init",     JS_NewCFunction(ctx, js_noop, "init", 0));
+        JS_SetPropertyStr(ctx, global, "BrowserDetect", bd);
+    }
 
     /* Compatibility shim: Function.caller is not supported in QuickJS but some
      * legacy GameMaker JS uses it (e.g. _uN.caller.name for error reporting).
@@ -7132,6 +7248,8 @@ static int jscore_qjs_eval_file(const char *path) {
     }
 
     JS_FreeValue(g_ctx, result);
+    /* Run GC after each script file to free compilation artifacts */
+    JS_RunGC(g_rt);
     return 1;
 }
 

@@ -406,28 +406,25 @@ int main(int argc, char** argv) {
                          g_canvas_info, g_canvas_count,
                          g_image_info,  g_image_count);
 
-    /* --- Execute external scripts first --- */
+    /* --- Execute scripts in document order (inline and external interleaved) --- */
     fprintf(stderr, "[main] Total scripts: %d\n", g_script_count);
     for (int i = 0; i < g_script_count; i++) {
         fprintf(stderr, "[main] Script %d: src='%s', is_inline=%d\n",
                 i, g_script_info[i].src, g_script_info[i].is_inline);
-        if (g_script_info[i].is_inline || g_script_info[i].src[0] == '\0')
-            continue;
-        if (jscore.eval_file(g_script_info[i].src))
-            fprintf(stderr, "[main] Loaded script: %s\n", g_script_info[i].src);
-    }
-
-    /* --- Execute inline scripts --- */
-    fprintf(stderr, "[main] Before inline scripts, g_canvas_count=%d\n", g_canvas_count);
-    for (int i = 0; i < g_script_count; i++) {
-        if (g_script_info[i].is_inline && g_script_info[i].inline_code) {
-            fprintf(stderr, "[main] Executing inline script %d...\n", i);
-            if (jscore.eval_string(g_script_info[i].inline_code))
-                fprintf(stderr, "[main] Inline script %d executed successfully\n", i);
-            else
-                fprintf(stderr, "Inline script %d error\n", i);
+        if (g_script_info[i].is_inline) {
+            if (g_script_info[i].inline_code) {
+                fprintf(stderr, "[main] Executing inline script %d...\n", i);
+                if (jscore.eval_string(g_script_info[i].inline_code))
+                    fprintf(stderr, "[main] Inline script %d executed successfully\n", i);
+                else
+                    fprintf(stderr, "Inline script %d error\n", i);
+            }
+        } else if (g_script_info[i].src[0] != '\0') {
+            if (jscore.eval_file(g_script_info[i].src))
+                fprintf(stderr, "[main] Loaded script: %s\n", g_script_info[i].src);
         }
     }
+    fprintf(stderr, "[main] Before canvas setup, g_canvas_count=%d\n", g_canvas_count);
 
     /* --- Preload HTML images (set .src to trigger onload) --- */
     jscore.preload_images(g_image_info, g_image_count);
