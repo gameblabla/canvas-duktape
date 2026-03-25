@@ -201,6 +201,26 @@ static int parse_html(const char* path) {
                 }
             }
 
+            /* Parse generic elements with id and inline text content (e.g. <div id="x">text</div>) */
+            {
+                /* Check for an opening tag with an id attribute on this line */
+                char elem_id[64] = {0};
+                if (extract_attribute(line, "id", elem_id, sizeof(elem_id)) && elem_id[0]) {
+                    /* Not a canvas, img, or script tag — extract text content between > and </ */
+                    const char *tag_end = strchr(line, '>');
+                    const char *close_start = strstr(line, "</");
+                    if (tag_end && close_start && close_start > tag_end) {
+                        char inner[512] = {0};
+                        size_t len = (size_t)(close_start - (tag_end + 1));
+                        if (len > 0 && len < sizeof(inner)) {
+                            strncpy(inner, tag_end + 1, len);
+                            inner[len] = '\0';
+                            jscore_qjs_register_element(elem_id, inner);
+                        }
+                    }
+                }
+            }
+
             /* Parse img tags (may be multi-line) */
             if (inside_img) {
                 strcat(img_buffer, line);

@@ -10,6 +10,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <ctype.h>
 
 #include "quickjs/quickjs.h"
 #include "quickjs/quickjs-libc.h"
@@ -202,6 +203,12 @@ static CanvasMouseListener g_mouse_listeners[MAX_MOUSE_LISTENERS];
 
 /* Base directory for resolving relative paths (set from HTML file location) */
 static char g_jscore_base_dir[1024] = {0};
+
+/* Registry of HTML element IDs and their innerHTML content (from HTML parser) */
+#define MAX_ELEMENT_REGISTRY 64
+typedef struct { char id[64]; char innerHTML[512]; } HtmlElementEntry;
+static HtmlElementEntry g_element_registry[MAX_ELEMENT_REGISTRY];
+static int g_element_registry_count = 0;
 
 /* Cached DOM elements (body, head, documentElement) */
 static JSValue g_cached_body = JS_UNDEFINED;
@@ -410,6 +417,42 @@ static void add_path_point(double x, double y) {
 
 static void clear_path(void) {
     g_ctx2d.path_count = 0;
+}
+
+/* Reset drawing state to HTML5 Canvas spec defaults (called per-canvas-context) */
+static void reset_ctx2d_defaults(int canvas_id) {
+    init_transform(g_ctx2d.transform);
+    g_ctx2d.fill_color[0] = 0; g_ctx2d.fill_color[1] = 0;
+    g_ctx2d.fill_color[2] = 0; g_ctx2d.fill_color[3] = 1;
+    g_ctx2d.stroke_color[0] = 0; g_ctx2d.stroke_color[1] = 0;
+    g_ctx2d.stroke_color[2] = 0; g_ctx2d.stroke_color[3] = 1;
+    g_ctx2d.line_width = 1;
+    g_ctx2d.global_alpha = 1.0;
+    g_ctx2d.global_composite = 0;
+    g_ctx2d.shadow_color[0] = 0; g_ctx2d.shadow_color[1] = 0;
+    g_ctx2d.shadow_color[2] = 0; g_ctx2d.shadow_color[3] = 0;
+    g_ctx2d.shadow_blur = 0;
+    g_ctx2d.shadow_offset_x = 0; g_ctx2d.shadow_offset_y = 0;
+    g_ctx2d.has_clip = 0; g_ctx2d.has_soft_clip = 0;
+    g_ctx2d.clip_x = 0; g_ctx2d.clip_y = 0; g_ctx2d.clip_w = 0; g_ctx2d.clip_h = 0;
+    g_ctx2d.fill_gradient_id = 0; g_ctx2d.stroke_gradient_id = 0;
+    g_ctx2d.fill_pattern_canvas_id = 0; g_ctx2d.stroke_pattern_canvas_id = 0;
+    strcpy(g_ctx2d.text_align, "start");
+    strcpy(g_ctx2d.text_baseline, "alphabetic");
+    strcpy(g_ctx2d.line_cap, "butt");
+    strcpy(g_ctx2d.line_join, "miter");
+    g_ctx2d.miter_limit = 10.0;
+    g_ctx2d.line_dash_count = 0; g_ctx2d.line_dash_offset = 0.0;
+    strcpy(g_ctx2d.font, "10px sans-serif");
+    g_ctx2d.font_size = 10;
+    strncpy(g_ctx2d.font_family, "sans-serif", sizeof(g_ctx2d.font_family) - 1);
+    strcpy(g_ctx2d.direction, "ltr");
+    strcpy(g_ctx2d.filter, "none");
+    strcpy(g_ctx2d.smoothing_quality, "low");
+    g_ctx2d.image_smoothing_enabled = 1;
+    g_ctx2d.stack_top = 0;
+    g_ctx2d.path_count = 0;
+    g_ctx2d.canvas_id = canvas_id;
 }
 
 static void push_state(void) {
@@ -1055,27 +1098,9 @@ static JSValue js_ctx2d_save(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_restore(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
     pop_state();
-    
-    /* Update the JS context object properties to match restored state */
-    char buf[64];
-    snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,%.2f)",
-             (int)(g_ctx2d.fill_color[0] * 255),
-             (int)(g_ctx2d.fill_color[1] * 255),
-             (int)(g_ctx2d.fill_color[2] * 255),
-             g_ctx2d.fill_color[3]);
-    JS_SetPropertyStr(ctx, (JSValue)this_val, "fillStyle", JS_NewString(ctx, buf));
-    
-    snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,%.2f)",
-             (int)(g_ctx2d.stroke_color[0] * 255),
-             (int)(g_ctx2d.stroke_color[1] * 255),
-             (int)(g_ctx2d.stroke_color[2] * 255),
-             g_ctx2d.stroke_color[3]);
-    JS_SetPropertyStr(ctx, (JSValue)this_val, "strokeStyle", JS_NewString(ctx, buf));
-    
-    JS_SetPropertyStr(ctx, (JSValue)this_val, "lineWidth", JS_NewFloat64(ctx, g_ctx2d.line_width));
-    JS_SetPropertyStr(ctx, (JSValue)this_val, "globalAlpha", JS_NewFloat64(ctx, g_ctx2d.global_alpha));
-    
+    /* g_ctx2d is restored by pop_state(); getters read from g_ctx2d directly */
     return JS_UNDEFINED;
 }
 
@@ -1217,7 +1242,11 @@ static JSValue js_ctx2d_get_fillStyle(JSContext *ctx, JSValueConst this_val) {
     uint32_t b = color_to_byte(g_ctx2d.fill_color[2]);
     uint32_t a = color_to_byte(g_ctx2d.fill_color[3]);
     char buf[32];
-    snprintf(buf, sizeof(buf), "rgba(%u,%u,%u,%u)", r, g, b, a);
+    if (a == 255) {
+        snprintf(buf, sizeof(buf), "#%02x%02x%02x", r, g, b);
+    } else {
+        snprintf(buf, sizeof(buf), "rgba(%u, %u, %u, %.3g)", r, g, b, (double)a / 255.0);
+    }
     return JS_NewString(ctx, buf);
 }
 
@@ -1271,7 +1300,11 @@ static JSValue js_ctx2d_get_strokeStyle(JSContext *ctx, JSValueConst this_val) {
     uint32_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint32_t a = color_to_byte(g_ctx2d.stroke_color[3]);
     char buf[32];
-    snprintf(buf, sizeof(buf), "rgba(%u,%u,%u,%u)", r, g, b, a);
+    if (a == 255) {
+        snprintf(buf, sizeof(buf), "#%02x%02x%02x", r, g, b);
+    } else {
+        snprintf(buf, sizeof(buf), "rgba(%u, %u, %u, %.3g)", r, g, b, (double)a / 255.0);
+    }
     return JS_NewString(ctx, buf);
 }
 
@@ -3210,6 +3243,9 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeValue(ctx, cached);
 
+    /* New context for this canvas: reset drawing state to spec defaults */
+    reset_ctx2d_defaults(id);
+
     /* Return the 2D context object */
     JSValue ctx_obj = JS_NewObject(ctx);
 
@@ -4553,9 +4589,18 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, id);
         return JS_NULL;
     }
-    /* Unknown element — return a stub that silently absorbs property sets */
+    /* Unknown element — return a stub with the requested id and innerHTML if registered */
+    JSValue stub = js_make_element_stub(ctx);
+    JS_SetPropertyStr(ctx, stub, "id", JS_NewString(ctx, id));
+    for (int ri = 0; ri < g_element_registry_count; ri++) {
+        if (strcmp(g_element_registry[ri].id, id) == 0) {
+            JS_SetPropertyStr(ctx, stub, "innerHTML",
+                              JS_NewString(ctx, g_element_registry[ri].innerHTML));
+            break;
+        }
+    }
     JS_FreeCString(ctx, id);
-    return js_make_element_stub(ctx);
+    return stub;
 }
 
 static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst this_val,
@@ -4846,6 +4891,20 @@ static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val,
     if (argc < 1) return JS_UNDEFINED;
     JSValue child = argv[0];
 
+    /* Update childNodes array on this_val */
+    JSValue childNodes = JS_GetPropertyStr(ctx, this_val, "childNodes");
+    if (!JS_IsUndefined(childNodes) && !JS_IsNull(childNodes)) {
+        JSValue len_val = JS_GetPropertyStr(ctx, childNodes, "length");
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, len_val);
+        JS_FreeValue(ctx, len_val);
+        char idx_str[16];
+        snprintf(idx_str, sizeof(idx_str), "%d", len);
+        JS_SetPropertyStr(ctx, childNodes, idx_str, JS_DupValue(ctx, child));
+        JS_SetPropertyStr(ctx, childNodes, "length", JS_NewInt32(ctx, len + 1));
+    }
+    JS_FreeValue(ctx, childNodes);
+
     /* Check if this is a script element being injected dynamically.
      * GameMaker (and others) do: var e = createElement('script'); e.src = ...; body.appendChild(e)
      * We need to load and eval the file, then call e.onload or e.onerror. */
@@ -5074,6 +5133,13 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
     } else {
         /* Generic element stub for div, span, style, link, script, etc. */
         obj = js_make_element_stub(ctx);
+        /* Set nodeName/tagName to uppercase tag (e.g. "DIV", "SPAN") */
+        char upper[64];
+        int ti = 0;
+        for (; tag[ti] && ti < 63; ti++) upper[ti] = (char)toupper((unsigned char)tag[ti]);
+        upper[ti] = '\0';
+        JS_SetPropertyStr(ctx, obj, "nodeName", JS_NewString(ctx, upper));
+        JS_SetPropertyStr(ctx, obj, "tagName", JS_NewString(ctx, upper));
     }
 
     JS_FreeCString(ctx, tag);
@@ -5116,8 +5182,21 @@ static JSValue js_document_get_head(JSContext *ctx, JSValueConst this_val) {
 
 static JSValue js_document_querySelector(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv) {
-    (void)argc; (void)argv;
-    return JS_NULL;
+    if (argc < 1) return JS_NULL;
+    const char *selector = JS_ToCString(ctx, argv[0]);
+    if (!selector) return JS_NULL;
+    JSValue result = JS_NULL;
+    if (selector[0] == '#') {
+        /* ID selector: delegate to getElementById */
+        JSValue id_str = JS_NewString(ctx, selector + 1);
+        result = js_document_getElementById(ctx, this_val, 1, &id_str);
+        JS_FreeValue(ctx, id_str);
+    } else {
+        /* Tag/class selector: return a generic stub */
+        result = js_make_element_stub(ctx);
+    }
+    JS_FreeCString(ctx, selector);
+    return result;
 }
 
 static JSValue js_document_querySelectorAll(JSContext *ctx, JSValueConst this_val,
@@ -5962,8 +6041,8 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_ctx2d.has_clip = 0;
     g_ctx2d.clip_x = 0; g_ctx2d.clip_y = 0; g_ctx2d.clip_w = 0; g_ctx2d.clip_h = 0;
     g_ctx2d.canvas_id = 0;  /* Default to main canvas */
-    g_ctx2d.font[0] = '\0';
-    g_ctx2d.font_size = 16;
+    strcpy(g_ctx2d.font, "10px sans-serif");
+    g_ctx2d.font_size = 10;
     strncpy(g_ctx2d.font_family, "sans-serif", sizeof(g_ctx2d.font_family) - 1);
     strcpy(g_ctx2d.text_align, "start");
     strcpy(g_ctx2d.text_baseline, "alphabetic");
@@ -6235,6 +6314,15 @@ void jscore_qjs_set_base_dir(const char *dir) {
     } else {
         g_jscore_base_dir[0] = '\0';
     }
+}
+
+void jscore_qjs_register_element(const char *id, const char *innerHTML) {
+    if (!id || !innerHTML || g_element_registry_count >= MAX_ELEMENT_REGISTRY) return;
+    strncpy(g_element_registry[g_element_registry_count].id, id,
+            sizeof(g_element_registry[0].id) - 1);
+    strncpy(g_element_registry[g_element_registry_count].innerHTML, innerHTML,
+            sizeof(g_element_registry[0].innerHTML) - 1);
+    g_element_registry_count++;
 }
 
 static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int success) {
@@ -6647,8 +6735,9 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, docElem, "scrollWidth", JS_NewInt32(ctx, 800));
     JS_SetPropertyStr(ctx, docElem, "clientHeight", JS_NewInt32(ctx, 600));
     JS_SetPropertyStr(ctx, docElem, "clientWidth", JS_NewInt32(ctx, 800));
-    JS_SetPropertyStr(ctx, document, "documentElement", docElem);
-    /* Also update cached variable for getter */
+    /* Use DupValue so docElem stays valid for g_cached_documentElement after SetPropertyStr steals it */
+    JS_SetPropertyStr(ctx, document, "documentElement", JS_DupValue(ctx, docElem));
+    /* Cache for getter */
     g_cached_documentElement = docElem;
     /* Add all (IE specific, jQuery checks this) */
     JSValue allCollection = JS_NewArray(ctx);
@@ -6690,9 +6779,7 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, document, "createEvent", JS_NewCFunction(ctx, js_document_createEvent, "createEvent", 1));
     /* Add getElementsByClassName */
     JS_SetPropertyStr(ctx, document, "getElementsByClassName", JS_NewCFunction(ctx, js_noop, "getElementsByClassName", 1));
-    /* Add querySelector / querySelectorAll (stubs) */
-    JS_SetPropertyStr(ctx, document, "querySelector", JS_NewCFunction(ctx, js_noop, "querySelector", 1));
-    JS_SetPropertyStr(ctx, document, "querySelectorAll", JS_NewCFunction(ctx, js_noop, "querySelectorAll", 1));
+    /* querySelector/querySelectorAll already set via js_document_funcs above */
     /* Add getElementById (returns null for unknown ids) */
     JS_SetPropertyStr(ctx, document, "getElementById", JS_NewCFunction(ctx, js_document_getElementById, "getElementById", 1));
     /* Add document.write (some libraries use it) */
@@ -6806,7 +6893,7 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global, "XDomainRequest", JS_UNDEFINED);
     /* Add event compatibility */
     JS_SetPropertyStr(ctx, global, "Event", JS_UNDEFINED);
-    JS_SetPropertyStr(ctx, global, "HTMLElement", JS_UNDEFINED);
+    /* HTMLElement constructor is set earlier - do not override with UNDEFINED */
     JS_SetPropertyStr(ctx, global, "Node", JS_UNDEFINED);
     /* Add Promise (jQuery Deferred might use it) */
     JS_SetPropertyStr(ctx, global, "Promise", JS_UNDEFINED);
