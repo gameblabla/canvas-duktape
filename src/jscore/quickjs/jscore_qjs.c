@@ -3185,6 +3185,13 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     fprintf(stderr, "[getContext] Set canvas_id=%d\n", id);
 #endif
 
+    /* Return cached context if it exists (same object on repeated getContext calls) */
+    JSValue cached = JS_GetPropertyStr(ctx, this_val, "_ctx");
+    if (!JS_IsUndefined(cached) && !JS_IsNull(cached)) {
+        return cached; /* ref already incremented by GetProperty */
+    }
+    JS_FreeValue(ctx, cached);
+
     /* Return the 2D context object */
     JSValue ctx_obj = JS_NewObject(ctx);
 
@@ -3201,6 +3208,9 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
 
     /* Store canvas ID for texture lookup */
     JS_SetPropertyStr(ctx, ctx_obj, "_canvasId", JS_NewInt32(ctx, id));
+
+    /* Cache context on canvas object so repeated getContext() returns same object */
+    JS_SetPropertyStr(ctx, this_val, "_ctx", JS_DupValue(ctx, ctx_obj));
 
     return ctx_obj;
 }
@@ -3223,9 +3233,9 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
     if (argc > 0) JS_ToInt32(ctx, &new_width, argv[0]);
     for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
-            if (g_canvases[i].width != new_width) {
-                /* Don't recreate main canvas (id=1) texture - it's managed by the renderer */
-                if (id != 1) {
+            /* Setting width always clears canvas content (even if same value) */
+            if (id != 1) {
+                if (g_canvases[i].width != new_width) {
                     if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
                         g_renderer->destroy_texture(g_canvases[i].tex_handle);
                     }
@@ -3233,16 +3243,15 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                     if (g_renderer && g_renderer->create_texture) {
                         g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
                     }
-                    /* Clear the new texture */
-                    if (g_canvases[i].tex_handle && g_renderer && g_renderer->clear_rect) {
-                        g_renderer->clear_rect(g_canvases[i].tex_handle, 0, 0, g_canvases[i].width, g_canvases[i].height);
-                    }
-                } else {
-                    g_canvases[i].width = new_width;
-                    /* Clear main canvas */
-                    if (g_renderer && g_renderer->clear_rect) {
-                        g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
-                    }
+                }
+                /* Always clear texture (width assignment always resets canvas) */
+                if (g_canvases[i].tex_handle && g_renderer && g_renderer->clear_rect) {
+                    g_renderer->clear_rect(g_canvases[i].tex_handle, 0, 0, g_canvases[i].width, g_canvases[i].height);
+                }
+            } else {
+                g_canvases[i].width = new_width;
+                if (g_renderer && g_renderer->clear_rect) {
+                    g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
             }
             break;
@@ -3269,9 +3278,9 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
     if (argc > 0) JS_ToInt32(ctx, &new_height, argv[0]);
     for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
-            if (g_canvases[i].height != new_height) {
-                /* Don't recreate main canvas (id=1) texture - it's managed by the renderer */
-                if (id != 1) {
+            /* Setting height always clears canvas content (even if same value) */
+            if (id != 1) {
+                if (g_canvases[i].height != new_height) {
                     if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
                         g_renderer->destroy_texture(g_canvases[i].tex_handle);
                     }
@@ -3279,16 +3288,15 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                     if (g_renderer && g_renderer->create_texture) {
                         g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
                     }
-                    /* Clear the new texture */
-                    if (g_canvases[i].tex_handle && g_renderer && g_renderer->clear_rect) {
-                        g_renderer->clear_rect(g_canvases[i].tex_handle, 0, 0, g_canvases[i].width, g_canvases[i].height);
-                    }
-                } else {
-                    g_canvases[i].height = new_height;
-                    /* Clear main canvas */
-                    if (g_renderer && g_renderer->clear_rect) {
-                        g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
-                    }
+                }
+                /* Always clear texture (height assignment always resets canvas) */
+                if (g_canvases[i].tex_handle && g_renderer && g_renderer->clear_rect) {
+                    g_renderer->clear_rect(g_canvases[i].tex_handle, 0, 0, g_canvases[i].width, g_canvases[i].height);
+                }
+            } else {
+                g_canvases[i].height = new_height;
+                if (g_renderer && g_renderer->clear_rect) {
+                    g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
             }
             break;
