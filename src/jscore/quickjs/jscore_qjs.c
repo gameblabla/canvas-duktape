@@ -44,9 +44,9 @@ static int g_stage_canvas_claimed = 0;
 #define MAX_GRADIENTS 16
 #define MAX_COLOR_STOPS 16
 typedef struct {
-    int type; /* 0=linear, 1=radial */
+    int type; /* 0=linear, 1=radial, 2=conic */
     double x0, y0, x1, y1;
-    double r0, r1;
+    double r0, r1; /* r0 = startAngle for conic */
     int num_stops;
     struct { double offset; uint8_t r, g, b, a; } stops[MAX_COLOR_STOPS];
     int active;
@@ -116,6 +116,12 @@ typedef struct {
     double *path_pts;
     int path_count;
     int path_capacity;
+
+    /* Soft clip mask (evenodd/nonzero path clip, not saved in state stack) */
+    int has_soft_clip;
+    int soft_clip_rule; /* 0=evenodd, 1=nonzero */
+    double *soft_clip_pts;
+    int soft_clip_count;
 
     /* State stack for save/restore */
     struct {
@@ -279,6 +285,7 @@ typedef struct {
 /* Forward declarations */
 static JSValue js_noop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_make_canvas_object(JSContext *ctx, int id);
+static int point_in_path_evenodd(double x, double y, const double *pts, int count);
 static JSValue js_make_element_stub(JSContext *ctx);
 
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
@@ -379,12 +386,30 @@ static void pop_state(void) {
         memcpy(&g_ctx2d, &g_ctx2d.state_stack[g_ctx2d.stack_top], STATE_SIZE);
         /* Apply restored clip state to renderer */
         if (g_renderer) {
-            void *target = g_canvases[g_ctx2d.canvas_id].tex_handle;
+            /* Look up target texture by canvas ID (not by array index) */
+            void *target = NULL;
+            if (g_ctx2d.canvas_id == 0) {
+                target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+            } else {
+                for (int i = 0; i < 64; i++) {
+                    if (g_canvases[i].id == g_ctx2d.canvas_id) {
+                        target = g_canvases[i].tex_handle;
+                        break;
+                    }
+                }
+            }
             if (g_ctx2d.has_clip && g_renderer->set_clip_rect)
                 g_renderer->set_clip_rect(target, g_ctx2d.clip_x, g_ctx2d.clip_y,
                                           g_ctx2d.clip_w, g_ctx2d.clip_h);
             else if (!g_ctx2d.has_clip && g_renderer->clear_clip_rect)
                 g_renderer->clear_clip_rect(target);
+        }
+        /* Clear soft clip when clip is restored to "no clip" */
+        if (!g_ctx2d.has_clip && g_ctx2d.has_soft_clip) {
+            g_ctx2d.has_soft_clip = 0;
+            free(g_ctx2d.soft_clip_pts);
+            g_ctx2d.soft_clip_pts = NULL;
+            g_ctx2d.soft_clip_count = 0;
         }
     }
 }
@@ -1175,9 +1200,10 @@ static JSValue js_ctx2d_get_lineWidth(JSContext *ctx, JSValueConst this_val) {
 }
 
 static JSValue js_ctx2d_set_globalAlpha(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
-    JS_ToFloat64(ctx, &g_ctx2d.global_alpha, val);
-    if (g_ctx2d.global_alpha < 0.0) g_ctx2d.global_alpha = 0.0;
-    if (g_ctx2d.global_alpha > 1.0) g_ctx2d.global_alpha = 1.0;
+    double v;
+    JS_ToFloat64(ctx, &v, val);
+    /* Per spec: ignore values outside [0,1] or non-finite */
+    if (v >= 0.0 && v <= 1.0) g_ctx2d.global_alpha = v;
     return JS_UNDEFINED;
 }
 
@@ -1747,6 +1773,7 @@ static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
     double *use_pts = g_ctx2d.path_pts;
     int use_count = g_ctx2d.path_count;
+    int fill_rule = 0; /* 0=evenodd (default), 1=nonzero */
 
     /* Check if first arg is a Path2D object */
     if (argc >= 1 && JS_IsObject(argv[0])) {
@@ -1761,6 +1788,17 @@ static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
                 use_count = p->count;
             }
         }
+        /* Second arg may be fill rule string */
+        if (argc >= 2 && JS_IsString(argv[1])) {
+            const char *rule = JS_ToCString(ctx, argv[1]);
+            if (rule && strcmp(rule, "nonzero") == 0) fill_rule = 1;
+            JS_FreeCString(ctx, rule);
+        }
+    } else if (argc >= 1 && JS_IsString(argv[0])) {
+        /* First arg is fill rule string */
+        const char *rule = JS_ToCString(ctx, argv[0]);
+        if (rule && strcmp(rule, "nonzero") == 0) fill_rule = 1;
+        JS_FreeCString(ctx, rule);
     }
 
     if (use_count < 2 || !g_renderer) {
@@ -1785,7 +1823,7 @@ static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
     }
 
     if (g_renderer->fill_polygon) {
-        g_renderer->fill_polygon(target, pts, use_count, r, g, b, a, 0);
+        g_renderer->fill_polygon(target, pts, use_count, r, g, b, a, 0, fill_rule);
     }
 
     free(pts);
@@ -1895,7 +1933,7 @@ static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
                         } else {
                             double dash_pts[8] = {rx1, ry1, rx2, ry2, rx3, ry3, rx4, ry4};
                             if (g_renderer->fill_polygon) {
-                                g_renderer->fill_polygon(target, dash_pts, 4, r, g, b, a, 0);
+                                g_renderer->fill_polygon(target, dash_pts, 4, r, g, b, a, 0, 0);
                             }
                         }
                     } else {
@@ -1943,7 +1981,7 @@ static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
                 /* Rectangle vertices in order (clockwise) */
                 double rect_pts[8] = {rx1, ry1, rx2, ry2, rx3, ry3, rx4, ry4};
                 if (g_renderer->fill_polygon) {
-                    g_renderer->fill_polygon(target, rect_pts, 4, r, g, b, a, 0);
+                    g_renderer->fill_polygon(target, rect_pts, 4, r, g, b, a, 0, 0);
                 }
                 /* Draw circle at start and end */
                 if (g_renderer->fill_circle) {
@@ -1970,7 +2008,7 @@ static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
                         /* Diagonal - use fill_polygon */
                         double rect_pts[8] = {rx1, ry1, rx2, ry2, rx3, ry3, rx4, ry4};
                         if (g_renderer->fill_polygon) {
-                            g_renderer->fill_polygon(target, rect_pts, 4, r, g, b, a, 0);
+                            g_renderer->fill_polygon(target, rect_pts, 4, r, g, b, a, 0, 0);
                         }
                     }
                 } else {
@@ -2093,9 +2131,15 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
                             double dx = grad->x1 - grad->x0, dy = grad->y1 - grad->y0;
                             double len2 = dx*dx + dy*dy;
                             t = len2 > 0 ? ((fpx - grad->x0)*dx + (fpy - grad->y0)*dy) / len2 : 0;
-                        } else { /* radial */
+                        } else if (grad->type == 1) { /* radial */
                             double dist = sqrt((fpx-grad->x1)*(fpx-grad->x1) + (fpy-grad->y1)*(fpy-grad->y1));
                             t = grad->r1 > 0 ? (dist - grad->r0) / (grad->r1 - grad->r0) : 0;
+                        } else { /* conic (type==2) */
+                            double angle = atan2(fpy - grad->y0, fpx - grad->x0);
+                            double norm = angle - grad->r0;
+                            while (norm < 0) norm += 2 * M_PI;
+                            while (norm >= 2 * M_PI) norm -= 2 * M_PI;
+                            t = norm / (2 * M_PI);
                         }
                         if (t < 0) t = 0;
                         if (t > 1) t = 1;
@@ -2181,6 +2225,46 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
             }
             return JS_UNDEFINED;
         }
+    }
+
+    /* Soft clip (evenodd path clip): render with per-pixel mask */
+    if (g_ctx2d.has_soft_clip && g_renderer->put_pixels && g_ctx2d.global_composite == 0) {
+        /* Transform rect to screen coords */
+        double ox, oy;
+        transform_point(&ox, &oy, g_ctx2d.transform, x, y);
+        int sx = (int)ox, sy = (int)oy;
+        int sw = (int)(w * g_ctx2d.transform[0]);
+        int sh = (int)(h * g_ctx2d.transform[3]);
+        if (sw <= 0) sw = w;
+        if (sh <= 0) sh = h;
+        /* Clamp to clip bbox */
+        int x0 = sx < g_ctx2d.clip_x ? g_ctx2d.clip_x : sx;
+        int y0 = sy < g_ctx2d.clip_y ? g_ctx2d.clip_y : sy;
+        int x1 = (sx+sw) > (g_ctx2d.clip_x+g_ctx2d.clip_w) ? (g_ctx2d.clip_x+g_ctx2d.clip_w) : (sx+sw);
+        int y1 = (sy+sh) > (g_ctx2d.clip_y+g_ctx2d.clip_h) ? (g_ctx2d.clip_y+g_ctx2d.clip_h) : (sy+sh);
+        int pw = x1 - x0, ph = y1 - y0;
+        if (pw > 0 && ph > 0) {
+            uint8_t *pixels = calloc(pw * ph, 4);
+            if (pixels) {
+                for (int row = 0; row < ph; row++) {
+                    for (int col = 0; col < pw; col++) {
+                        double fpx = x0 + col + 0.5, fpy = y0 + row + 0.5;
+                        int inside = point_in_path_evenodd(fpx, fpy,
+                                         g_ctx2d.soft_clip_pts, g_ctx2d.soft_clip_count);
+                        if (inside) {
+                            int idx = (row * pw + col) * 4;
+                            pixels[idx+0] = r;
+                            pixels[idx+1] = g;
+                            pixels[idx+2] = b;
+                            pixels[idx+3] = a;
+                        }
+                    }
+                }
+                g_renderer->put_pixels(target, pixels, x0, y0, pw, ph);
+                free(pixels);
+            }
+        }
+        return JS_UNDEFINED;
     }
 
     if (g_renderer->fill_rect) {
@@ -2626,6 +2710,15 @@ static JSValue js_ctx2d_putImageData(JSContext *ctx, JSValueConst this_val,
 static JSValue js_ctx2d_clip(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
     if (g_ctx2d.path_count < 2 || !g_renderer) return JS_UNDEFINED;
+
+    /* Check for fill rule argument */
+    int clip_rule = 0; /* 0=nonzero (default for clip), evenodd=1 */
+    if (argc >= 1 && JS_IsString(argv[0])) {
+        const char *rule = JS_ToCString(ctx, argv[0]);
+        if (rule && strcmp(rule, "evenodd") == 0) clip_rule = 1;
+        JS_FreeCString(ctx, rule);
+    }
+
     /* Compute bounding box of transformed path points */
     double min_x, max_x, min_y, max_y;
     double px, py;
@@ -2658,10 +2751,38 @@ static JSValue js_ctx2d_clip(JSContext *ctx, JSValueConst this_val,
     g_ctx2d.has_clip = 1;
     g_ctx2d.clip_x = cx; g_ctx2d.clip_y = cy;
     g_ctx2d.clip_w = cw; g_ctx2d.clip_h = ch;
-    void *target = g_canvases[g_ctx2d.canvas_id].tex_handle;
+    void *target = get_current_canvas_texture(ctx, this_val);
     if (g_renderer->set_clip_rect)
         g_renderer->set_clip_rect(target, cx, cy, cw, ch);
+
+    /* Store soft clip path for evenodd rule */
+    if (clip_rule == 1) {
+        free(g_ctx2d.soft_clip_pts);
+        int n = g_ctx2d.path_count;
+        g_ctx2d.soft_clip_pts = malloc(n * 2 * sizeof(double));
+        if (g_ctx2d.soft_clip_pts) {
+            for (int i = 0; i < n; i++) {
+                transform_point(&g_ctx2d.soft_clip_pts[i*2], &g_ctx2d.soft_clip_pts[i*2+1],
+                                g_ctx2d.transform, g_ctx2d.path_pts[i*2], g_ctx2d.path_pts[i*2+1]);
+            }
+            g_ctx2d.soft_clip_count = n;
+            g_ctx2d.has_soft_clip = 1;
+            g_ctx2d.soft_clip_rule = 1; /* evenodd */
+        }
+    }
     return JS_UNDEFINED;
+}
+
+/* Test if point (x,y) is inside a polygon using evenodd rule */
+static int point_in_path_evenodd(double x, double y, const double *pts, int count) {
+    int inside = 0;
+    for (int i = 0, j = count-1; i < count; j = i++) {
+        double xi = pts[i*2], yi = pts[i*2+1];
+        double xj = pts[j*2], yj = pts[j*2+1];
+        if (((yi > y) != (yj > y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi))
+            inside = !inside;
+    }
+    return inside;
 }
 
 static JSValue js_ctx2d_isPointInPath(JSContext *ctx, JSValueConst this_val,
@@ -2791,8 +2912,22 @@ static JSValue js_ctx2d_createRadialGradient(JSContext *ctx, JSValueConst this_v
 
 static JSValue js_ctx2d_createConicGradient(JSContext *ctx, JSValueConst this_val,
                                             int argc, JSValueConst *argv) {
-    /* Simple stub - returns object with addColorStop */
+    int slot = -1;
+    for (int i = 0; i < MAX_GRADIENTS; i++) {
+        if (!g_gradients[i].active) { slot = i; break; }
+    }
+    if (slot < 0) return JS_NULL;
+    GradientDef *grad = &g_gradients[slot];
+    memset(grad, 0, sizeof(*grad));
+    grad->active = 1;
+    grad->type = 2; /* conic */
+    if (argc >= 1) JS_ToFloat64(ctx, &grad->r0, argv[0]); /* startAngle */
+    if (argc >= 2) JS_ToFloat64(ctx, &grad->x0, argv[1]); /* cx */
+    if (argc >= 3) JS_ToFloat64(ctx, &grad->y0, argv[2]); /* cy */
+    int gid = slot + 1;
     JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "_gradId", JS_NewInt32(ctx, gid));
+    JS_SetPropertyStr(ctx, obj, "_type", JS_NewString(ctx, "gradient"));
     JS_SetPropertyStr(ctx, obj, "addColorStop",
         JS_NewCFunction(ctx, js_gradient_addColorStop, "addColorStop", 2));
     return obj;
@@ -3770,6 +3905,9 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
                         (g_canvases[i].style[0] && strcmp(g_canvases[i].style, id) == 0) ||
                         (g_canvases[i].id == 1 && strcmp(id, "canvas") == 0);
             if (match) {
+                /* If the main canvas is accessed via getElementById, mark stage as claimed
+                 * so subsequent createElement('canvas') creates a new offscreen canvas */
+                if (g_canvases[i].id == 1) g_stage_canvas_claimed = 1;
                 JSValue obj = js_make_canvas_object(ctx, g_canvases[i].id);
                 JS_FreeCString(ctx, id);
                 return obj;

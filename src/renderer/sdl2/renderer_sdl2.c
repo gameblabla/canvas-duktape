@@ -446,7 +446,19 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     } else if (blend_add == 5) { /* source-out: Src * (1-DstA) */
         bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
-    } else if (blend_add == 6) { /* destination-in: Dst * SrcA */
+    } else if (blend_add == 6) { /* destination-in: Dst * SrcA, clear outside */
+        int tex_w = 0, tex_h = 0;
+        SDL_QueryTexture(tex, NULL, NULL, &tex_w, &tex_h);
+        int rx1 = x < 0 ? 0 : x;
+        int ry1 = y < 0 ? 0 : y;
+        int rx2 = (x+w) > tex_w ? tex_w : (x+w);
+        int ry2 = (y+h) > tex_h ? tex_h : (y+h);
+        SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        if (ry1 > 0) { SDL_Rect t = {0, 0, tex_w, ry1}; SDL_RenderFillRect(g_sdl_renderer, &t); }
+        if (rx1 > 0) { SDL_Rect t = {0, ry1, rx1, ry2-ry1}; SDL_RenderFillRect(g_sdl_renderer, &t); }
+        if (rx2 < tex_w) { SDL_Rect t = {rx2, ry1, tex_w-rx2, ry2-ry1}; SDL_RenderFillRect(g_sdl_renderer, &t); }
+        if (ry2 < tex_h) { SDL_Rect t = {0, ry2, tex_w, tex_h-ry2}; SDL_RenderFillRect(g_sdl_renderer, &t); }
         bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                         SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 7) { /* xor: Src*(1-DstA) + Dst*(1-SrcA) */
@@ -512,12 +524,14 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
     int pw, ph;
     SDL_QueryTexture(pat, NULL, NULL, &pw, &ph);
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
+    /* Clear any SDL clip rect on this target */
+    SDL_RenderSetClipRect(g_sdl_renderer, NULL);
     /* Tile the pattern */
     for (int ty = y; ty < y+h; ty += ph) {
         for (int tx = x; tx < x+w; tx += pw) {
             int dw = (tx+pw > x+w) ? (x+w-tx) : pw;
             int dh = (ty+ph > y+h) ? (y+h-ty) : ph;
-            SDL_Rect src = {0, 0, pw, ph};
+            SDL_Rect src = {0, 0, dw, dh};
             SDL_Rect dst = {tx, ty, dw, dh};
             SDL_RenderCopy(g_sdl_renderer, pat, &src, &dst);
         }
@@ -735,7 +749,7 @@ static void r_draw_arc_points(void* target,
 
 static void r_fill_polygon(void* target, const double* pts, int count,
                             uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                            int blend_add) {
+                            int blend_add, int fill_rule) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || count < 3) return;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
@@ -781,20 +795,41 @@ static void r_fill_polygon(void* target, const double* pts, int count,
         if(py<min_y)min_y=py; if(py>max_y)max_y=py;
     }
     for (int scan_y = (int)floor(min_y); scan_y <= (int)ceil(max_y); scan_y++) {
-        double ixs[128]; int cnt = 0;
+        struct { double x; int w; } ixs[128]; int cnt = 0;
         for (int i=0; i<count-1; i++) {
             double x1=pts[i*2], y1=pts[i*2+1];
             double x2=pts[(i+1)*2], y2=pts[(i+1)*2+1];
             if((y1<=scan_y && y2>scan_y)||(y2<=scan_y && y1>scan_y)) {
-                if (cnt < 127)
-                    ixs[cnt++] = x1 + (scan_y-y1)/(y2-y1)*(x2-x1);
+                if (cnt < 127) {
+                    ixs[cnt].x = x1 + (scan_y-y1)/(y2-y1)*(x2-x1);
+                    ixs[cnt].w = (y2 > y1) ? 1 : -1;
+                    cnt++;
+                }
             }
         }
         for(int i=0;i<cnt-1;i++) for(int j=i+1;j<cnt;j++)
-            if(ixs[i]>ixs[j]){double tmp=ixs[i];ixs[i]=ixs[j];ixs[j]=tmp;}
-        for(int i=0;i<cnt-1;i+=2)
-            SDL_RenderDrawLine(g_sdl_renderer,
-                (int)floor(ixs[i]), scan_y, (int)ceil(ixs[i+1]), scan_y);
+            if(ixs[i].x>ixs[j].x){
+                double tx=ixs[i].x; int tw=ixs[i].w;
+                ixs[i].x=ixs[j].x; ixs[i].w=ixs[j].w;
+                ixs[j].x=tx; ixs[j].w=tw;
+            }
+        if (fill_rule == 1) { /* nonzero winding */
+            int winding = 0;
+            int span_start = 0;
+            for (int i = 0; i < cnt; i++) {
+                int prev = winding;
+                winding += ixs[i].w;
+                if (prev == 0 && winding != 0)
+                    span_start = (int)floor(ixs[i].x);
+                else if (prev != 0 && winding == 0)
+                    SDL_RenderDrawLine(g_sdl_renderer, span_start, scan_y,
+                                       (int)ceil(ixs[i].x), scan_y);
+            }
+        } else { /* evenodd */
+            for(int i=0;i<cnt-1;i+=2)
+                SDL_RenderDrawLine(g_sdl_renderer,
+                    (int)floor(ixs[i].x), scan_y, (int)ceil(ixs[i+1].x), scan_y);
+        }
     }
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
@@ -922,10 +957,17 @@ static void r_put_pixels(void* target, const uint8_t* rgba,
         SDL_UpdateTexture(tmp, NULL, buf, w * 4);
         SDL_SetTextureBlendMode(tmp, SDL_BLENDMODE_NONE);
         SDL_SetRenderTarget(g_sdl_renderer, tex);
+        /* Apply logical clip rect (don't let stale SDL per-target clip interfere) */
+        if (g_has_clip) {
+            SDL_Rect cr = {g_clip_x, g_clip_y, g_clip_w, g_clip_h};
+            SDL_RenderSetClipRect(g_sdl_renderer, &cr);
+        } else {
+            SDL_RenderSetClipRect(g_sdl_renderer, NULL);
+        }
         SDL_Rect dst = {x, y, w, h};
         SDL_RenderCopy(g_sdl_renderer, tmp, NULL, &dst);
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
-    SDL_RenderFlush(g_sdl_renderer);
+        SDL_RenderFlush(g_sdl_renderer);
         SDL_DestroyTexture(tmp);
     }
     free(buf);

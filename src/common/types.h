@@ -94,7 +94,7 @@ typedef struct {
                               uint8_t r, uint8_t g, uint8_t b, uint8_t a);
     void   (*fill_polygon)(void* target, const double* pts, int count,
                            uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                           int blend_add);
+                           int blend_add, int fill_rule);
     void   (*fill_circle)(void* target,
                           double cx, double cy, int radius,
                           uint8_t r, uint8_t g, uint8_t b, uint8_t a,
