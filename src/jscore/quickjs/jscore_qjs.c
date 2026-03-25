@@ -570,7 +570,10 @@ static int color_from_js_checked(JSValue v, double *out) {
             int r2, g3, b2; float a2;
             if (sscanf(str, "rgba(%d,%d,%d,%f)", &r2, &g3, &b2, &a2) == 4 ||
                 sscanf(str, "rgba( %d , %d , %d , %f )", &r2, &g3, &b2, &a2) == 4) {
-                tmp[0]=r2/255.0; tmp[1]=g3/255.0; tmp[2]=b2/255.0; tmp[3]=a2;
+                tmp[0]=r2/255.0; tmp[1]=g3/255.0; tmp[2]=b2/255.0;
+                /* CSS rgba alpha is 0.0-1.0; values >1 are clamped to 1.0 (browser behavior).
+                 * GameMaker's _BP emits 0-255 integers, so e.g. rgba(r,g,b,255) = fully opaque. */
+                tmp[3] = (a2 > 1.0f) ? 1.0 : (double)a2;
             } else valid = 0;
         } else if (strncmp(str, "rgb(", 4) == 0) {
             int r2, g3, b2;
@@ -662,7 +665,8 @@ static void color_from_js(JSValue v, double *out) {
                     out[0] = r / 255.0;
                     out[1] = g / 255.0;
                     out[2] = b / 255.0;
-                    out[3] = a;
+                    /* CSS rgba alpha >1 is clamped to 1.0 (browser behavior) */
+                    out[3] = (a > 1.0f) ? 1.0 : (double)a;
                 } else {
                     out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1;
                 }
@@ -6842,6 +6846,11 @@ static void jscore_qjs_dispatch_key(int keycode, int is_down) {
     JS_SetPropertyStr(g_ctx, event, "type",             JS_NewString(g_ctx, evtype));
     JS_SetPropertyStr(g_ctx, event, "keyCode",          JS_NewInt32(g_ctx, keycode));
     JS_SetPropertyStr(g_ctx, event, "which",            JS_NewInt32(g_ctx, keycode));
+    JS_SetPropertyStr(g_ctx, event, "charCode",         JS_NewInt32(g_ctx, keycode));
+    JS_SetPropertyStr(g_ctx, event, "shiftKey",         JS_NewBool(g_ctx, 0));
+    JS_SetPropertyStr(g_ctx, event, "ctrlKey",          JS_NewBool(g_ctx, 0));
+    JS_SetPropertyStr(g_ctx, event, "altKey",           JS_NewBool(g_ctx, 0));
+    JS_SetPropertyStr(g_ctx, event, "repeat",           JS_NewBool(g_ctx, 0));
     JS_SetPropertyStr(g_ctx, event, "target",           target);
     JS_SetPropertyStr(g_ctx, event, "preventDefault",   JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
     JS_SetPropertyStr(g_ctx, event, "stopPropagation",  JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
@@ -6865,6 +6874,18 @@ static void jscore_qjs_dispatch_key(int keycode, int is_down) {
             JS_FreeValue(g_ctx, ret);
         }
     }
+
+    /* Also call window.onkeydown / window.onkeyup (GameMaker sets these directly) */
+    {
+        JSValue handler = JS_GetPropertyStr(g_ctx, global, is_down ? "onkeydown" : "onkeyup");
+        if (JS_IsFunction(g_ctx, handler)) {
+            JSValue ret = JS_Call(g_ctx, handler, global, 1, &event);
+            if (JS_IsException(ret)) JS_GetException(g_ctx);
+            JS_FreeValue(g_ctx, ret);
+        }
+        JS_FreeValue(g_ctx, handler);
+    }
+
     JS_FreeValue(g_ctx, global);
     JS_FreeValue(g_ctx, event);
 }
@@ -6926,6 +6947,34 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
             }
             JS_FreeValue(g_ctx, ret);
         }
+    }
+
+    /* Also call canvas.on* and window.on* handlers (GameMaker sets these directly) */
+    {
+        JSValue canvas = JS_GetPropertyStr(g_ctx, global, "canvas");
+        const char *canvas_handler = NULL;
+        if (event_type == 4) canvas_handler = "onmousemove";
+        else if (event_type == 5) canvas_handler = "onmousedown";
+        if (canvas_handler && JS_IsObject(canvas)) {
+            JSValue handler = JS_GetPropertyStr(g_ctx, canvas, canvas_handler);
+            if (JS_IsFunction(g_ctx, handler)) {
+                JSValue ret = JS_Call(g_ctx, handler, canvas, 1, &event);
+                if (JS_IsException(ret)) JS_GetException(g_ctx);
+                JS_FreeValue(g_ctx, ret);
+            }
+            JS_FreeValue(g_ctx, handler);
+        }
+        JS_FreeValue(g_ctx, canvas);
+    }
+    /* window.onmouseup */
+    if (event_type == 6) {
+        JSValue handler = JS_GetPropertyStr(g_ctx, global, "onmouseup");
+        if (JS_IsFunction(g_ctx, handler)) {
+            JSValue ret = JS_Call(g_ctx, handler, global, 1, &event);
+            if (JS_IsException(ret)) JS_GetException(g_ctx);
+            JS_FreeValue(g_ctx, ret);
+        }
+        JS_FreeValue(g_ctx, handler);
     }
 
     jscore_qjs_drain_jobs();
