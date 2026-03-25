@@ -249,6 +249,7 @@ typedef struct {
     int ended;
     JSValue loadeddata_listener;
     JSValue canplaythrough_listener;
+    JSValue canplay_listener;
 } Html5AudioElement;
 
 static Html5AudioElement g_audio_elements[MAX_HTML5_AUDIO_ELEMENTS];
@@ -3371,6 +3372,7 @@ static JSValue js_audio_get_src(JSContext *ctx, JSValueConst this_val) {
     return JS_NewString(ctx, "");
 }
 
+static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv); /* forward decl */
 static JSValue js_audio_set_src(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
     AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
     if (audio) {
@@ -3379,6 +3381,9 @@ static JSValue js_audio_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
             strncpy(audio->src, src, sizeof(audio->src) - 1);
             audio->src[sizeof(audio->src) - 1] = '\0';
             JS_FreeCString(ctx, src);
+            /* Setting src triggers an automatic load like a real browser.
+             * This fires canplay/canplaythrough once the file is ready. */
+            return js_audio_load(ctx, this_val, 1, &val);
         }
     }
     return JS_UNDEFINED;
@@ -3605,6 +3610,8 @@ static JSValue js_audio_addEventListener(JSContext *ctx, JSValueConst this_val,
                 JS_SetPropertyStr(ctx, this_val, "_loadeddata_listener", JS_DupValue(ctx, listener));
             } else if (strcmp(event, "canplaythrough") == 0) {
                 JS_SetPropertyStr(ctx, this_val, "_canplaythrough_listener", JS_DupValue(ctx, listener));
+            } else if (strcmp(event, "canplay") == 0) {
+                JS_SetPropertyStr(ctx, this_val, "_canplay_listener", JS_DupValue(ctx, listener));
             }
             if (event) JS_FreeCString(ctx, event);
             return JS_UNDEFINED;
@@ -3624,6 +3631,11 @@ static JSValue js_audio_addEventListener(JSContext *ctx, JSValueConst this_val,
                 JS_FreeValue(ctx, g_audio_elements[elem_idx].canplaythrough_listener);
             }
             g_audio_elements[elem_idx].canplaythrough_listener = JS_DupValue(ctx, listener);
+        } else if (strcmp(event, "canplay") == 0) {
+            if (!JS_IsUndefined(g_audio_elements[elem_idx].canplay_listener)) {
+                JS_FreeValue(ctx, g_audio_elements[elem_idx].canplay_listener);
+            }
+            g_audio_elements[elem_idx].canplay_listener = JS_DupValue(ctx, listener);
         }
     }
 
@@ -3654,6 +3666,9 @@ static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val,
                 return JS_UNDEFINED;
             }
             memset(&g_audio_elements[elem_idx], 0, sizeof(Html5AudioElement));
+            g_audio_elements[elem_idx].loadeddata_listener    = JS_UNDEFINED;
+            g_audio_elements[elem_idx].canplaythrough_listener = JS_UNDEFINED;
+            g_audio_elements[elem_idx].canplay_listener       = JS_UNDEFINED;
             g_audio_elements[elem_idx].in_use = 1;
             g_audio_elements[elem_idx].native_index = -1;
             g_audio_elements[elem_idx].volume = 1.0f;
@@ -3701,9 +3716,23 @@ static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val,
             JS_FreeValue(ctx, canplaythrough_listener);
         }
 
+        JSValue canplay_listener = JS_GetPropertyStr(ctx, this_val, "_canplay_listener");
+        if (!JS_IsUndefined(canplay_listener)) {
+            if (!JS_IsUndefined(elem->canplay_listener)) {
+                JS_FreeValue(ctx, elem->canplay_listener);
+            }
+            elem->canplay_listener = JS_DupValue(ctx, canplay_listener);
+            JS_FreeValue(ctx, canplay_listener);
+        }
+
         /* Trigger loadeddata event */
         if (!JS_IsUndefined(elem->loadeddata_listener)) {
             JS_Call(ctx, elem->loadeddata_listener, this_val, 0, NULL);
+        }
+
+        /* Trigger canplay event (fires before canplaythrough) */
+        if (!JS_IsUndefined(elem->canplay_listener)) {
+            JS_Call(ctx, elem->canplay_listener, this_val, 0, NULL);
         }
 
         /* Trigger canplaythrough event */
@@ -5773,6 +5802,11 @@ static int jscore_qjs_init(RendererInterface *renderer,
     memset(g_canvases, 0, sizeof(g_canvases));
     memset(g_raf_callbacks, 0, sizeof(g_raf_callbacks));
     memset(g_audio_elements, 0, sizeof(g_audio_elements));
+    for (int i = 0; i < MAX_HTML5_AUDIO_ELEMENTS; i++) {
+        g_audio_elements[i].loadeddata_listener    = JS_UNDEFINED;
+        g_audio_elements[i].canplaythrough_listener = JS_UNDEFINED;
+        g_audio_elements[i].canplay_listener       = JS_UNDEFINED;
+    }
 
     g_timer_next_id = 1;
     g_image_next_id = 1;
@@ -5823,6 +5857,9 @@ static void jscore_qjs_quit(void) {
         }
         if (!JS_IsUndefined(g_audio_elements[i].canplaythrough_listener)) {
             JS_FreeValue(g_ctx, g_audio_elements[i].canplaythrough_listener);
+        }
+        if (!JS_IsUndefined(g_audio_elements[i].canplay_listener)) {
+            JS_FreeValue(g_ctx, g_audio_elements[i].canplay_listener);
         }
     }
 
