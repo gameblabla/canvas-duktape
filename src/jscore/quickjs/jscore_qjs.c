@@ -40,6 +40,33 @@ static int g_win_h = 600;
 /* Track whether the first createElement("canvas") has been claimed as the stage canvas */
 static int g_stage_canvas_claimed = 0;
 
+/* Gradient support */
+#define MAX_GRADIENTS 16
+#define MAX_COLOR_STOPS 16
+typedef struct {
+    int type; /* 0=linear, 1=radial */
+    double x0, y0, x1, y1;
+    double r0, r1;
+    int num_stops;
+    struct { double offset; uint8_t r, g, b, a; } stops[MAX_COLOR_STOPS];
+    int active;
+} GradientDef;
+static GradientDef g_gradients[MAX_GRADIENTS];
+
+/* Path2D support */
+#define MAX_PATH2D 16
+typedef struct {
+    double *pts;
+    int count;
+    int capacity;
+    int active;
+} Path2DObj;
+static Path2DObj g_path2d[MAX_PATH2D];
+
+/* Fill/stroke style objects (gradient or pattern) */
+static JSValue g_fill_style_obj;
+static JSValue g_stroke_style_obj;
+
 /* Canvas 2D context state */
 typedef struct {
     double transform[6];  /* [a, b, c, d, e, f] for affine transform */
@@ -65,6 +92,25 @@ typedef struct {
     /* Clip rect */
     int has_clip;
     int clip_x, clip_y, clip_w, clip_h;
+
+    /* Line dash */
+    double line_dash[32];
+    int line_dash_count;
+    double line_dash_offset;
+
+    /* Line style */
+    char line_cap[16];      /* "butt", "round", "square" */
+    char line_join[16];     /* "miter", "round", "bevel" */
+    double miter_limit;     /* default 10.0 */
+    char filter[64];        /* default "none" */
+    char direction[8];      /* "ltr" or "rtl" */
+    char smoothing_quality[16]; /* "low", "medium", "high" */
+
+    /* Gradient/Pattern fill */
+    int fill_gradient_id;   /* 0=none, 1..MAX_GRADIENTS = gradient index+1 */
+    int stroke_gradient_id; /* 0=none */
+    int fill_pattern_canvas_id;   /* 0=none */
+    int stroke_pattern_canvas_id; /* 0=none */
 
     /* Path tracking */
     double *path_pts;
@@ -92,6 +138,19 @@ typedef struct {
         int shadow_offset_y;
         int has_clip;
         int clip_x, clip_y, clip_w, clip_h;
+        double line_dash[32];
+        int line_dash_count;
+        double line_dash_offset;
+        char line_cap[16];
+        char line_join[16];
+        double miter_limit;
+        char filter[64];
+        char direction[8];
+        char smoothing_quality[16];
+        int fill_gradient_id;
+        int stroke_gradient_id;
+        int fill_pattern_canvas_id;
+        int stroke_pattern_canvas_id;
     } *state_stack;
     int stack_top;
     int stack_capacity;
@@ -399,6 +458,70 @@ static int find_free_image_slot(void) {
         }
     }
     return -1;
+}
+
+/* Returns 1 if color was successfully parsed, 0 if invalid (out unchanged) */
+static int color_from_js_checked(JSValue v, double *out) {
+    if (JS_IsNumber(v)) {
+        uint32_t c;
+        if (JS_ToUint32(g_ctx, &c, v)) return 0;
+        out[0] = ((c >> 24) & 0xFF) / 255.0;
+        out[1] = ((c >> 16) & 0xFF) / 255.0;
+        out[2] = ((c >> 8) & 0xFF) / 255.0;
+        out[3] = (c & 0xFF) / 255.0;
+        if (out[3] == 0) out[3] = 1.0;
+        return 1;
+    } else if (JS_IsString(v)) {
+        const char *str = JS_ToCString(g_ctx, v);
+        if (!str) return 0;
+        int valid = 1;
+        double tmp[4] = {0, 0, 0, 1};
+        if (strcmp(str, "red") == 0)       { tmp[0]=1; tmp[1]=0; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "green") == 0) { tmp[0]=0; tmp[1]=1; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "blue") == 0)  { tmp[0]=0; tmp[1]=0; tmp[2]=1; tmp[3]=1; }
+        else if (strcmp(str, "black") == 0) { tmp[0]=0; tmp[1]=0; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "white") == 0) { tmp[0]=1; tmp[1]=1; tmp[2]=1; tmp[3]=1; }
+        else if (strcmp(str, "yellow") == 0){ tmp[0]=1; tmp[1]=1; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "cyan") == 0)  { tmp[0]=0; tmp[1]=1; tmp[2]=1; tmp[3]=1; }
+        else if (strcmp(str, "magenta") == 0){ tmp[0]=1; tmp[1]=0; tmp[2]=1; tmp[3]=1; }
+        else if (strcmp(str, "transparent") == 0){ tmp[0]=0; tmp[1]=0; tmp[2]=0; tmp[3]=0; }
+        else if (strcmp(str, "orange") == 0){ tmp[0]=1; tmp[1]=0.647; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "purple") == 0){ tmp[0]=0.502; tmp[1]=0; tmp[2]=0.502; tmp[3]=1; }
+        else if (str[0] == '#') {
+            unsigned int r=0, g2=0, b=0, a=255;
+            size_t len = strlen(str);
+            if (len == 4) {
+                sscanf(str, "#%1x%1x%1x", &r, &g2, &b);
+                r=(r<<4)|r; g2=(g2<<4)|g2; b=(b<<4)|b;
+            } else if (len == 5) {
+                sscanf(str, "#%1x%1x%1x%1x", &r, &g2, &b, &a);
+                r=(r<<4)|r; g2=(g2<<4)|g2; b=(b<<4)|b; a=(a<<4)|a;
+            } else if (len == 7) {
+                sscanf(str, "#%02x%02x%02x", &r, &g2, &b);
+            } else if (len == 9) {
+                sscanf(str, "#%02x%02x%02x%02x", &r, &g2, &b, &a);
+            } else { valid = 0; }
+            if (valid) { tmp[0]=r/255.0; tmp[1]=g2/255.0; tmp[2]=b/255.0; tmp[3]=a/255.0; }
+        } else if (strncmp(str, "rgba(", 5) == 0) {
+            int r2, g3, b2; float a2;
+            if (sscanf(str, "rgba(%d,%d,%d,%f)", &r2, &g3, &b2, &a2) == 4 ||
+                sscanf(str, "rgba( %d , %d , %d , %f )", &r2, &g3, &b2, &a2) == 4) {
+                tmp[0]=r2/255.0; tmp[1]=g3/255.0; tmp[2]=b2/255.0; tmp[3]=a2;
+            } else valid = 0;
+        } else if (strncmp(str, "rgb(", 4) == 0) {
+            int r2, g3, b2;
+            if (sscanf(str, "rgb(%d,%d,%d)", &r2, &g3, &b2) == 3 ||
+                sscanf(str, "rgb( %d , %d , %d )", &r2, &g3, &b2) == 3) {
+                tmp[0]=r2/255.0; tmp[1]=g3/255.0; tmp[2]=b2/255.0; tmp[3]=1;
+            } else valid = 0;
+        } else {
+            valid = 0; /* unknown color string */
+        }
+        JS_FreeCString(g_ctx, str);
+        if (valid) { out[0]=tmp[0]; out[1]=tmp[1]; out[2]=tmp[2]; out[3]=tmp[3]; }
+        return valid;
+    }
+    return 0;
 }
 
 static void color_from_js(JSValue v, double *out) {
@@ -927,11 +1050,54 @@ static JSValue js_ctx2d_getTransform(JSContext *ctx, JSValueConst this_val,
 }
 
 static JSValue js_ctx2d_set_fillStyle(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
-    color_from_js(val, g_ctx2d.fill_color);
+    if (JS_IsObject(val)) {
+        /* Check for gradient */
+        JSValue grad_id_val = JS_GetPropertyStr(ctx, val, "_gradId");
+        if (!JS_IsUndefined(grad_id_val)) {
+            int gid = 0;
+            JS_ToInt32(ctx, &gid, grad_id_val);
+            g_ctx2d.fill_gradient_id = gid;
+            g_ctx2d.fill_pattern_canvas_id = 0;
+            JS_FreeValue(ctx, g_fill_style_obj);
+            g_fill_style_obj = JS_DupValue(ctx, val);
+            JS_FreeValue(ctx, grad_id_val);
+            return JS_UNDEFINED;
+        }
+        JS_FreeValue(ctx, grad_id_val);
+        /* Check for pattern */
+        JSValue pat_id_val = JS_GetPropertyStr(ctx, val, "_patternCanvasId");
+        if (!JS_IsUndefined(pat_id_val)) {
+            int pid = 0;
+            JS_ToInt32(ctx, &pid, pat_id_val);
+            g_ctx2d.fill_pattern_canvas_id = pid;
+            g_ctx2d.fill_gradient_id = 0;
+            JS_FreeValue(ctx, g_fill_style_obj);
+            g_fill_style_obj = JS_DupValue(ctx, val);
+            JS_FreeValue(ctx, pat_id_val);
+            return JS_UNDEFINED;
+        }
+        JS_FreeValue(ctx, pat_id_val);
+        return JS_UNDEFINED;
+    }
+    /* String: only update if valid color */
+    double tmp[4];
+    tmp[0] = g_ctx2d.fill_color[0]; tmp[1] = g_ctx2d.fill_color[1];
+    tmp[2] = g_ctx2d.fill_color[2]; tmp[3] = g_ctx2d.fill_color[3];
+    if (color_from_js_checked(val, g_ctx2d.fill_color)) {
+        g_ctx2d.fill_gradient_id = 0;
+        g_ctx2d.fill_pattern_canvas_id = 0;
+    } else {
+        /* restore if invalid */
+        g_ctx2d.fill_color[0] = tmp[0]; g_ctx2d.fill_color[1] = tmp[1];
+        g_ctx2d.fill_color[2] = tmp[2]; g_ctx2d.fill_color[3] = tmp[3];
+    }
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_get_fillStyle(JSContext *ctx, JSValueConst this_val) {
+    if (g_ctx2d.fill_gradient_id > 0 || g_ctx2d.fill_pattern_canvas_id > 0) {
+        return JS_DupValue(ctx, g_fill_style_obj);
+    }
     uint32_t r = color_to_byte(g_ctx2d.fill_color[0]);
     uint32_t g = color_to_byte(g_ctx2d.fill_color[1]);
     uint32_t b = color_to_byte(g_ctx2d.fill_color[2]);
@@ -942,11 +1108,50 @@ static JSValue js_ctx2d_get_fillStyle(JSContext *ctx, JSValueConst this_val) {
 }
 
 static JSValue js_ctx2d_set_strokeStyle(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
-    color_from_js(val, g_ctx2d.stroke_color);
+    if (JS_IsObject(val)) {
+        JSValue grad_id_val = JS_GetPropertyStr(ctx, val, "_gradId");
+        if (!JS_IsUndefined(grad_id_val)) {
+            int gid = 0;
+            JS_ToInt32(ctx, &gid, grad_id_val);
+            g_ctx2d.stroke_gradient_id = gid;
+            g_ctx2d.stroke_pattern_canvas_id = 0;
+            JS_FreeValue(ctx, g_stroke_style_obj);
+            g_stroke_style_obj = JS_DupValue(ctx, val);
+            JS_FreeValue(ctx, grad_id_val);
+            return JS_UNDEFINED;
+        }
+        JS_FreeValue(ctx, grad_id_val);
+        JSValue pat_id_val = JS_GetPropertyStr(ctx, val, "_patternCanvasId");
+        if (!JS_IsUndefined(pat_id_val)) {
+            int pid = 0;
+            JS_ToInt32(ctx, &pid, pat_id_val);
+            g_ctx2d.stroke_pattern_canvas_id = pid;
+            g_ctx2d.stroke_gradient_id = 0;
+            JS_FreeValue(ctx, g_stroke_style_obj);
+            g_stroke_style_obj = JS_DupValue(ctx, val);
+            JS_FreeValue(ctx, pat_id_val);
+            return JS_UNDEFINED;
+        }
+        JS_FreeValue(ctx, pat_id_val);
+        return JS_UNDEFINED;
+    }
+    double tmp[4];
+    tmp[0] = g_ctx2d.stroke_color[0]; tmp[1] = g_ctx2d.stroke_color[1];
+    tmp[2] = g_ctx2d.stroke_color[2]; tmp[3] = g_ctx2d.stroke_color[3];
+    if (color_from_js_checked(val, g_ctx2d.stroke_color)) {
+        g_ctx2d.stroke_gradient_id = 0;
+        g_ctx2d.stroke_pattern_canvas_id = 0;
+    } else {
+        g_ctx2d.stroke_color[0] = tmp[0]; g_ctx2d.stroke_color[1] = tmp[1];
+        g_ctx2d.stroke_color[2] = tmp[2]; g_ctx2d.stroke_color[3] = tmp[3];
+    }
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_get_strokeStyle(JSContext *ctx, JSValueConst this_val) {
+    if (g_ctx2d.stroke_gradient_id > 0 || g_ctx2d.stroke_pattern_canvas_id > 0) {
+        return JS_DupValue(ctx, g_stroke_style_obj);
+    }
     uint32_t r = color_to_byte(g_ctx2d.stroke_color[0]);
     uint32_t g = color_to_byte(g_ctx2d.stroke_color[1]);
     uint32_t b = color_to_byte(g_ctx2d.stroke_color[2]);
@@ -957,7 +1162,9 @@ static JSValue js_ctx2d_get_strokeStyle(JSContext *ctx, JSValueConst this_val) {
 }
 
 static JSValue js_ctx2d_set_lineWidth(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
-    JS_ToInt32(ctx, &g_ctx2d.line_width, val);
+    double v = 0;
+    JS_ToFloat64(ctx, &v, val);
+    if (v > 0) g_ctx2d.line_width = (int)v;
     return JS_UNDEFINED;
 }
 
@@ -988,10 +1195,16 @@ static JSValue js_ctx2d_get_imageSmoothingEnabled(JSContext *ctx, JSValueConst t
 static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
     const char *op = JS_ToCString(ctx, val);
     if (op) {
-        if (strcmp(op, "lighter") == 0)       g_ctx2d.global_composite = 1;
+        if (strcmp(op, "source-over") == 0)       g_ctx2d.global_composite = 0;
+        else if (strcmp(op, "lighter") == 0)       g_ctx2d.global_composite = 1;
         else if (strcmp(op, "destination-over") == 0) g_ctx2d.global_composite = 2;
-        else if (strcmp(op, "copy") == 0)     g_ctx2d.global_composite = 3;
-        else                                   g_ctx2d.global_composite = 0; /* source-over */
+        else if (strcmp(op, "copy") == 0)          g_ctx2d.global_composite = 3;
+        else if (strcmp(op, "source-in") == 0)     g_ctx2d.global_composite = 4;
+        else if (strcmp(op, "source-out") == 0)    g_ctx2d.global_composite = 5;
+        else if (strcmp(op, "destination-in") == 0) g_ctx2d.global_composite = 6;
+        else if (strcmp(op, "xor") == 0)           g_ctx2d.global_composite = 7;
+        else if (strcmp(op, "multiply") == 0)      g_ctx2d.global_composite = 8;
+        /* else: keep previous value (invalid op ignored) */
         JS_FreeCString(ctx, op);
     }
     return JS_UNDEFINED;
@@ -1002,6 +1215,11 @@ static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueCons
         case 1: return JS_NewString(ctx, "lighter");
         case 2: return JS_NewString(ctx, "destination-over");
         case 3: return JS_NewString(ctx, "copy");
+        case 4: return JS_NewString(ctx, "source-in");
+        case 5: return JS_NewString(ctx, "source-out");
+        case 6: return JS_NewString(ctx, "destination-in");
+        case 7: return JS_NewString(ctx, "xor");
+        case 8: return JS_NewString(ctx, "multiply");
         default: return JS_NewString(ctx, "source-over");
     }
 }
@@ -1121,7 +1339,22 @@ static JSValue js_ctx2d_beginPath(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_closePath(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
-    /* Path closing is handled in fill/stroke */
+    /* Find last moveTo or start of path and add a closing line segment */
+    if (g_ctx2d.path_count >= 2) {
+        /* Find the start of the current subpath (last moveTo marker, or path start) */
+        /* Simple approach: go back to find a position that begins the subpath.
+         * We track sub-paths by looking back for beginning. For simplicity,
+         * we use the most recent "gap" or the overall path start. */
+        /* Actually just connect back to first point of subpath.
+         * We scan backward for a potential subpath start but without full tracking,
+         * just use a heuristic: the last explicit moveTo is stored before other points.
+         * For now, connect to path_pts[0], path_pts[1]. */
+        double first_x = g_ctx2d.path_pts[0];
+        double first_y = g_ctx2d.path_pts[1];
+        /* Find last moveTo by scanning backward - a moveTo creates a "break" in path.
+         * Without markers, just use path start. */
+        add_path_point(first_x, first_y);
+    }
     return JS_UNDEFINED;
 }
 
@@ -1166,6 +1399,7 @@ static JSValue js_ctx2d_arc(JSContext *ctx, JSValueConst this_val,
     if (argc >= 1) JS_ToFloat64(ctx, &cx, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &cy, argv[1]);
     if (argc >= 3) JS_ToFloat64(ctx, &radius, argv[2]);
+    if (radius < 0) return JS_ThrowRangeError(ctx, "The radius provided (%g) is negative.", radius);
     if (argc >= 4) JS_ToFloat64(ctx, &start, argv[3]);
     if (argc >= 5) JS_ToFloat64(ctx, &end, argv[4]);
     if (argc >= 6) JS_ToInt32(ctx, &ccw, argv[5]);
@@ -1187,15 +1421,117 @@ static JSValue js_ctx2d_arc(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_arcTo(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
-    /* Simplified arcTo - just lineTo for now */
     double x1 = 0, y1 = 0, x2 = 0, y2 = 0, radius = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &x1, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &y1, argv[1]);
     if (argc >= 3) JS_ToFloat64(ctx, &x2, argv[2]);
     if (argc >= 4) JS_ToFloat64(ctx, &y2, argv[3]);
     if (argc >= 5) JS_ToFloat64(ctx, &radius, argv[4]);
-    add_path_point(x1, y1);
-    add_path_point(x2, y2);
+
+    if (radius <= 0) {
+        add_path_point(x1, y1);
+        return JS_UNDEFINED;
+    }
+
+    /* Get current point */
+    if (g_ctx2d.path_count < 1) {
+        add_path_point(x1, y1);
+        return JS_UNDEFINED;
+    }
+    double x0 = g_ctx2d.path_pts[(g_ctx2d.path_count-1)*2];
+    double y0 = g_ctx2d.path_pts[(g_ctx2d.path_count-1)*2+1];
+
+    /* Vector from (x0,y0) to (x1,y1) */
+    double dx1 = x1 - x0, dy1 = y1 - y0;
+    /* Vector from (x1,y1) to (x2,y2) */
+    double dx2 = x2 - x1, dy2 = y2 - y1;
+
+    /* Lengths */
+    double len1 = sqrt(dx1*dx1 + dy1*dy1);
+    double len2 = sqrt(dx2*dx2 + dy2*dy2);
+
+    if (len1 < 0.0001 || len2 < 0.0001) {
+        add_path_point(x1, y1);
+        return JS_UNDEFINED;
+    }
+
+    /* Normalize */
+    double ux1 = dx1 / len1, uy1 = dy1 / len1;
+    double ux2 = dx2 / len2, uy2 = dy2 / len2;
+
+    /* Angle between vectors */
+    double dot = ux1*ux2 + uy1*uy2;
+    if (dot > 0.9999) {
+        add_path_point(x1, y1);
+        return JS_UNDEFINED;
+    }
+    double angle = acos(dot < -1 ? -1 : (dot > 1 ? 1 : dot));
+
+    /* Distance from corner to tangent points */
+    double dist = radius / tan(angle / 2.0);
+
+    /* Tangent point 1 (on first line, distance from corner) */
+    double tx1 = x1 - ux1 * dist;
+    double ty1 = y1 - uy1 * dist;
+
+    /* Tangent point 2 (on second line, distance from corner) */
+    double tx2 = x1 + ux2 * dist;
+    double ty2 = y1 + uy2 * dist;
+
+    /* Add line to first tangent point */
+    add_path_point(tx1, ty1);
+
+    /* Find center: perpendicular to tangent line at tangent point */
+    double perp_x = -uy1, perp_y = ux1;  /* 90 degree CCW rotation */
+    
+    /* Center candidate 1 */
+    double cx1 = tx1 + perp_x * radius;
+    double cy1 = ty1 + perp_y * radius;
+    /* Center candidate 2 */
+    double cx2 = tx1 - perp_x * radius;
+    double cy2 = ty1 - perp_y * radius;
+    
+    /* The correct center should make the arc pass near the second tangent point */
+    /* Check which center is closer to tx2, ty2 at distance radius */
+    double d1 = fabs(sqrt((tx2-cx1)*(tx2-cx1) + (ty2-cy1)*(ty2-cy1)) - radius);
+    double d2 = fabs(sqrt((tx2-cx2)*(tx2-cx2) + (ty2-cy2)*(ty2-cy2)) - radius);
+    
+    double cx, cy;
+    if (d1 < d2) {
+        cx = cx1; cy = cy1;
+    } else {
+        cx = cx2; cy = cy2;
+    }
+
+    /* Start and end angles */
+    double start_angle = atan2(ty1 - cy, tx1 - cx);
+    double end_angle = atan2(ty2 - cy, tx2 - cx);
+
+    /* Determine direction - arc should go the short way */
+    double cross = ux1*uy2 - uy1*ux2;
+    int ccw = (cross > 0) ? 1 : 0;
+
+    /* Generate arc points */
+    int segments = (int)(radius * angle) + 3;
+    if (segments < 3) segments = 3;
+    if (segments > 50) segments = 50;
+
+    double angle_diff = end_angle - start_angle;
+    /* Normalize to correct direction */
+    if (ccw) {
+        if (angle_diff <= 0) angle_diff += 2*M_PI;
+    } else {
+        if (angle_diff >= 0) angle_diff -= 2*M_PI;
+    }
+
+    for (int i = 1; i <= segments; i++) {
+        double t = (double)i / segments;
+        double a = start_angle + t * angle_diff;
+        double px = cx + radius * cos(a);
+        double py = cy + radius * sin(a);
+        add_path_point(px, py);
+    }
+
     return JS_UNDEFINED;
 }
 
@@ -1272,78 +1608,398 @@ static JSValue js_ctx2d_ellipse(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
-                             int argc, JSValueConst *argv) {
-    if (g_ctx2d.path_count < 2 || !g_renderer) {
+/* ---- setLineDash / getLineDash / lineDashOffset ---- */
+static JSValue js_ctx2d_setLineDash(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    if (argc < 1 || !JS_IsArray(argv[0])) {
+        g_ctx2d.line_dash_count = 0;
         return JS_UNDEFINED;
     }
-    
+    JSValue arr = argv[0];
+    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    int len = 0;
+    JS_ToInt32(ctx, &len, len_val);
+    JS_FreeValue(ctx, len_val);
+    if (len == 0) {
+        g_ctx2d.line_dash_count = 0;
+        return JS_UNDEFINED;
+    }
+    /* If odd number of dashes, duplicate to make even */
+    int count = len;
+    if (len % 2 != 0) count = len * 2;
+    if (count > 32) count = 32;
+    for (int i = 0; i < count; i++) {
+        JSValue v = JS_GetPropertyUint32(ctx, arr, i % len);
+        JS_ToFloat64(ctx, &g_ctx2d.line_dash[i], v);
+        JS_FreeValue(ctx, v);
+    }
+    g_ctx2d.line_dash_count = count;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_ctx2d_getLineDash(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    JSValue arr = JS_NewArray(ctx);
+    for (int i = 0; i < g_ctx2d.line_dash_count; i++) {
+        JS_SetPropertyUint32(ctx, arr, i, JS_NewFloat64(ctx, g_ctx2d.line_dash[i]));
+    }
+    return arr;
+}
+
+static JSValue js_ctx2d_get_lineDashOffset(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewFloat64(ctx, g_ctx2d.line_dash_offset);
+}
+static JSValue js_ctx2d_set_lineDashOffset(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    JS_ToFloat64(ctx, &g_ctx2d.line_dash_offset, val);
+    return JS_UNDEFINED;
+}
+
+/* ---- lineCap / lineJoin / miterLimit / filter / direction / imageSmoothingQuality ---- */
+static JSValue js_ctx2d_get_lineCap(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, g_ctx2d.line_cap);
+}
+static JSValue js_ctx2d_set_lineCap(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    const char *s = JS_ToCString(ctx, val);
+    if (s) {
+        strncpy(g_ctx2d.line_cap, s, sizeof(g_ctx2d.line_cap) - 1);
+        g_ctx2d.line_cap[sizeof(g_ctx2d.line_cap) - 1] = '\0';
+        JS_FreeCString(ctx, s);
+    }
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_lineJoin(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, g_ctx2d.line_join);
+}
+static JSValue js_ctx2d_set_lineJoin(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    const char *s = JS_ToCString(ctx, val);
+    if (s) {
+        strncpy(g_ctx2d.line_join, s, sizeof(g_ctx2d.line_join) - 1);
+        g_ctx2d.line_join[sizeof(g_ctx2d.line_join) - 1] = '\0';
+        JS_FreeCString(ctx, s);
+    }
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_miterLimit(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewFloat64(ctx, g_ctx2d.miter_limit);
+}
+static JSValue js_ctx2d_set_miterLimit(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    double v = 0;
+    JS_ToFloat64(ctx, &v, val);
+    if (v > 0) g_ctx2d.miter_limit = v;
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_filter(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, g_ctx2d.filter);
+}
+static JSValue js_ctx2d_set_filter(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    const char *s = JS_ToCString(ctx, val);
+    if (s) {
+        strncpy(g_ctx2d.filter, s, sizeof(g_ctx2d.filter) - 1);
+        g_ctx2d.filter[sizeof(g_ctx2d.filter) - 1] = '\0';
+        JS_FreeCString(ctx, s);
+    }
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_direction(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, g_ctx2d.direction);
+}
+static JSValue js_ctx2d_set_direction(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    const char *s = JS_ToCString(ctx, val);
+    if (s) {
+        strncpy(g_ctx2d.direction, s, sizeof(g_ctx2d.direction) - 1);
+        g_ctx2d.direction[sizeof(g_ctx2d.direction) - 1] = '\0';
+        JS_FreeCString(ctx, s);
+    }
+    return JS_UNDEFINED;
+}
+static JSValue js_ctx2d_get_imageSmoothingQuality(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, g_ctx2d.smoothing_quality);
+}
+static JSValue js_ctx2d_set_imageSmoothingQuality(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    const char *s = JS_ToCString(ctx, val);
+    if (s) {
+        strncpy(g_ctx2d.smoothing_quality, s, sizeof(g_ctx2d.smoothing_quality) - 1);
+        g_ctx2d.smoothing_quality[sizeof(g_ctx2d.smoothing_quality) - 1] = '\0';
+        JS_FreeCString(ctx, s);
+    }
+    return JS_UNDEFINED;
+}
+
+/* ---- getContextAttributes / drawFocusIfNeeded ---- */
+static JSValue js_ctx2d_getContextAttributes(JSContext *ctx, JSValueConst this_val,
+                                             int argc, JSValueConst *argv) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "alpha", JS_NewBool(ctx, 1));
+    JS_SetPropertyStr(ctx, obj, "colorSpace", JS_NewString(ctx, "srgb"));
+    return obj;
+}
+
+static JSValue js_ctx2d_drawFocusIfNeeded(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    return JS_UNDEFINED;
+}
+
+/* ---- isPointInPath / isPointInStroke with actual logic ---- */
+
+static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    double *use_pts = g_ctx2d.path_pts;
+    int use_count = g_ctx2d.path_count;
+
+    /* Check if first arg is a Path2D object */
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        JSValue id_val = JS_GetPropertyStr(ctx, argv[0], "_path2dId");
+        int path2d_id = 0;
+        if (!JS_IsUndefined(id_val)) JS_ToInt32(ctx, &path2d_id, id_val);
+        JS_FreeValue(ctx, id_val);
+        if (path2d_id > 0 && path2d_id <= MAX_PATH2D) {
+            Path2DObj *p = &g_path2d[path2d_id - 1];
+            if (p->active && p->count > 0) {
+                use_pts = p->pts;
+                use_count = p->count;
+            }
+        }
+    }
+
+    if (use_count < 2 || !g_renderer) {
+        return JS_UNDEFINED;
+    }
+
     uint8_t r = color_to_byte(g_ctx2d.fill_color[0]);
     uint8_t g = color_to_byte(g_ctx2d.fill_color[1]);
     uint8_t b = color_to_byte(g_ctx2d.fill_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.fill_color[3]);
-    
+
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         return JS_UNDEFINED;
     }
 
     /* Transform points */
-    double *pts = malloc(g_ctx2d.path_count * 2 * sizeof(double));
-    for (int i = 0; i < g_ctx2d.path_count; i++) {
+    double *pts = malloc(use_count * 2 * sizeof(double));
+    for (int i = 0; i < use_count; i++) {
         transform_point(&pts[i*2+0], &pts[i*2+1], g_ctx2d.transform,
-                        g_ctx2d.path_pts[i*2+0], g_ctx2d.path_pts[i*2+1]);
+                        use_pts[i*2+0], use_pts[i*2+1]);
     }
-    
+
     if (g_renderer->fill_polygon) {
-        g_renderer->fill_polygon(target, pts, g_ctx2d.path_count, r, g, b, a, 0);
+        g_renderer->fill_polygon(target, pts, use_count, r, g, b, a, 0);
     }
-    
+
     free(pts);
-    clear_path();
+    /* Don't clear path - allow fill+stroke on same path */
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
-    if (g_ctx2d.path_count < 2 || !g_renderer) {
+    double *use_pts = g_ctx2d.path_pts;
+    int use_count = g_ctx2d.path_count;
+
+    /* Check if first arg is a Path2D object */
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        JSValue id_val = JS_GetPropertyStr(ctx, argv[0], "_path2dId");
+        int path2d_id = 0;
+        if (!JS_IsUndefined(id_val)) JS_ToInt32(ctx, &path2d_id, id_val);
+        JS_FreeValue(ctx, id_val);
+        if (path2d_id > 0 && path2d_id <= MAX_PATH2D) {
+            Path2DObj *p = &g_path2d[path2d_id - 1];
+            if (p->active && p->count > 0) {
+                use_pts = p->pts;
+                use_count = p->count;
+            }
+        }
+    }
+
+    if (use_count < 2 || !g_renderer) {
         return JS_UNDEFINED;
     }
-    
+
     uint8_t r = color_to_byte(g_ctx2d.stroke_color[0]);
     uint8_t g = color_to_byte(g_ctx2d.stroke_color[1]);
     uint8_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.stroke_color[3]);
-    
+    int lw = g_ctx2d.line_width;
+
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         return JS_UNDEFINED;
     }
 
-    /* Draw lines between consecutive points */
-    for (int i = 0; i < g_ctx2d.path_count - 1; i++) {
+    /* For thick lines, draw rectangles with proper lineCap and lineDash */
+    int is_dashed = (g_ctx2d.line_dash_count > 0);
+    double half_lw = lw / 2.0;
+    
+    for (int i = 0; i < use_count - 1; i++) {
         double x1, y1, x2, y2;
-        transform_point(&x1, &y1, g_ctx2d.transform,
-                        g_ctx2d.path_pts[i*2+0], g_ctx2d.path_pts[i*2+1]);
-        transform_point(&x2, &y2, g_ctx2d.transform,
-                        g_ctx2d.path_pts[i*2+2], g_ctx2d.path_pts[i*2+3]);
+        transform_point(&x1, &y1, g_ctx2d.transform, use_pts[i*2+0], use_pts[i*2+1]);
+        transform_point(&x2, &y2, g_ctx2d.transform, use_pts[i*2+2], use_pts[i*2+3]);
         
-        if (g_renderer->draw_line) {
-            g_renderer->draw_line(target, (int)x1, (int)y1, (int)x2, (int)y2, r, g, b, a);
+        double dx = x2 - x1, dy = y2 - y1;
+        double len = sqrt(dx*dx + dy*dy);
+        if (len < 0.001) continue;
+        
+        /* Direction and perpendicular */
+        double nx = dx / len, ny = dy / len;
+        double px = -ny, py = nx;
+        
+        if (is_dashed) {
+            /* Dashed stroke */
+            int dash_index = 0;
+            int drawing = 1;
+            double cycle = 0;
+            for (int di = 0; di < g_ctx2d.line_dash_count; di++) cycle += g_ctx2d.line_dash[di];
+            double seg_offset = g_ctx2d.line_dash_offset;
+            if (cycle > 0) seg_offset = fmod(seg_offset, cycle);
+            if (seg_offset < 0) seg_offset += cycle;
+            while (seg_offset >= g_ctx2d.line_dash[dash_index % g_ctx2d.line_dash_count]) {
+                seg_offset -= g_ctx2d.line_dash[dash_index % g_ctx2d.line_dash_count];
+                dash_index++;
+            }
+            drawing = (dash_index % 2 == 0) ? 1 : 0;
+            
+            double pos = 0;
+            while (pos < len) {
+                int idx = dash_index % g_ctx2d.line_dash_count;
+                double remaining = g_ctx2d.line_dash[idx] - seg_offset;
+                double end_pos = pos + remaining;
+                if (end_pos > len) end_pos = len;
+                
+                if (drawing) {
+                    /* Draw dash segment */
+                    double sx1 = x1 + nx * pos, sy1 = y1 + ny * pos;
+                    double sx2 = x1 + nx * end_pos, sy2 = y1 + ny * end_pos;
+                    double sdx = sx2 - sx1, sdy = sy2 - sy1;
+                    
+                    if (lw > 1) {
+                        /* Rectangle for this dash */
+                        double rx1 = sx1 + px * half_lw, ry1 = sy1 + py * half_lw;
+                        double rx2 = sx2 + px * half_lw, ry2 = sy2 + py * half_lw;
+                        double rx3 = sx2 - px * half_lw, ry3 = sy2 - py * half_lw;
+                        double rx4 = sx1 - px * half_lw, ry4 = sy1 - py * half_lw;
+                        
+                        if (fabs(sdx) < 0.001 || fabs(sdy) < 0.001) {
+                            /* Axis-aligned - use fill_rect */
+                            double min_x = fmin(rx1, fmin(rx2, fmin(rx3, rx4)));
+                            double max_x = fmax(rx1, fmax(rx2, fmax(rx3, rx4)));
+                            double min_y = fmin(ry1, fmin(ry2, fmin(ry3, ry4)));
+                            double max_y = fmax(ry1, fmax(ry2, fmax(ry3, ry4)));
+                            double identity[6] = {1, 0, 0, 1, 0, 0};
+                            if (g_renderer->fill_rect) {
+                                g_renderer->fill_rect(target, (int)min_x, (int)min_y,
+                                                     (int)(max_x - min_x), (int)(max_y - min_y),
+                                                     r, g, b, a, 0, identity);
+                            }
+                        } else {
+                            double dash_pts[8] = {rx1, ry1, rx2, ry2, rx3, ry3, rx4, ry4};
+                            if (g_renderer->fill_polygon) {
+                                g_renderer->fill_polygon(target, dash_pts, 4, r, g, b, a, 0);
+                            }
+                        }
+                    } else {
+                        /* Thin line */
+                        if (g_renderer->draw_line) {
+                            g_renderer->draw_line(target, (int)sx1, (int)sy1, (int)sx2, (int)sy2, r, g, b, a);
+                        }
+                    }
+                }
+                
+                double consumed = end_pos - pos;
+                seg_offset += consumed;
+                pos = end_pos;
+                if (seg_offset >= g_ctx2d.line_dash[idx]) {
+                    seg_offset = 0;
+                    dash_index++;
+                    drawing = (dash_index % 2 == 0) ? 1 : 0;
+                }
+            }
+        } else {
+            /* Solid stroke */
+            double start_ext = 0, end_ext = 0;
+            
+            /* Apply lineCap */
+            if (strcmp(g_ctx2d.line_cap, "round") == 0) {
+                start_ext = half_lw;
+                end_ext = half_lw;
+            } else if (strcmp(g_ctx2d.line_cap, "square") == 0) {
+                start_ext = half_lw;
+                end_ext = half_lw;
+            }
+            
+            /* Extended endpoints */
+            double ex1 = x1 - nx * start_ext, ey1 = y1 - ny * start_ext;
+            double ex2 = x2 + nx * end_ext, ey2 = y2 + ny * end_ext;
+            
+            /* Rectangle corners */
+            double rx1 = ex1 + px * half_lw, ry1 = ey1 + py * half_lw;
+            double rx2 = ex2 + px * half_lw, ry2 = ey2 + py * half_lw;
+            double rx3 = ex2 - px * half_lw, ry3 = ey2 - py * half_lw;
+            double rx4 = ex1 - px * half_lw, ry4 = ey1 - py * half_lw;
+            
+            if (lw > 1 && strcmp(g_ctx2d.line_cap, "round") == 0) {
+                /* Draw rectangle + circles at ends */
+                /* Rectangle vertices in order (clockwise) */
+                double rect_pts[8] = {rx1, ry1, rx2, ry2, rx3, ry3, rx4, ry4};
+                if (g_renderer->fill_polygon) {
+                    g_renderer->fill_polygon(target, rect_pts, 4, r, g, b, a, 0);
+                }
+                /* Draw circle at start and end */
+                if (g_renderer->fill_circle) {
+                    g_renderer->fill_circle(target, x1, y1, (int)half_lw, r, g, b, a, 0);
+                    g_renderer->fill_circle(target, x2, y2, (int)half_lw, r, g, b, a, 0);
+                }
+            } else {
+                /* Just rectangle for butt/square caps or thin lines */
+                if (lw > 1) {
+                    /* Use fill_rect for axis-aligned, fill_polygon for diagonal */
+                    if (fabs(dx) < 0.001 || fabs(dy) < 0.001) {
+                        /* Axis-aligned - use fill_rect */
+                        double min_x = fmin(rx1, fmin(rx2, fmin(rx3, rx4)));
+                        double max_x = fmax(rx1, fmax(rx2, fmax(rx3, rx4)));
+                        double min_y = fmin(ry1, fmin(ry2, fmin(ry3, ry4)));
+                        double max_y = fmax(ry1, fmax(ry2, fmax(ry3, ry4)));
+                        double identity[6] = {1, 0, 0, 1, 0, 0};
+                        if (g_renderer->fill_rect) {
+                            g_renderer->fill_rect(target, (int)min_x, (int)min_y,
+                                                 (int)(max_x - min_x), (int)(max_y - min_y),
+                                                 r, g, b, a, 0, identity);
+                        }
+                    } else {
+                        /* Diagonal - use fill_polygon */
+                        double rect_pts[8] = {rx1, ry1, rx2, ry2, rx3, ry3, rx4, ry4};
+                        if (g_renderer->fill_polygon) {
+                            g_renderer->fill_polygon(target, rect_pts, 4, r, g, b, a, 0);
+                        }
+                    }
+                } else {
+                    /* Use draw_line for thin lines */
+                    if (g_renderer->draw_line) {
+                        g_renderer->draw_line(target, (int)x1, (int)y1, (int)x2, (int)y2, r, g, b, a);
+                    }
+                }
+            }
         }
     }
-    
-    clear_path();
+
+    /* Don't clear path - allow fill+stroke on same path */
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
-    int x = 0, y = 0, w = 0, h = 0;
-    if (argc >= 1) JS_ToInt32(ctx, &x, argv[0]);
-    if (argc >= 2) JS_ToInt32(ctx, &y, argv[1]);
-    if (argc >= 3) JS_ToInt32(ctx, &w, argv[2]);
-    if (argc >= 4) JS_ToInt32(ctx, &h, argv[3]);
+    double dx = 0, dy = 0, dw = 0, dh = 0;
+    if (argc >= 1) JS_ToFloat64(ctx, &dx, argv[0]);
+    if (argc >= 2) JS_ToFloat64(ctx, &dy, argv[1]);
+    if (argc >= 3) JS_ToFloat64(ctx, &dw, argv[2]);
+    if (argc >= 4) JS_ToFloat64(ctx, &dh, argv[3]);
+
+    /* Check for Infinity or NaN */
+    if (isnan(dx) || isinf(dx) || isnan(dy) || isinf(dy) ||
+        isnan(dw) || isinf(dw) || isnan(dh) || isinf(dh)) {
+        return JS_UNDEFINED;
+    }
+
+    int x = (int)dx, y = (int)dy, w = (int)dw, h = (int)dh;
 
     if (!g_renderer) return JS_UNDEFINED;
 
@@ -1372,11 +2028,148 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
         uint8_t sg = color_to_byte(g_ctx2d.shadow_color[1]);
         uint8_t sb = color_to_byte(g_ctx2d.shadow_color[2]);
         uint8_t sa = color_to_byte(g_ctx2d.shadow_color[3]);
-        double shadow_m[6];
-        memcpy(shadow_m, g_ctx2d.transform, sizeof(shadow_m));
-        shadow_m[4] += g_ctx2d.shadow_offset_x;
-        shadow_m[5] += g_ctx2d.shadow_offset_y;
-        g_renderer->fill_rect(target, x, y, w, h, sr, sg, sb, sa, 0, shadow_m);
+        int blur = g_ctx2d.shadow_blur;
+        if (blur > 0) {
+            /* Draw multiple rects to approximate blur spread */
+            for (int bx = -blur; bx <= blur; bx += (blur/4 + 1)) {
+                for (int by = -blur; by <= blur; by += (blur/4 + 1)) {
+                    double sm[6];
+                    memcpy(sm, g_ctx2d.transform, sizeof(sm));
+                    sm[4] += g_ctx2d.shadow_offset_x + bx;
+                    sm[5] += g_ctx2d.shadow_offset_y + by;
+                    g_renderer->fill_rect(target, x - blur, y - blur, w + 2*blur, h + 2*blur,
+                                          sr, sg, sb, sa, 0, sm);
+                }
+            }
+        } else {
+            double shadow_m[6];
+            memcpy(shadow_m, g_ctx2d.transform, sizeof(shadow_m));
+            shadow_m[4] += g_ctx2d.shadow_offset_x;
+            shadow_m[5] += g_ctx2d.shadow_offset_y;
+            g_renderer->fill_rect(target, x, y, w, h, sr, sg, sb, sa, 0, shadow_m);
+        }
+    }
+
+    /* Handle gradient fill */
+    if (g_ctx2d.fill_gradient_id > 0 && g_renderer->put_pixels) {
+        GradientDef *grad = &g_gradients[g_ctx2d.fill_gradient_id - 1];
+        if (grad->active && grad->num_stops > 0 && w > 0 && h > 0) {
+            /* Get actual pixel coords after transform */
+            double ox, oy;
+            transform_point(&ox, &oy, g_ctx2d.transform, x, y);
+            int px = (int)ox, py = (int)oy;
+            int pw = w, ph = h;
+            /* Clamp to canvas */
+            int cw = 0, ch = 0;
+            for (int i = 0; i < 64; i++) {
+                if (g_canvases[i].id == g_ctx2d.canvas_id || (g_ctx2d.canvas_id == 0 && i == 0)) {
+                    cw = g_canvases[i].width; ch = g_canvases[i].height; break;
+                }
+            }
+            if (cw == 0) cw = g_win_w;
+            if (ch == 0) ch = g_win_h;
+            if (px < 0) { pw += px; px = 0; }
+            if (py < 0) { ph += py; py = 0; }
+            if (px + pw > cw) pw = cw - px;
+            if (py + ph > ch) ph = ch - py;
+            if (pw <= 0 || ph <= 0) goto skip_gradient;
+            uint8_t *pixels = malloc(pw * ph * 4);
+            if (!pixels) goto skip_gradient;
+            for (int row = 0; row < ph; row++) {
+                for (int col = 0; col < pw; col++) {
+                    double fpx = px + col, fpy = py + row;
+                    double t = 0;
+                    if (grad->type == 0) { /* linear */
+                        double dx = grad->x1 - grad->x0, dy = grad->y1 - grad->y0;
+                        double len2 = dx*dx + dy*dy;
+                        t = len2 > 0 ? ((fpx - grad->x0)*dx + (fpy - grad->y0)*dy) / len2 : 0;
+                    } else { /* radial */
+                        double dist = sqrt((fpx-grad->x1)*(fpx-grad->x1) + (fpy-grad->y1)*(fpy-grad->y1));
+                        t = grad->r1 > 0 ? (dist - grad->r0) / (grad->r1 - grad->r0) : 0;
+                    }
+                    if (t < 0) t = 0;
+                    if (t > 1) t = 1;
+                    /* Interpolate between stops */
+                    double cr=0,cg2=0,cb2=0,ca2=1;
+                    if (grad->num_stops == 1) {
+                        cr = grad->stops[0].r; cg2 = grad->stops[0].g;
+                        cb2 = grad->stops[0].b; ca2 = grad->stops[0].a;
+                    } else {
+                        int found = 0;
+                        for (int si = 0; si < grad->num_stops - 1; si++) {
+                            if (t >= grad->stops[si].offset && t <= grad->stops[si+1].offset) {
+                                double d = grad->stops[si+1].offset - grad->stops[si].offset;
+                                double f = d > 0 ? (t - grad->stops[si].offset) / d : 0;
+                                cr = grad->stops[si].r + f*(grad->stops[si+1].r - grad->stops[si].r);
+                                cg2= grad->stops[si].g + f*(grad->stops[si+1].g - grad->stops[si].g);
+                                cb2= grad->stops[si].b + f*(grad->stops[si+1].b - grad->stops[si].b);
+                                ca2= grad->stops[si].a + f*(grad->stops[si+1].a - grad->stops[si].a);
+                                found = 1; break;
+                            }
+                        }
+                        if (!found) {
+                            if (t <= grad->stops[0].offset) {
+                                cr=grad->stops[0].r; cg2=grad->stops[0].g;
+                                cb2=grad->stops[0].b; ca2=grad->stops[0].a;
+                            } else {
+                                int last = grad->num_stops-1;
+                                cr=grad->stops[last].r; cg2=grad->stops[last].g;
+                                cb2=grad->stops[last].b; ca2=grad->stops[last].a;
+                            }
+                        }
+                    }
+                    int idx = (row*pw+col)*4;
+                    pixels[idx+0] = (uint8_t)(cr < 0 ? 0 : cr > 255 ? 255 : cr);
+                    pixels[idx+1] = (uint8_t)(cg2 < 0 ? 0 : cg2 > 255 ? 255 : cg2);
+                    pixels[idx+2] = (uint8_t)(cb2 < 0 ? 0 : cb2 > 255 ? 255 : cb2);
+                    pixels[idx+3] = (uint8_t)(ca2 < 0 ? 0 : ca2 > 255 ? 255 : ca2);
+                }
+            }
+            g_renderer->put_pixels(target, pixels, px, py, pw, ph);
+            free(pixels);
+            return JS_UNDEFINED;
+        }
+    }
+    skip_gradient:;
+
+    /* Handle pattern fill */
+    if (g_ctx2d.fill_pattern_canvas_id > 0 && g_renderer->fill_rect_pattern) {
+        void *pat_tex = NULL;
+        int pat_w = 0, pat_h = 0;
+        for (int i = 0; i < 64; i++) {
+            if (g_canvases[i].id == g_ctx2d.fill_pattern_canvas_id) {
+                pat_tex = g_canvases[i].tex_handle;
+                pat_w = g_canvases[i].width;
+                pat_h = g_canvases[i].height;
+                break;
+            }
+        }
+        if (pat_tex) {
+            /* Check if no-repeat: use _repeat from style object */
+            int no_repeat = 0;
+            JSValue rep_val = JS_GetPropertyStr(ctx, g_fill_style_obj, "_repeat");
+            if (!JS_IsUndefined(rep_val)) {
+                const char *rs = JS_ToCString(ctx, rep_val);
+                if (rs && strcmp(rs, "no-repeat") == 0) no_repeat = 1;
+                if (rs) JS_FreeCString(ctx, rs);
+            }
+            JS_FreeValue(ctx, rep_val);
+            /* Apply transform to get actual screen coords */
+            double ox, oy;
+            transform_point(&ox, &oy, g_ctx2d.transform, x, y);
+            int px2 = (int)ox, py2 = (int)oy;
+            int pw2 = (int)(w * g_ctx2d.transform[0]);
+            int ph2 = (int)(h * g_ctx2d.transform[3]);
+            if (pw2 <= 0) pw2 = w;
+            if (ph2 <= 0) ph2 = h;
+            if (no_repeat) {
+                /* Only draw pattern size */
+                g_renderer->fill_rect_pattern(target, px2, py2, pat_w, pat_h, pat_tex);
+            } else {
+                g_renderer->fill_rect_pattern(target, px2, py2, pw2, ph2, pat_tex);
+            }
+            return JS_UNDEFINED;
+        }
     }
 
     if (g_renderer->fill_rect) {
@@ -1393,21 +2186,24 @@ static JSValue js_ctx2d_strokeRect(JSContext *ctx, JSValueConst this_val,
     if (argc >= 2) JS_ToFloat64(ctx, &y, argv[1]);
     if (argc >= 3) JS_ToFloat64(ctx, &w, argv[2]);
     if (argc >= 4) JS_ToFloat64(ctx, &h, argv[3]);
-    
+
+    /* Zero width or height means no stroke */
+    if (w == 0 || h == 0) return JS_UNDEFINED;
+
     if (!g_renderer) return JS_UNDEFINED;
-    
+
     uint8_t r = color_to_byte(g_ctx2d.stroke_color[0]);
     uint8_t g = color_to_byte(g_ctx2d.stroke_color[1]);
     uint8_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.stroke_color[3]);
-    
+
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) return JS_UNDEFINED;
-    
+
     if (g_renderer->stroke_rect) {
         g_renderer->stroke_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.line_width, g_ctx2d.global_composite);
     }
-    
+
     return JS_UNDEFINED;
 }
 
@@ -1418,16 +2214,15 @@ static JSValue js_ctx2d_clearRect(JSContext *ctx, JSValueConst this_val,
     if (argc >= 2) JS_ToFloat64(ctx, &y, argv[1]);
     if (argc >= 3) JS_ToFloat64(ctx, &w, argv[2]);
     if (argc >= 4) JS_ToFloat64(ctx, &h, argv[3]);
-    
+
     if (!g_renderer) return JS_UNDEFINED;
-    
+
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) return JS_UNDEFINED;
-    
-    if (g_renderer->clear_rect) {
-        g_renderer->clear_rect(target, (int)x, (int)y, (int)w, (int)h);
-    }
-    
+
+    /* Use clear_rect which properly clears to transparent */
+    g_renderer->clear_rect(target, (int)x, (int)y, (int)w, (int)h);
+
     return JS_UNDEFINED;
 }
 
@@ -1548,12 +2343,25 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
     double tx, ty;
     transform_point(&tx, &ty, g_ctx2d.transform, x, y);
     
+    /* Handle RTL direction */
+    const char *effective_align = g_ctx2d.text_align;
+    char rtl_align[32];
+    if (strcmp(g_ctx2d.direction, "rtl") == 0) {
+        if (strcmp(g_ctx2d.text_align, "start") == 0) {
+            strncpy(rtl_align, "right", sizeof(rtl_align)-1);
+            effective_align = rtl_align;
+        } else if (strcmp(g_ctx2d.text_align, "end") == 0) {
+            strncpy(rtl_align, "left", sizeof(rtl_align)-1);
+            effective_align = rtl_align;
+        }
+    }
+
     if (g_renderer->fill_text) {
         g_renderer->fill_text(target, text, tx, ty, r, g, b, a,
-                              g_ctx2d.font_size, g_ctx2d.text_align, g_ctx2d.text_baseline,
+                              g_ctx2d.font_size, effective_align, g_ctx2d.text_baseline,
                               g_ctx2d.font_family);
     }
-    
+
     JS_FreeCString(ctx, text);
     return JS_UNDEFINED;
 }
@@ -1626,13 +2434,25 @@ static JSValue js_ctx2d_measureText(JSContext *ctx, JSValueConst this_val,
 static JSValue js_ctx2d_createImageData(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv) {
     int w = 0, h = 0;
-    if (argc >= 1) JS_ToInt32(ctx, &w, argv[0]);
-    if (argc >= 2) JS_ToInt32(ctx, &h, argv[1]);
-    
+    if (argc >= 1) {
+        /* If first arg is an object (ImageData), copy its dimensions */
+        if (JS_IsObject(argv[0])) {
+            JSValue wv = JS_GetPropertyStr(ctx, argv[0], "width");
+            JSValue hv = JS_GetPropertyStr(ctx, argv[0], "height");
+            if (!JS_IsUndefined(wv)) JS_ToInt32(ctx, &w, wv);
+            if (!JS_IsUndefined(hv)) JS_ToInt32(ctx, &h, hv);
+            JS_FreeValue(ctx, wv);
+            JS_FreeValue(ctx, hv);
+        } else {
+            JS_ToInt32(ctx, &w, argv[0]);
+            if (argc >= 2) JS_ToInt32(ctx, &h, argv[1]);
+        }
+    }
+
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, w));
     JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, h));
-    
+
     /* Create data array */
     JSValue data_arr = JS_NewArray(ctx);
     int size = w * h * 4;
@@ -1640,7 +2460,7 @@ static JSValue js_ctx2d_createImageData(JSContext *ctx, JSValueConst this_val,
         JS_SetPropertyUint32(ctx, data_arr, i, JS_NewInt32(ctx, 0));
     }
     JS_SetPropertyStr(ctx, obj, "data", data_arr);
-    
+
     return obj;
 }
 
@@ -1694,9 +2514,9 @@ static JSValue js_ctx2d_putImageData(JSContext *ctx, JSValueConst this_val,
     if (argc < 3 || !g_renderer) return JS_UNDEFINED;
 
     JSValue img_data = argv[0];
-    int dx = 0, dy = 0;
-    JS_ToInt32(ctx, &dx, argv[1]);
-    JS_ToInt32(ctx, &dy, argv[2]);
+    int dest_x = 0, dest_y = 0;
+    JS_ToInt32(ctx, &dest_x, argv[1]);
+    JS_ToInt32(ctx, &dest_y, argv[2]);
 
     JSValue data_val = JS_GetPropertyStr(ctx, img_data, "data");
     if (!JS_IsArray(data_val)) {
@@ -1709,30 +2529,65 @@ static JSValue js_ctx2d_putImageData(JSContext *ctx, JSValueConst this_val,
     JS_ToInt32(ctx, &len, len_val);
     JS_FreeValue(ctx, len_val);
 
-    uint8_t *pixels = malloc(len);
-    for (int i = 0; i < len; i++) {
-        JSValue v = JS_GetPropertyUint32(ctx, data_val, i);
-        int val = 0;
-        JS_ToInt32(ctx, &val, v);
-        pixels[i] = (uint8_t)val;
-        JS_FreeValue(ctx, v);
-    }
-
-    int w = len / 4;
-    int h = 1;
+    int src_w = len / 4;
+    int src_h = 1;
     JSValue w_val = JS_GetPropertyStr(ctx, img_data, "width");
-    JS_ToInt32(ctx, &w, w_val);
+    JS_ToInt32(ctx, &src_w, w_val);
     JS_FreeValue(ctx, w_val);
     JSValue h_val = JS_GetPropertyStr(ctx, img_data, "height");
-    JS_ToInt32(ctx, &h, h_val);
+    JS_ToInt32(ctx, &src_h, h_val);
     JS_FreeValue(ctx, h_val);
 
-    void *target = get_current_canvas_texture(ctx, this_val);
-    if (target && g_renderer->put_pixels) {
-        g_renderer->put_pixels(target, pixels, dx, dy, w, h);
+    if (argc >= 7) {
+        /* Dirty rect form: putImageData(imgdata, dx, dy, dirtyX, dirtyY, dirtyW, dirtyH) */
+        int dirty_x = 0, dirty_y = 0, dirty_w = src_w, dirty_h = src_h;
+        JS_ToInt32(ctx, &dirty_x, argv[3]);
+        JS_ToInt32(ctx, &dirty_y, argv[4]);
+        JS_ToInt32(ctx, &dirty_w, argv[5]);
+        JS_ToInt32(ctx, &dirty_h, argv[6]);
+        /* Clamp dirty rect to src bounds */
+        if (dirty_x < 0) { dirty_w += dirty_x; dirty_x = 0; }
+        if (dirty_y < 0) { dirty_h += dirty_y; dirty_y = 0; }
+        if (dirty_x + dirty_w > src_w) dirty_w = src_w - dirty_x;
+        if (dirty_y + dirty_h > src_h) dirty_h = src_h - dirty_y;
+        if (dirty_w <= 0 || dirty_h <= 0) { JS_FreeValue(ctx, data_val); return JS_UNDEFINED; }
+        /* Read only the dirty rect pixels */
+        uint8_t *dirty_pixels = malloc(dirty_w * dirty_h * 4);
+        if (!dirty_pixels) { JS_FreeValue(ctx, data_val); return JS_UNDEFINED; }
+        for (int row = 0; row < dirty_h; row++) {
+            for (int col = 0; col < dirty_w; col++) {
+                int src_idx = ((dirty_y + row) * src_w + (dirty_x + col)) * 4;
+                int dst_idx = (row * dirty_w + col) * 4;
+                for (int c = 0; c < 4; c++) {
+                    JSValue v = JS_GetPropertyUint32(ctx, data_val, src_idx + c);
+                    int val = 0; JS_ToInt32(ctx, &val, v); JS_FreeValue(ctx, v);
+                    dirty_pixels[dst_idx + c] = (uint8_t)val;
+                }
+            }
+        }
+        void *target = get_current_canvas_texture(ctx, this_val);
+        if (target && g_renderer->put_pixels) {
+            g_renderer->put_pixels(target, dirty_pixels, dest_x + dirty_x, dest_y + dirty_y, dirty_w, dirty_h);
+        }
+        free(dirty_pixels);
+    } else {
+        /* Full image form */
+        uint8_t *pixels = malloc(src_w * src_h * 4);
+        if (!pixels) { JS_FreeValue(ctx, data_val); return JS_UNDEFINED; }
+        for (int i = 0; i < src_w * src_h * 4; i++) {
+            JSValue v = JS_GetPropertyUint32(ctx, data_val, i);
+            int val = 0;
+            JS_ToInt32(ctx, &val, v);
+            pixels[i] = (uint8_t)val;
+            JS_FreeValue(ctx, v);
+        }
+        void *target = get_current_canvas_texture(ctx, this_val);
+        if (target && g_renderer->put_pixels) {
+            g_renderer->put_pixels(target, pixels, dest_x, dest_y, src_w, src_h);
+        }
+        free(pixels);
     }
 
-    free(pixels);
     JS_FreeValue(ctx, data_val);
     return JS_UNDEFINED;
 }
@@ -1780,42 +2635,172 @@ static JSValue js_ctx2d_clip(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_isPointInPath(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
-    /* Simplified - always return false for now */
-    return JS_FALSE;
+    if (argc < 2 || g_ctx2d.path_count < 3) return JS_FALSE;
+    double px = 0, py = 0;
+    JS_ToFloat64(ctx, &px, argv[0]);
+    JS_ToFloat64(ctx, &py, argv[1]);
+    /* Ray casting algorithm - inverse transform the point */
+    double m[6]; memcpy(m, g_ctx2d.transform, sizeof(m));
+    /* Simple case: use path_pts directly */
+    int n = g_ctx2d.path_count;
+    int inside = 0;
+    for (int i = 0, j = n-1; i < n; j = i++) {
+        double xi = g_ctx2d.path_pts[i*2], yi = g_ctx2d.path_pts[i*2+1];
+        double xj = g_ctx2d.path_pts[j*2], yj = g_ctx2d.path_pts[j*2+1];
+        if (((yi > py) != (yj > py)) &&
+            (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+            inside = !inside;
+        }
+    }
+    return JS_NewBool(ctx, inside);
 }
 
 static JSValue js_ctx2d_isPointInStroke(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv) {
+    if (argc < 2 || g_ctx2d.path_count < 2) return JS_FALSE;
+    double px = 0, py = 0;
+    JS_ToFloat64(ctx, &px, argv[0]);
+    JS_ToFloat64(ctx, &py, argv[1]);
+    double half_lw = g_ctx2d.line_width / 2.0;
+    for (int i = 0; i < g_ctx2d.path_count - 1; i++) {
+        double x1 = g_ctx2d.path_pts[i*2], y1 = g_ctx2d.path_pts[i*2+1];
+        double x2 = g_ctx2d.path_pts[(i+1)*2], y2 = g_ctx2d.path_pts[(i+1)*2+1];
+        double dx = x2-x1, dy = y2-y1;
+        double len2 = dx*dx + dy*dy;
+        if (len2 < 0.0001) continue;
+        double t = ((px-x1)*dx + (py-y1)*dy) / len2;
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        double cx = x1 + t*dx - px, cy = y1 + t*dy - py;
+        double dist2 = cx*cx + cy*cy;
+        if (dist2 <= half_lw * half_lw) return JS_TRUE;
+    }
     return JS_FALSE;
 }
 
 static JSValue js_gradient_addColorStop(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv) {
-    /* No-op for limited gradient support */
+    if (argc < 2) return JS_UNDEFINED;
+    /* Get gradient ID from 'this' object */
+    JSValue gid_val = JS_GetPropertyStr(ctx, this_val, "_gradId");
+    int gid = 0;
+    if (!JS_IsUndefined(gid_val)) JS_ToInt32(ctx, &gid, gid_val);
+    JS_FreeValue(ctx, gid_val);
+    if (gid <= 0 || gid > MAX_GRADIENTS) return JS_UNDEFINED;
+    GradientDef *grad = &g_gradients[gid - 1];
+    if (grad->num_stops >= MAX_COLOR_STOPS) return JS_UNDEFINED;
+    double offset = 0;
+    JS_ToFloat64(ctx, &offset, argv[0]);
+    double col[4] = {0, 0, 0, 1};
+    color_from_js_checked(argv[1], col);
+    int si = grad->num_stops++;
+    grad->stops[si].offset = offset;
+    grad->stops[si].r = color_to_byte(col[0]);
+    grad->stops[si].g = color_to_byte(col[1]);
+    grad->stops[si].b = color_to_byte(col[2]);
+    grad->stops[si].a = color_to_byte(col[3]);
+    /* Sort stops by offset using bubble sort */
+    for (int i = 0; i < grad->num_stops - 1; i++) {
+        for (int j = i + 1; j < grad->num_stops; j++) {
+            if (grad->stops[i].offset > grad->stops[j].offset) {
+                /* Swap stops */
+                double tmp_offset = grad->stops[i].offset;
+                uint8_t tmp_r = grad->stops[i].r, tmp_g = grad->stops[i].g;
+                uint8_t tmp_b = grad->stops[i].b, tmp_a = grad->stops[i].a;
+                grad->stops[i].offset = grad->stops[j].offset;
+                grad->stops[i].r = grad->stops[j].r; grad->stops[i].g = grad->stops[j].g;
+                grad->stops[i].b = grad->stops[j].b; grad->stops[i].a = grad->stops[j].a;
+                grad->stops[j].offset = tmp_offset;
+                grad->stops[j].r = tmp_r; grad->stops[j].g = tmp_g;
+                grad->stops[j].b = tmp_b; grad->stops[j].a = tmp_a;
+            }
+        }
+    }
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_createLinearGradient(JSContext *ctx, JSValueConst this_val,
                                              int argc, JSValueConst *argv) {
-    /* Return a simple object - gradient support is limited */
+    /* Find free gradient slot */
+    int slot = -1;
+    for (int i = 0; i < MAX_GRADIENTS; i++) {
+        if (!g_gradients[i].active) { slot = i; break; }
+    }
+    if (slot < 0) return JS_NULL;
+    GradientDef *grad = &g_gradients[slot];
+    memset(grad, 0, sizeof(*grad));
+    grad->type = 0;
+    grad->active = 1;
+    if (argc >= 4) {
+        JS_ToFloat64(ctx, &grad->x0, argv[0]);
+        JS_ToFloat64(ctx, &grad->y0, argv[1]);
+        JS_ToFloat64(ctx, &grad->x1, argv[2]);
+        JS_ToFloat64(ctx, &grad->y1, argv[3]);
+    }
+    int gid = slot + 1;
     JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "linear"));
-    JS_SetPropertyStr(ctx, obj, "addColorStop",
-        JS_NewCFunction(ctx, js_gradient_addColorStop, "addColorStop", 2));
+    JS_SetPropertyStr(ctx, obj, "_gradId", JS_NewInt32(ctx, gid));
+    JSValue addStop = JS_NewCFunction(ctx, js_gradient_addColorStop, "addColorStop", 2);
+    JS_SetPropertyStr(ctx, obj, "addColorStop", addStop);
     return obj;
 }
 
 static JSValue js_ctx2d_createRadialGradient(JSContext *ctx, JSValueConst this_val,
                                              int argc, JSValueConst *argv) {
+    int slot = -1;
+    for (int i = 0; i < MAX_GRADIENTS; i++) {
+        if (!g_gradients[i].active) { slot = i; break; }
+    }
+    if (slot < 0) return JS_NULL;
+    GradientDef *grad = &g_gradients[slot];
+    memset(grad, 0, sizeof(*grad));
+    grad->type = 1;
+    grad->active = 1;
+    if (argc >= 6) {
+        JS_ToFloat64(ctx, &grad->x0, argv[0]);
+        JS_ToFloat64(ctx, &grad->y0, argv[1]);
+        JS_ToFloat64(ctx, &grad->r0, argv[2]);
+        JS_ToFloat64(ctx, &grad->x1, argv[3]);
+        JS_ToFloat64(ctx, &grad->y1, argv[4]);
+        JS_ToFloat64(ctx, &grad->r1, argv[5]);
+    }
+    int gid = slot + 1;
     JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "radial"));
+    JS_SetPropertyStr(ctx, obj, "_gradId", JS_NewInt32(ctx, gid));
+    JSValue addStop = JS_NewCFunction(ctx, js_gradient_addColorStop, "addColorStop", 2);
+    JS_SetPropertyStr(ctx, obj, "addColorStop", addStop);
+    return obj;
+}
+
+static JSValue js_ctx2d_createConicGradient(JSContext *ctx, JSValueConst this_val,
+                                            int argc, JSValueConst *argv) {
+    /* Simple stub - returns object with addColorStop */
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "addColorStop",
+        JS_NewCFunction(ctx, js_gradient_addColorStop, "addColorStop", 2));
     return obj;
 }
 
 static JSValue js_ctx2d_createPattern(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
-    /* Return null for now */
-    return JS_NULL;
+    if (argc < 1) return JS_NULL;
+    /* Get canvas ID from source */
+    JSValue src = argv[0];
+    JSValue cid_val = JS_GetPropertyStr(ctx, src, "_canvasId");
+    int canvas_id = 0;
+    if (!JS_IsUndefined(cid_val)) JS_ToInt32(ctx, &canvas_id, cid_val);
+    JS_FreeValue(ctx, cid_val);
+    if (canvas_id == 0) return JS_NULL;
+    const char *rep = "repeat";
+    if (argc >= 2) {
+        const char *r2 = JS_ToCString(ctx, argv[1]);
+        if (r2) rep = r2; /* leak intentionally for simplicity - use static */
+        JS_FreeCString(ctx, r2);
+    }
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "_patternCanvasId", JS_NewInt32(ctx, canvas_id));
+    JS_SetPropertyStr(ctx, obj, "_repeat", JS_NewString(ctx, rep));
+    return obj;
 }
 
 static const JSCFunctionListEntry js_ctx2d_funcs[] = {
@@ -1854,8 +2839,13 @@ static const JSCFunctionListEntry js_ctx2d_funcs[] = {
     JS_CFUNC_DEF("isPointInPath", 2, js_ctx2d_isPointInPath),
     JS_CFUNC_DEF("isPointInStroke", 2, js_ctx2d_isPointInStroke),
     JS_CFUNC_DEF("createLinearGradient", 4, js_ctx2d_createLinearGradient),
-    JS_CFUNC_DEF("createRadialGradient", 7, js_ctx2d_createRadialGradient),
+    JS_CFUNC_DEF("createRadialGradient", 6, js_ctx2d_createRadialGradient),
+    JS_CFUNC_DEF("createConicGradient", 3, js_ctx2d_createConicGradient),
     JS_CFUNC_DEF("createPattern", 2, js_ctx2d_createPattern),
+    JS_CFUNC_DEF("setLineDash", 1, js_ctx2d_setLineDash),
+    JS_CFUNC_DEF("getLineDash", 0, js_ctx2d_getLineDash),
+    JS_CFUNC_DEF("getContextAttributes", 0, js_ctx2d_getContextAttributes),
+    JS_CFUNC_DEF("drawFocusIfNeeded", 1, js_ctx2d_drawFocusIfNeeded),
 };
 
 static const JSCFunctionListEntry js_ctx2d_props[] = {
@@ -1872,11 +2862,30 @@ static const JSCFunctionListEntry js_ctx2d_props[] = {
     JS_CGETSET_DEF("font", js_ctx2d_get_font, js_ctx2d_set_font),
     JS_CGETSET_DEF("textAlign", js_ctx2d_get_textAlign, js_ctx2d_set_textAlign),
     JS_CGETSET_DEF("textBaseline", js_ctx2d_get_textBaseline, js_ctx2d_set_textBaseline),
+    JS_CGETSET_DEF("lineDashOffset", js_ctx2d_get_lineDashOffset, js_ctx2d_set_lineDashOffset),
+    JS_CGETSET_DEF("lineCap", js_ctx2d_get_lineCap, js_ctx2d_set_lineCap),
+    JS_CGETSET_DEF("lineJoin", js_ctx2d_get_lineJoin, js_ctx2d_set_lineJoin),
+    JS_CGETSET_DEF("miterLimit", js_ctx2d_get_miterLimit, js_ctx2d_set_miterLimit),
+    JS_CGETSET_DEF("filter", js_ctx2d_get_filter, js_ctx2d_set_filter),
+    JS_CGETSET_DEF("direction", js_ctx2d_get_direction, js_ctx2d_set_direction),
+    JS_CGETSET_DEF("imageSmoothingQuality", js_ctx2d_get_imageSmoothingQuality, js_ctx2d_set_imageSmoothingQuality),
 };
 
 /* ============================================================================
  * Canvas Element
  * ============================================================================ */
+
+static JSValue js_canvas_toBlob(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
+    JSValue blob = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, blob, "type", JS_NewString(ctx, "image/png"));
+    JS_SetPropertyStr(ctx, blob, "size", JS_NewInt32(ctx, 1000));
+    JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 1, &blob);
+    JS_FreeValue(ctx, result);
+    JS_FreeValue(ctx, blob);
+    return JS_UNDEFINED;
+}
 
 static JSValue js_canvas_toDataURL(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
@@ -1972,8 +2981,16 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                     if (g_renderer && g_renderer->create_texture) {
                         g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
                     }
+                    /* Clear the new texture */
+                    if (g_canvases[i].tex_handle && g_renderer && g_renderer->clear_rect) {
+                        g_renderer->clear_rect(g_canvases[i].tex_handle, 0, 0, g_canvases[i].width, g_canvases[i].height);
+                    }
                 } else {
                     g_canvases[i].width = new_width;
+                    /* Clear main canvas */
+                    if (g_renderer && g_renderer->clear_rect) {
+                        g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
+                    }
                 }
             }
             break;
@@ -2010,8 +3027,16 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                     if (g_renderer && g_renderer->create_texture) {
                         g_canvases[i].tex_handle = g_renderer->create_texture(g_canvases[i].width, g_canvases[i].height);
                     }
+                    /* Clear the new texture */
+                    if (g_canvases[i].tex_handle && g_renderer && g_renderer->clear_rect) {
+                        g_renderer->clear_rect(g_canvases[i].tex_handle, 0, 0, g_canvases[i].width, g_canvases[i].height);
+                    }
                 } else {
                     g_canvases[i].height = new_height;
+                    /* Clear main canvas */
+                    if (g_renderer && g_renderer->clear_rect) {
+                        g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
+                    }
                 }
             }
             break;
@@ -2880,6 +3905,8 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
         JS_NewCFunction(ctx, js_canvas_getContext, "getContext", 1));
     JS_SetPropertyStr(ctx, obj, "toDataURL",
         JS_NewCFunction(ctx, js_canvas_toDataURL, "toDataURL", 0));
+    JS_SetPropertyStr(ctx, obj, "toBlob",
+        JS_NewCFunction(ctx, js_canvas_toBlob, "toBlob", 1));
     JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, id));
     JS_SetPropertyStr(ctx, obj, "style",            JS_NewObject(ctx));
     JS_SetPropertyStr(ctx, obj, "addEventListener",
@@ -3700,6 +4727,22 @@ static int jscore_qjs_init(RendererInterface *renderer,
     strncpy(g_ctx2d.font_family, "sans-serif", sizeof(g_ctx2d.font_family) - 1);
     strcpy(g_ctx2d.text_align, "start");
     strcpy(g_ctx2d.text_baseline, "alphabetic");
+    g_ctx2d.line_dash_count = 0;
+    g_ctx2d.line_dash_offset = 0.0;
+    strcpy(g_ctx2d.line_cap, "butt");
+    strcpy(g_ctx2d.line_join, "miter");
+    g_ctx2d.miter_limit = 10.0;
+    strcpy(g_ctx2d.filter, "none");
+    strcpy(g_ctx2d.direction, "ltr");
+    strcpy(g_ctx2d.smoothing_quality, "low");
+    g_ctx2d.fill_gradient_id = 0;
+    g_ctx2d.stroke_gradient_id = 0;
+    g_ctx2d.fill_pattern_canvas_id = 0;
+    g_ctx2d.stroke_pattern_canvas_id = 0;
+    memset(g_gradients, 0, sizeof(g_gradients));
+    memset(g_path2d, 0, sizeof(g_path2d));
+    g_fill_style_obj = JS_UNDEFINED;
+    g_stroke_style_obj = JS_UNDEFINED;
 
     memset(g_timers, 0, sizeof(g_timers));
     memset(g_key_listeners, 0, sizeof(g_key_listeners));
@@ -3792,6 +4835,124 @@ static void jscore_qjs_quit(void) {
 /* ============================================================================
  * Global Setup
  * ============================================================================ */
+
+/* ============================================================================
+ * Path2D
+ * ============================================================================ */
+
+static void path2d_add_pt(int id, double x, double y) {
+    Path2DObj *p = &g_path2d[id];
+    if (p->count >= p->capacity) {
+        int nc = p->capacity == 0 ? 32 : p->capacity * 2;
+        p->pts = realloc(p->pts, nc * 2 * sizeof(double));
+        p->capacity = nc;
+    }
+    p->pts[p->count*2] = x;
+    p->pts[p->count*2+1] = y;
+    p->count++;
+}
+
+static void parse_svg_path(int path2d_id, const char *d) {
+    double cx = 0, cy = 0, sx = 0, sy = 0;
+    const char *p = d;
+    char cmd = 'M';
+    while (*p) {
+        while (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n') p++;
+        if (!*p) break;
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) {
+            cmd = *p++;
+        }
+        while (*p == ' ' || *p == ',') p++;
+        if (cmd == 'M' || cmd == 'm') {
+            char *end; double vx = strtod(p, &end); p = end;
+            while (*p == ' ' || *p == ',') p++;
+            char *end2; double vy = strtod(p, &end2); p = end2;
+            if (cmd == 'm') { vx += cx; vy += cy; }
+            cx = vx; cy = vy; sx = cx; sy = cy;
+            path2d_add_pt(path2d_id, cx, cy);
+        } else if (cmd == 'L' || cmd == 'l') {
+            char *end; double vx = strtod(p, &end); p = end;
+            while (*p == ' ' || *p == ',') p++;
+            char *end2; double vy = strtod(p, &end2); p = end2;
+            if (cmd == 'l') { vx += cx; vy += cy; }
+            cx = vx; cy = vy;
+            path2d_add_pt(path2d_id, cx, cy);
+        } else if (cmd == 'H' || cmd == 'h') {
+            char *end; double vx = strtod(p, &end); p = end;
+            if (cmd == 'h') vx += cx;
+            cx = vx;
+            path2d_add_pt(path2d_id, cx, cy);
+        } else if (cmd == 'V' || cmd == 'v') {
+            char *end; double vy = strtod(p, &end); p = end;
+            if (cmd == 'v') vy += cy;
+            cy = vy;
+            path2d_add_pt(path2d_id, cx, cy);
+        } else if (cmd == 'Z' || cmd == 'z') {
+            path2d_add_pt(path2d_id, sx, sy);
+            cx = sx; cy = sy;
+        } else {
+            p++; /* skip unknown */
+        }
+    }
+}
+
+static JSValue js_path2d_rect(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    if (argc < 4) return JS_UNDEFINED;
+    JSValue id_val = JS_GetPropertyStr(ctx, this_val, "_path2dId");
+    int id = 0; JS_ToInt32(ctx, &id, id_val); JS_FreeValue(ctx, id_val);
+    if (id <= 0 || id > MAX_PATH2D) return JS_UNDEFINED;
+    id--; /* 0-indexed */
+    double x=0,y=0,w=0,h=0;
+    JS_ToFloat64(ctx, &x, argv[0]); JS_ToFloat64(ctx, &y, argv[1]);
+    JS_ToFloat64(ctx, &w, argv[2]); JS_ToFloat64(ctx, &h, argv[3]);
+    path2d_add_pt(id, x, y);
+    path2d_add_pt(id, x+w, y);
+    path2d_add_pt(id, x+w, y+h);
+    path2d_add_pt(id, x, y+h);
+    path2d_add_pt(id, x, y);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_path2d_addPath(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    JSValue id_val = JS_GetPropertyStr(ctx, this_val, "_path2dId");
+    int id = 0; JS_ToInt32(ctx, &id, id_val); JS_FreeValue(ctx, id_val);
+    if (id <= 0 || id > MAX_PATH2D) return JS_UNDEFINED;
+    id--;
+    JSValue src_id_val = JS_GetPropertyStr(ctx, argv[0], "_path2dId");
+    int src_id = 0; JS_ToInt32(ctx, &src_id, src_id_val); JS_FreeValue(ctx, src_id_val);
+    if (src_id <= 0 || src_id > MAX_PATH2D) return JS_UNDEFINED;
+    src_id--;
+    Path2DObj *src = &g_path2d[src_id];
+    for (int i = 0; i < src->count; i++) {
+        path2d_add_pt(id, src->pts[i*2], src->pts[i*2+1]);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_path2d_new(JSContext *ctx, JSValueConst new_target,
+                             int argc, JSValueConst *argv) {
+    /* Find free slot */
+    int slot = -1;
+    for (int i = 0; i < MAX_PATH2D; i++) {
+        if (!g_path2d[i].active) { slot = i; break; }
+    }
+    if (slot < 0) return JS_ThrowOutOfMemory(ctx);
+    g_path2d[slot].active = 1;
+    g_path2d[slot].count = 0;
+    /* If arg is a string, parse SVG path */
+    if (argc >= 1 && JS_IsString(argv[0])) {
+        const char *d = JS_ToCString(ctx, argv[0]);
+        if (d) { parse_svg_path(slot, d); JS_FreeCString(ctx, d); }
+    }
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "_path2dId", JS_NewInt32(ctx, slot + 1));
+    JS_SetPropertyStr(ctx, obj, "rect", JS_NewCFunction(ctx, js_path2d_rect, "rect", 4));
+    JS_SetPropertyStr(ctx, obj, "addPath", JS_NewCFunction(ctx, js_path2d_addPath, "addPath", 1));
+    return obj;
+}
 
 static void setup_globals_object(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -3896,6 +5057,10 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyFunctionList(ctx, localStorage, js_storage_props,
                                sizeof(js_storage_props) / sizeof(js_storage_props[0]));
     JS_SetPropertyStr(ctx, global, "localStorage", localStorage);
+
+    /* Path2D constructor */
+    JSValue path2d_ctor = JS_NewCFunction2(ctx, js_path2d_new, "Path2D", 0, JS_CFUNC_constructor, 0);
+    JS_SetPropertyStr(ctx, global, "Path2D", path2d_ctor);
 
     /* Global utility functions */
     JS_SetPropertyStr(ctx, global, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));

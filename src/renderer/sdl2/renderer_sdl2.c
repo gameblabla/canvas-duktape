@@ -435,7 +435,25 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
             SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
             SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 3) {
-        bm = SDL_BLENDMODE_NONE; /* copy: replace */
+        /* copy: clear entire canvas, then draw with BLENDMODE_NONE */
+        SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderFillRect(g_sdl_renderer, NULL); /* clear entire target */
+        bm = SDL_BLENDMODE_NONE;
+    } else if (blend_add == 4) { /* source-in: Src * DstA */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 5) { /* source-out: Src * (1-DstA) */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 6) { /* destination-in: Dst * SrcA */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 7) { /* xor: Src*(1-DstA) + Dst*(1-SrcA) */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 8) { /* multiply */
+        bm = SDL_BLENDMODE_MOD;
     } else {
         bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     }
@@ -494,11 +512,13 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
     int pw, ph;
     SDL_QueryTexture(pat, NULL, NULL, &pw, &ph);
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
+    /* Tile the pattern */
     for (int ty = y; ty < y+h; ty += ph) {
         for (int tx = x; tx < x+w; tx += pw) {
             int dw = (tx+pw > x+w) ? (x+w-tx) : pw;
             int dh = (ty+ph > y+h) ? (y+h-ty) : ph;
-            SDL_Rect src = {0,0,dw,dh}, dst = {tx,ty,dw,dh};
+            SDL_Rect src = {0, 0, pw, ph};
+            SDL_Rect dst = {tx, ty, dw, dh};
             SDL_RenderCopy(g_sdl_renderer, pat, &src, &dst);
         }
     }
@@ -719,10 +739,37 @@ static void r_fill_polygon(void* target, const double* pts, int count,
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || count < 3) return;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
+    SDL_BlendMode bm;
+    if (blend_add == 1) {
+        bm = SDL_BLENDMODE_ADD;
+    } else if (blend_add == 2) {
+        bm = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 3) {
+        SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderFillRect(g_sdl_renderer, NULL);
+        bm = SDL_BLENDMODE_NONE;
+    } else if (blend_add == 4) {
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 5) {
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 6) {
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 7) {
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 8) {
+        bm = SDL_BLENDMODE_MOD;
+    } else {
+        bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    }
+    SDL_SetRenderDrawBlendMode(g_sdl_renderer, bm);
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
-    SDL_SetRenderDrawBlendMode(g_sdl_renderer,
-        blend_add ? SDL_BLENDMODE_ADD :
-        (a < 255  ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE));
     double min_x=pts[0], max_x=pts[0], min_y=pts[1], max_y=pts[1];
     for (int i=1; i<count; i++) {
         double px=pts[i*2], py=pts[i*2+1];
