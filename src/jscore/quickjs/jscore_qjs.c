@@ -203,6 +203,11 @@ static CanvasMouseListener g_mouse_listeners[MAX_MOUSE_LISTENERS];
 /* Base directory for resolving relative paths (set from HTML file location) */
 static char g_jscore_base_dir[1024] = {0};
 
+/* Cached DOM elements (body, head, documentElement) */
+static JSValue g_cached_body = JS_UNDEFINED;
+static JSValue g_cached_head = JS_UNDEFINED;
+static JSValue g_cached_documentElement = JS_UNDEFINED;
+
 /* localStorage */
 typedef struct {
     char key[256];
@@ -930,7 +935,14 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                     src_clean[sizeof(src_clean) - 1] = '\0';
                     char *qs = strchr(src_clean, '?');
                     if (qs) *qs = '\0';
-                    g_images[idx].img_handle = g_renderer->load_image_file(src_clean);
+                    /* Resolve path relative to HTML file directory */
+                    char full_path[1024];
+                    if (src_clean[0] == '/' || g_jscore_base_dir[0] == '\0') {
+                        snprintf(full_path, sizeof(full_path), "%s", src_clean);
+                    } else {
+                        snprintf(full_path, sizeof(full_path), "%s/%s", g_jscore_base_dir, src_clean);
+                    }
+                    g_images[idx].img_handle = g_renderer->load_image_file(full_path);
                     if (g_images[idx].img_handle && g_renderer->get_image_size) {
                         g_renderer->get_image_size(g_images[idx].img_handle,
                                                    &g_images[idx].width,
@@ -5010,15 +5022,27 @@ static JSValue js_document_createElementNS(JSContext *ctx, JSValueConst this_val
 }
 
 static JSValue js_document_get_body(JSContext *ctx, JSValueConst this_val) {
-    return js_make_element_stub(ctx);
+    if (JS_IsUndefined(g_cached_body)) {
+        g_cached_body = js_make_element_stub(ctx);
+        JS_SetPropertyStr(ctx, g_cached_body, "nodeName", JS_NewString(ctx, "BODY"));
+    }
+    return JS_DupValue(ctx, g_cached_body);
 }
 
 static JSValue js_document_get_documentElement(JSContext *ctx, JSValueConst this_val) {
-    return js_make_element_stub(ctx);
+    if (JS_IsUndefined(g_cached_documentElement)) {
+        g_cached_documentElement = js_make_element_stub(ctx);
+        JS_SetPropertyStr(ctx, g_cached_documentElement, "nodeName", JS_NewString(ctx, "HTML"));
+    }
+    return JS_DupValue(ctx, g_cached_documentElement);
 }
 
 static JSValue js_document_get_head(JSContext *ctx, JSValueConst this_val) {
-    return js_make_element_stub(ctx);
+    if (JS_IsUndefined(g_cached_head)) {
+        g_cached_head = js_make_element_stub(ctx);
+        JS_SetPropertyStr(ctx, g_cached_head, "nodeName", JS_NewString(ctx, "HEAD"));
+    }
+    return JS_DupValue(ctx, g_cached_head);
 }
 
 static JSValue js_document_querySelector(JSContext *ctx, JSValueConst this_val,
@@ -5301,6 +5325,26 @@ static const JSCFunctionListEntry js_window_funcs[] = {
     JS_CFUNC_DEF("close", 0, js_noop),
 };
 
+static JSValue js_window_get_frameElement(JSContext *ctx, JSValueConst this_val) {
+    return JS_NULL;
+}
+
+static JSValue js_window_get_top(JSContext *ctx, JSValueConst this_val) {
+    return JS_GetGlobalObject(ctx);
+}
+
+static JSValue js_window_get_parent(JSContext *ctx, JSValueConst this_val) {
+    return JS_GetGlobalObject(ctx);
+}
+
+static JSValue js_window_get_length(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, 0);
+}
+
+static JSValue js_window_get_closed(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewBool(ctx, 0);
+}
+
 static const JSCFunctionListEntry js_window_props[] = {
     JS_CGETSET_DEF("innerWidth", js_window_get_innerWidth, NULL),
     JS_CGETSET_DEF("innerHeight", js_window_get_innerHeight, NULL),
@@ -5308,6 +5352,11 @@ static const JSCFunctionListEntry js_window_props[] = {
     JS_CGETSET_DEF("outerHeight", js_window_get_outerHeight, NULL),
     JS_CGETSET_DEF("devicePixelRatio", js_window_get_devicePixelRatio, NULL),
     JS_CGETSET_DEF("location", js_window_get_location, NULL),
+    JS_CGETSET_DEF("frameElement", js_window_get_frameElement, NULL),
+    JS_CGETSET_DEF("top", js_window_get_top, NULL),
+    JS_CGETSET_DEF("parent", js_window_get_parent, NULL),
+    JS_CGETSET_DEF("length", js_window_get_length, NULL),
+    JS_CGETSET_DEF("closed", js_window_get_closed, NULL),
 };
 
 /* ============================================================================
@@ -5909,6 +5958,20 @@ static void jscore_qjs_quit(void) {
         }
     }
 
+    /* Free cached DOM elements */
+    if (!JS_IsUndefined(g_cached_body)) {
+        JS_FreeValue(g_ctx, g_cached_body);
+        g_cached_body = JS_UNDEFINED;
+    }
+    if (!JS_IsUndefined(g_cached_head)) {
+        JS_FreeValue(g_ctx, g_cached_head);
+        g_cached_head = JS_UNDEFINED;
+    }
+    if (!JS_IsUndefined(g_cached_documentElement)) {
+        JS_FreeValue(g_ctx, g_cached_documentElement);
+        g_cached_documentElement = JS_UNDEFINED;
+    }
+
     /* Free path and state stack */
     if (g_ctx2d.path_pts) {
         free(g_ctx2d.path_pts);
@@ -6468,6 +6531,11 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, document, "webkitHidden", JS_NewBool(ctx, 0));
     JS_SetPropertyStr(ctx, document, "mozHidden", JS_NewBool(ctx, 0));
     JS_SetPropertyStr(ctx, document, "msHidden", JS_NewBool(ctx, 0));
+    /* Add compatMode (needed by some libraries like dat.gui) */
+    JS_SetPropertyStr(ctx, document, "compatMode", JS_NewString(ctx, "CSS1Compat"));
+    /* Add document.write (some libraries use it) */
+    JS_SetPropertyStr(ctx, document, "write", JS_NewCFunction(ctx, js_noop, "write", 1));
+    JS_SetPropertyStr(ctx, document, "writeln", JS_NewCFunction(ctx, js_noop, "writeln", 1));
     /* Add addEventListener/removeEventListener to document directly */
     JS_SetPropertyStr(ctx, document, "addEventListener", JS_NewCFunction2(ctx, js_window_addEventListener, "addEventListener", 2, JS_CFUNC_generic, 0));
     JS_SetPropertyStr(ctx, document, "removeEventListener", JS_NewCFunction2(ctx, js_window_removeEventListener, "removeEventListener", 2, JS_CFUNC_generic, 0));
@@ -6597,7 +6665,14 @@ static void jscore_qjs_setup_globals(int win_w, int win_h,
             src_clean[sizeof(src_clean) - 1] = '\0';
             char *qs = strchr(src_clean, '?');
             if (qs) *qs = '\0';
-            g_images[i].img_handle = g_renderer->load_image_file(src_clean);
+            /* Resolve path relative to HTML file directory */
+            char full_path[1024];
+            if (src_clean[0] == '/' || g_jscore_base_dir[0] == '\0') {
+                snprintf(full_path, sizeof(full_path), "%s", src_clean);
+            } else {
+                snprintf(full_path, sizeof(full_path), "%s/%s", g_jscore_base_dir, src_clean);
+            }
+            g_images[i].img_handle = g_renderer->load_image_file(full_path);
             if (g_images[i].img_handle && g_renderer->get_image_size) {
                 g_renderer->get_image_size(g_images[i].img_handle,
                                            &g_images[i].width,
@@ -6619,7 +6694,14 @@ static void jscore_qjs_preload_images(ImageInfo *images, int count) {
             g_images[slot].height = images[i].height;
             
             if (g_renderer && g_renderer->load_image_file) {
-                g_images[slot].img_handle = g_renderer->load_image_file(images[i].src);
+                /* Resolve path relative to HTML file directory */
+                char full_path[1024];
+                if (images[i].src[0] == '/' || g_jscore_base_dir[0] == '\0') {
+                    snprintf(full_path, sizeof(full_path), "%s", images[i].src);
+                } else {
+                    snprintf(full_path, sizeof(full_path), "%s/%s", g_jscore_base_dir, images[i].src);
+                }
+                g_images[slot].img_handle = g_renderer->load_image_file(full_path);
                 if (g_images[slot].img_handle && g_renderer->get_image_size) {
                     g_renderer->get_image_size(g_images[slot].img_handle,
                                                &g_images[slot].width,

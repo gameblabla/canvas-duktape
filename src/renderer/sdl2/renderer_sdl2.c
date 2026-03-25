@@ -332,10 +332,11 @@ static int r_init(int w, int h, const char* title) {
         IMG_Quit(); SDL_Quit(); return 0;
     }
     char font_path[1024];
-    get_resource_path("Arial.ttf", font_path, sizeof(font_path));
+    get_resource_path("TTF/DejaVuSans.ttf", font_path, sizeof(font_path));
     g_font_default = TTF_OpenFont(font_path, 20);
-    if (!g_font_default)
-        fprintf(stderr, "Warning: failed to load Arial.ttf: %s\n", TTF_GetError());
+    if (!g_font_default) {
+        fprintf(stderr, "Warning: failed to load TTF/DejaVuSans.ttf: %s\n", TTF_GetError());
+    }
 
     g_window = SDL_CreateWindow(title,
                                 SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
