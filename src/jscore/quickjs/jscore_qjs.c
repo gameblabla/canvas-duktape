@@ -166,7 +166,44 @@ typedef struct {
 /* Size of state to save/restore (everything before path tracking) */
 #define STATE_SIZE (offsetof(Canvas2DContext, path_pts))
 
-static Canvas2DContext g_ctx2d = {0};
+/* Per-canvas context state pool */
+#define MAX_CTX_POOL 256
+static Canvas2DContext g_ctx_pool[MAX_CTX_POOL];
+static int g_ctx_canvas_ids[MAX_CTX_POOL]; /* canvas_id or -1 if free */
+static Canvas2DContext *g_ctx2d_ptr = NULL;
+#define g_ctx2d (*g_ctx2d_ptr)
+
+static void ctx_pool_init(void) {
+    for (int i = 0; i < MAX_CTX_POOL; i++) g_ctx_canvas_ids[i] = -1;
+    /* slot 0 reserved for canvas_id=0 (main canvas) */
+    g_ctx_canvas_ids[0] = 0;
+    memset(&g_ctx_pool[0], 0, sizeof(Canvas2DContext));
+    g_ctx2d_ptr = &g_ctx_pool[0];
+}
+
+static Canvas2DContext *ctx_state_for_canvas(int canvas_id) {
+    for (int i = 0; i < MAX_CTX_POOL; i++) {
+        if (g_ctx_canvas_ids[i] == canvas_id) return &g_ctx_pool[i];
+    }
+    for (int i = 0; i < MAX_CTX_POOL; i++) {
+        if (g_ctx_canvas_ids[i] == -1) {
+            g_ctx_canvas_ids[i] = canvas_id;
+            memset(&g_ctx_pool[i], 0, sizeof(Canvas2DContext));
+            return &g_ctx_pool[i];
+        }
+    }
+    return &g_ctx_pool[0]; /* fallback */
+}
+
+/* Switch active context to the canvas owning this_val.
+ * Must be called at the start of every js_ctx2d_* function. */
+#define CTX_SWITCH(ctx_arg, this_arg) do { \
+    JSValue _cv = JS_GetPropertyStr((ctx_arg), (this_arg), "_canvasId"); \
+    int _cid = 0; \
+    if (!JS_IsUndefined(_cv)) JS_ToInt32((ctx_arg), &_cid, _cv); \
+    JS_FreeValue((ctx_arg), _cv); \
+    g_ctx2d_ptr = ctx_state_for_canvas(_cid); \
+} while(0)
 
 /* Timers */
 typedef struct {
@@ -346,8 +383,9 @@ static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
         JS_ToInt32(ctx, &canvas_id, canvas_id_val);
     }
     JS_FreeValue(ctx, canvas_id_val);
-    
-    /* Update global canvas_id for other functions */
+
+    /* Switch active context state to this canvas */
+    g_ctx2d_ptr = ctx_state_for_canvas(canvas_id);
     g_ctx2d.canvas_id = canvas_id;
 
 #ifdef EXTRA_DEBUG
@@ -788,7 +826,20 @@ static void js_canvas_finalizer(JSRuntime *rt, JSValue val) {
             }
             g_canvases[i].id = 0;
             g_canvases[i].tex_handle = NULL;
-            return;
+            break;
+        }
+    }
+    /* Free context pool slot for this canvas */
+    for (int j = 0; j < MAX_CTX_POOL; j++) {
+        if (g_ctx_canvas_ids[j] == id) {
+            free(g_ctx_pool[j].path_pts);
+            free(g_ctx_pool[j].soft_clip_pts);
+            free(g_ctx_pool[j].state_stack);
+            memset(&g_ctx_pool[j], 0, sizeof(Canvas2DContext));
+            g_ctx_canvas_ids[j] = -1;
+            if (g_ctx2d_ptr == &g_ctx_pool[j])
+                g_ctx2d_ptr = &g_ctx_pool[0];
+            break;
         }
     }
 }
@@ -1093,13 +1144,15 @@ static const JSCFunctionListEntry js_image_props[] = {
 
 static JSValue js_ctx2d_save(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     push_state();
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_restore(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    CTX_SWITCH(ctx, this_val);
+    (void)argc; (void)argv;
     pop_state();
     /* g_ctx2d is restored by pop_state(); getters read from g_ctx2d directly */
     return JS_UNDEFINED;
@@ -1107,6 +1160,7 @@ static JSValue js_ctx2d_restore(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_scale(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double sx = 1.0, sy = 1.0;
     if (argc >= 1) JS_ToFloat64(ctx, &sx, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &sy, argv[1]);
@@ -1118,6 +1172,7 @@ static JSValue js_ctx2d_scale(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_rotate(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double angle = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &angle, argv[0]);
     
@@ -1130,6 +1185,7 @@ static JSValue js_ctx2d_rotate(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_translate(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double tx = 0, ty = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &tx, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &ty, argv[1]);
@@ -1141,6 +1197,7 @@ static JSValue js_ctx2d_translate(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_transform(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double a = 1, b = 0, c = 0, d = 1, e = 0, f = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &a, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &b, argv[1]);
@@ -1156,6 +1213,7 @@ static JSValue js_ctx2d_transform(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_setTransform(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc >= 6) {
         JS_ToFloat64(ctx, &g_ctx2d.transform[0], argv[0]);
         JS_ToFloat64(ctx, &g_ctx2d.transform[1], argv[1]);
@@ -1171,12 +1229,14 @@ static JSValue js_ctx2d_setTransform(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_resetTransform(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     init_transform(g_ctx2d.transform);
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_getTransform(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "a", JS_NewFloat64(ctx, g_ctx2d.transform[0]));
     JS_SetPropertyStr(ctx, obj, "b", JS_NewFloat64(ctx, g_ctx2d.transform[1]));
@@ -1188,6 +1248,7 @@ static JSValue js_ctx2d_getTransform(JSContext *ctx, JSValueConst this_val,
 }
 
 static JSValue js_ctx2d_set_fillStyle(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     if (JS_IsObject(val)) {
         /* Check for gradient */
         JSValue grad_id_val = JS_GetPropertyStr(ctx, val, "_gradId");
@@ -1235,6 +1296,7 @@ static JSValue js_ctx2d_set_fillStyle(JSContext *ctx, JSValueConst this_val, JSV
 }
 
 static JSValue js_ctx2d_get_fillStyle(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     if (g_ctx2d.fill_gradient_id > 0 || g_ctx2d.fill_pattern_canvas_id > 0) {
         return JS_DupValue(ctx, g_fill_style_obj);
     }
@@ -1252,6 +1314,7 @@ static JSValue js_ctx2d_get_fillStyle(JSContext *ctx, JSValueConst this_val) {
 }
 
 static JSValue js_ctx2d_set_strokeStyle(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     if (JS_IsObject(val)) {
         JSValue grad_id_val = JS_GetPropertyStr(ctx, val, "_gradId");
         if (!JS_IsUndefined(grad_id_val)) {
@@ -1293,6 +1356,7 @@ static JSValue js_ctx2d_set_strokeStyle(JSContext *ctx, JSValueConst this_val, J
 }
 
 static JSValue js_ctx2d_get_strokeStyle(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     if (g_ctx2d.stroke_gradient_id > 0 || g_ctx2d.stroke_pattern_canvas_id > 0) {
         return JS_DupValue(ctx, g_stroke_style_obj);
     }
@@ -1310,6 +1374,7 @@ static JSValue js_ctx2d_get_strokeStyle(JSContext *ctx, JSValueConst this_val) {
 }
 
 static JSValue js_ctx2d_set_lineWidth(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     double v = 0;
     JS_ToFloat64(ctx, &v, val);
     if (v > 0) g_ctx2d.line_width = (int)v;
@@ -1317,10 +1382,12 @@ static JSValue js_ctx2d_set_lineWidth(JSContext *ctx, JSValueConst this_val, JSV
 }
 
 static JSValue js_ctx2d_get_lineWidth(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewInt32(ctx, g_ctx2d.line_width);
 }
 
 static JSValue js_ctx2d_set_globalAlpha(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     double v;
     JS_ToFloat64(ctx, &v, val);
     /* Per spec: ignore values outside [0,1] or non-finite */
@@ -1329,19 +1396,23 @@ static JSValue js_ctx2d_set_globalAlpha(JSContext *ctx, JSValueConst this_val, J
 }
 
 static JSValue js_ctx2d_get_globalAlpha(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewFloat64(ctx, g_ctx2d.global_alpha);
 }
 
 static JSValue js_ctx2d_set_imageSmoothingEnabled(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     g_ctx2d.image_smoothing_enabled = JS_ToBool(ctx, val);
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_get_imageSmoothingEnabled(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewBool(ctx, g_ctx2d.image_smoothing_enabled ? true : false);
 }
 
 static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *op = JS_ToCString(ctx, val);
     if (op) {
         if (strcmp(op, "source-over") == 0)       g_ctx2d.global_composite = 0;
@@ -1363,6 +1434,7 @@ static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueCons
 }
 
 static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     switch (g_ctx2d.global_composite) {
         case 1: return JS_NewString(ctx, "lighter");
         case 2: return JS_NewString(ctx, "destination-over");
@@ -1380,10 +1452,12 @@ static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueCons
 }
 
 static JSValue js_ctx2d_set_shadowColor(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     color_from_js(val, g_ctx2d.shadow_color);
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_shadowColor(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     char buf[64];
     snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,%.2f)",
         (int)(g_ctx2d.shadow_color[0]*255), (int)(g_ctx2d.shadow_color[1]*255),
@@ -1391,31 +1465,38 @@ static JSValue js_ctx2d_get_shadowColor(JSContext *ctx, JSValueConst this_val) {
     return JS_NewString(ctx, buf);
 }
 static JSValue js_ctx2d_set_shadowBlur(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     double v = 0; JS_ToFloat64(ctx, &v, val);
     g_ctx2d.shadow_blur = (int)v;
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_shadowBlur(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewFloat64(ctx, g_ctx2d.shadow_blur);
 }
 static JSValue js_ctx2d_set_shadowOffsetX(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     double v = 0; JS_ToFloat64(ctx, &v, val);
     g_ctx2d.shadow_offset_x = (int)v;
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_shadowOffsetX(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewFloat64(ctx, g_ctx2d.shadow_offset_x);
 }
 static JSValue js_ctx2d_set_shadowOffsetY(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     double v = 0; JS_ToFloat64(ctx, &v, val);
     g_ctx2d.shadow_offset_y = (int)v;
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_shadowOffsetY(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewFloat64(ctx, g_ctx2d.shadow_offset_y);
 }
 
 static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *font = JS_ToCString(ctx, val);
     if (font) {
         strncpy(g_ctx2d.font, font, sizeof(g_ctx2d.font) - 1);
@@ -1465,10 +1546,12 @@ static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueC
 }
 
 static JSValue js_ctx2d_get_font(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewString(ctx, g_ctx2d.font);
 }
 
 static JSValue js_ctx2d_set_textAlign(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *align = JS_ToCString(ctx, val);
     if (align) {
         strncpy(g_ctx2d.text_align, align, sizeof(g_ctx2d.text_align) - 1);
@@ -1479,10 +1562,12 @@ static JSValue js_ctx2d_set_textAlign(JSContext *ctx, JSValueConst this_val, JSV
 }
 
 static JSValue js_ctx2d_get_textAlign(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewString(ctx, g_ctx2d.text_align);
 }
 
 static JSValue js_ctx2d_set_textBaseline(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *bl = JS_ToCString(ctx, val);
     if (bl) {
         strncpy(g_ctx2d.text_baseline, bl, sizeof(g_ctx2d.text_baseline) - 1);
@@ -1493,17 +1578,20 @@ static JSValue js_ctx2d_set_textBaseline(JSContext *ctx, JSValueConst this_val, 
 }
 
 static JSValue js_ctx2d_get_textBaseline(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewString(ctx, g_ctx2d.text_baseline);
 }
 
 static JSValue js_ctx2d_beginPath(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     clear_path();
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_closePath(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     /* Find last moveTo or start of path and add a closing line segment */
     if (g_ctx2d.path_count >= 2) {
         /* Find the start of the current subpath (last moveTo marker, or path start) */
@@ -1525,6 +1613,7 @@ static JSValue js_ctx2d_closePath(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_moveTo(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double x = 0, y = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &x, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &y, argv[1]);
@@ -1534,6 +1623,7 @@ static JSValue js_ctx2d_moveTo(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_lineTo(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double x = 0, y = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &x, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &y, argv[1]);
@@ -1543,6 +1633,7 @@ static JSValue js_ctx2d_lineTo(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_rect(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double x = 0, y = 0, w = 0, h = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &x, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &y, argv[1]);
@@ -1559,6 +1650,7 @@ static JSValue js_ctx2d_rect(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_arc(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double cx = 0, cy = 0, radius = 0, start = 0, end = 0;
     int ccw = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &cx, argv[0]);
@@ -1586,6 +1678,7 @@ static JSValue js_ctx2d_arc(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_arcTo(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double x1 = 0, y1 = 0, x2 = 0, y2 = 0, radius = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &x1, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &y1, argv[1]);
@@ -1702,6 +1795,7 @@ static JSValue js_ctx2d_arcTo(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_quadraticCurveTo(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double cpx = 0, cpy = 0, x = 0, y = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &cpx, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &cpy, argv[1]);
@@ -1724,6 +1818,7 @@ static JSValue js_ctx2d_quadraticCurveTo(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_bezierCurveTo(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double cp1x = 0, cp1y = 0, cp2x = 0, cp2y = 0, x = 0, y = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &cp1x, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &cp1y, argv[1]);
@@ -1751,6 +1846,7 @@ static JSValue js_ctx2d_bezierCurveTo(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_ellipse(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double cx = 0, cy = 0, rx = 0, ry = 0, rot = 0, start = 0, end = 0;
     int ccw = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &cx, argv[0]);
@@ -1776,6 +1872,7 @@ static JSValue js_ctx2d_ellipse(JSContext *ctx, JSValueConst this_val,
 /* ---- setLineDash / getLineDash / lineDashOffset ---- */
 static JSValue js_ctx2d_setLineDash(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc < 1 || !JS_IsArray(argv[0])) {
         g_ctx2d.line_dash_count = 0;
         return JS_UNDEFINED;
@@ -1804,6 +1901,7 @@ static JSValue js_ctx2d_setLineDash(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_getLineDash(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     JSValue arr = JS_NewArray(ctx);
     for (int i = 0; i < g_ctx2d.line_dash_count; i++) {
         JS_SetPropertyUint32(ctx, arr, i, JS_NewFloat64(ctx, g_ctx2d.line_dash[i]));
@@ -1812,18 +1910,22 @@ static JSValue js_ctx2d_getLineDash(JSContext *ctx, JSValueConst this_val,
 }
 
 static JSValue js_ctx2d_get_lineDashOffset(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewFloat64(ctx, g_ctx2d.line_dash_offset);
 }
 static JSValue js_ctx2d_set_lineDashOffset(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     JS_ToFloat64(ctx, &g_ctx2d.line_dash_offset, val);
     return JS_UNDEFINED;
 }
 
 /* ---- lineCap / lineJoin / miterLimit / filter / direction / imageSmoothingQuality ---- */
 static JSValue js_ctx2d_get_lineCap(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewString(ctx, g_ctx2d.line_cap);
 }
 static JSValue js_ctx2d_set_lineCap(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *s = JS_ToCString(ctx, val);
     if (s) {
         strncpy(g_ctx2d.line_cap, s, sizeof(g_ctx2d.line_cap) - 1);
@@ -1833,9 +1935,11 @@ static JSValue js_ctx2d_set_lineCap(JSContext *ctx, JSValueConst this_val, JSVal
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_lineJoin(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewString(ctx, g_ctx2d.line_join);
 }
 static JSValue js_ctx2d_set_lineJoin(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *s = JS_ToCString(ctx, val);
     if (s) {
         strncpy(g_ctx2d.line_join, s, sizeof(g_ctx2d.line_join) - 1);
@@ -1845,18 +1949,22 @@ static JSValue js_ctx2d_set_lineJoin(JSContext *ctx, JSValueConst this_val, JSVa
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_miterLimit(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewFloat64(ctx, g_ctx2d.miter_limit);
 }
 static JSValue js_ctx2d_set_miterLimit(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     double v = 0;
     JS_ToFloat64(ctx, &v, val);
     if (v > 0) g_ctx2d.miter_limit = v;
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_filter(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewString(ctx, g_ctx2d.filter);
 }
 static JSValue js_ctx2d_set_filter(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *s = JS_ToCString(ctx, val);
     if (s) {
         strncpy(g_ctx2d.filter, s, sizeof(g_ctx2d.filter) - 1);
@@ -1866,9 +1974,11 @@ static JSValue js_ctx2d_set_filter(JSContext *ctx, JSValueConst this_val, JSValu
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_direction(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewString(ctx, g_ctx2d.direction);
 }
 static JSValue js_ctx2d_set_direction(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *s = JS_ToCString(ctx, val);
     if (s) {
         strncpy(g_ctx2d.direction, s, sizeof(g_ctx2d.direction) - 1);
@@ -1878,9 +1988,11 @@ static JSValue js_ctx2d_set_direction(JSContext *ctx, JSValueConst this_val, JSV
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_imageSmoothingQuality(JSContext *ctx, JSValueConst this_val) {
+    CTX_SWITCH(ctx, this_val);
     return JS_NewString(ctx, g_ctx2d.smoothing_quality);
 }
 static JSValue js_ctx2d_set_imageSmoothingQuality(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    CTX_SWITCH(ctx, this_val);
     const char *s = JS_ToCString(ctx, val);
     if (s) {
         strncpy(g_ctx2d.smoothing_quality, s, sizeof(g_ctx2d.smoothing_quality) - 1);
@@ -1893,6 +2005,7 @@ static JSValue js_ctx2d_set_imageSmoothingQuality(JSContext *ctx, JSValueConst t
 /* ---- getContextAttributes / drawFocusIfNeeded ---- */
 static JSValue js_ctx2d_getContextAttributes(JSContext *ctx, JSValueConst this_val,
                                              int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "alpha", JS_NewBool(ctx, 1));
     JS_SetPropertyStr(ctx, obj, "colorSpace", JS_NewString(ctx, "srgb"));
@@ -1901,6 +2014,7 @@ static JSValue js_ctx2d_getContextAttributes(JSContext *ctx, JSValueConst this_v
 
 static JSValue js_ctx2d_drawFocusIfNeeded(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     return JS_UNDEFINED;
 }
 
@@ -1908,6 +2022,7 @@ static JSValue js_ctx2d_drawFocusIfNeeded(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double *use_pts = g_ctx2d.path_pts;
     int use_count = g_ctx2d.path_count;
     int fill_rule = 0; /* 0=evenodd (default), 1=nonzero */
@@ -1970,6 +2085,7 @@ static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double *use_pts = g_ctx2d.path_pts;
     int use_count = g_ctx2d.path_count;
 
@@ -2164,6 +2280,7 @@ static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double dx = 0, dy = 0, dw = 0, dh = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &dx, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &dy, argv[1]);
@@ -2413,6 +2530,7 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_strokeRect(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double x = 0, y = 0, w = 0, h = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &x, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &y, argv[1]);
@@ -2441,6 +2559,7 @@ static JSValue js_ctx2d_strokeRect(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_clearRect(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     double x = 0, y = 0, w = 0, h = 0;
     if (argc >= 1) JS_ToFloat64(ctx, &x, argv[0]);
     if (argc >= 2) JS_ToFloat64(ctx, &y, argv[1]);
@@ -2480,6 +2599,7 @@ static JSValue js_ctx2d_clearRect(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc < 1 || !g_renderer) return JS_UNDEFINED;
 
     /* Get image object */
@@ -2571,6 +2691,7 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc < 1 || !g_renderer) return JS_UNDEFINED;
     
     const char *text = JS_ToCString(ctx, argv[0]);
@@ -2635,6 +2756,7 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_strokeText(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc < 1 || !g_renderer) return JS_UNDEFINED;
     
     const char *text = JS_ToCString(ctx, argv[0]);
@@ -2670,6 +2792,7 @@ static JSValue js_ctx2d_strokeText(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_measureText(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     JSValue obj = JS_NewObject(ctx);
     if (argc < 1 || !g_renderer) {
         JS_SetPropertyStr(ctx, obj, "width", JS_NewFloat64(ctx, 0));
@@ -2700,6 +2823,7 @@ static JSValue js_ctx2d_measureText(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_createImageData(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     int w = 0, h = 0;
     if (argc >= 1) {
         /* If first arg is an object (ImageData), copy its dimensions */
@@ -2733,6 +2857,7 @@ static JSValue js_ctx2d_createImageData(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     int sx = 0, sy = 0, sw = 0, sh = 0;
     if (argc >= 1) JS_ToInt32(ctx, &sx, argv[0]);
     if (argc >= 2) JS_ToInt32(ctx, &sy, argv[1]);
@@ -2783,6 +2908,7 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_putImageData(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc < 3 || !g_renderer) return JS_UNDEFINED;
 
     JSValue img_data = argv[0];
@@ -2866,6 +2992,7 @@ static JSValue js_ctx2d_putImageData(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_clip(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (g_ctx2d.path_count < 2 || !g_renderer) return JS_UNDEFINED;
 
     /* Check for fill rule argument */
@@ -2944,6 +3071,7 @@ static int point_in_path_evenodd(double x, double y, const double *pts, int coun
 
 static JSValue js_ctx2d_isPointInPath(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc < 2 || g_ctx2d.path_count < 3) return JS_FALSE;
     double px = 0, py = 0;
     JS_ToFloat64(ctx, &px, argv[0]);
@@ -2966,6 +3094,7 @@ static JSValue js_ctx2d_isPointInPath(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_isPointInStroke(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc < 2 || g_ctx2d.path_count < 2) return JS_FALSE;
     double px = 0, py = 0;
     JS_ToFloat64(ctx, &px, argv[0]);
@@ -3014,6 +3143,7 @@ static JSValue js_gradient_addColorStop(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_ctx2d_createLinearGradient(JSContext *ctx, JSValueConst this_val,
                                              int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     /* Find free gradient slot */
     int slot = -1;
     for (int i = 0; i < MAX_GRADIENTS; i++) {
@@ -3041,6 +3171,7 @@ static JSValue js_ctx2d_createLinearGradient(JSContext *ctx, JSValueConst this_v
 
 static JSValue js_ctx2d_createRadialGradient(JSContext *ctx, JSValueConst this_val,
                                              int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     int slot = -1;
     for (int i = 0; i < MAX_GRADIENTS; i++) {
         if (!g_gradients[i].active) { slot = i; break; }
@@ -3069,6 +3200,7 @@ static JSValue js_ctx2d_createRadialGradient(JSContext *ctx, JSValueConst this_v
 
 static JSValue js_ctx2d_createConicGradient(JSContext *ctx, JSValueConst this_val,
                                             int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     int slot = -1;
     for (int i = 0; i < MAX_GRADIENTS; i++) {
         if (!g_gradients[i].active) { slot = i; break; }
@@ -3092,6 +3224,7 @@ static JSValue js_ctx2d_createConicGradient(JSContext *ctx, JSValueConst this_va
 
 static JSValue js_ctx2d_createPattern(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
+    CTX_SWITCH(ctx, this_val);
     if (argc < 1) return JS_NULL;
     /* Get canvas ID from source */
     JSValue src = argv[0];
@@ -3235,9 +3368,10 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
 
     /* Get canvas ID from the canvas object */
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    
-    /* Set this as the current canvas for drawing */
-    g_ctx2d.canvas_id = id;
+
+    /* Switch active context state to this canvas */
+    g_ctx2d_ptr = ctx_state_for_canvas(id);
+
 #ifdef EXTRA_DEBUG
     fprintf(stderr, "[getContext] Set canvas_id=%d\n", id);
 #endif
@@ -6064,6 +6198,7 @@ static int jscore_qjs_init(RendererInterface *renderer,
 
     g_stage_canvas_claimed = 0;
     memset(g_mouse_listeners, 0, sizeof(g_mouse_listeners));
+    ctx_pool_init();
 
     /* Initialize QuickJS runtime */
     g_rt = JS_NewRuntime();
