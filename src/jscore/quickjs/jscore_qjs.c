@@ -4618,12 +4618,50 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     JS_SetPropertyStr(ctx, style, "zoom",           JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "top",            JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "left",           JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "right",          JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "bottom",         JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "width",          JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "height",         JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "margin",         JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "marginTop",      JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "marginBottom",   JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "marginLeft",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "marginRight",    JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "padding",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "paddingTop",    JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "paddingBottom", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "paddingLeft",   JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "paddingRight",   JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "opacity",        JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "display",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "visibility",     JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "position",       JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "float",          JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "cssFloat",       JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "cssText",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "background",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "backgroundColor", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "color",          JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "border",         JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "borderWidth",    JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "font",            JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "fontSize",       JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "fontFamily",    JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "textAlign",      JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "verticalAlign",  JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "overflow",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "overflowX",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "overflowY",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "zIndex",         JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "z-index",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "boxSizing",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "WebkitTransform", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "transform",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "transition",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "cursor",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "whiteSpace",    JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "getPropertyValue", JS_NewCFunction(ctx, js_noop, "getPropertyValue", 1));
+    JS_SetPropertyStr(ctx, style, "setProperty",   JS_NewCFunction(ctx, js_noop, "setProperty", 2));
     JS_SetPropertyStr(ctx, obj, "style",            style);
     JS_SetPropertyStr(ctx, obj, "className",        JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "nodeName",         JS_NewString(ctx, ""));
@@ -4655,12 +4693,39 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     JSValue childNodes = JS_NewArray(ctx);
     JS_SetPropertyStr(ctx, childNodes, "length", JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "childNodes", childNodes);
-    JS_SetPropertyStr(ctx, obj, "firstChild", JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "lastChild", JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "nextSibling", JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "previousSibling", JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "parentNode", JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "ownerDocument", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "firstChild", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, obj, "lastChild", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, obj, "nextSibling", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, obj, "previousSibling", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, obj, "parentNode", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, obj, "ownerDocument", JS_UNDEFINED);
+    /* Add nodeType to avoid "cannot read property nodeType of undefined" */
+    JS_SetPropertyStr(ctx, obj, "nodeType", JS_NewInt32(ctx, 1));
+    /* Add scroll properties (jQuery checks these - use non-zero values) */
+    JS_SetPropertyStr(ctx, obj, "scrollHeight", JS_NewInt32(ctx, 600));
+    JS_SetPropertyStr(ctx, obj, "scrollWidth", JS_NewInt32(ctx, 800));
+    JS_SetPropertyStr(ctx, obj, "scrollTop", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "scrollLeft", JS_NewInt32(ctx, 0));
+    /* Add client properties */
+    JS_SetPropertyStr(ctx, obj, "clientHeight", JS_NewInt32(ctx, 600));
+    JS_SetPropertyStr(ctx, obj, "clientWidth", JS_NewInt32(ctx, 800));
+    /* Add childElementCount */
+    JS_SetPropertyStr(ctx, obj, "childElementCount", JS_NewInt32(ctx, 0));
+    /* Add firstElementChild / lastElementChild */
+    JS_SetPropertyStr(ctx, obj, "firstElementChild", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, obj, "lastElementChild", JS_UNDEFINED);
+    /* Add previousElementSibling / nextElementSibling */
+    JS_SetPropertyStr(ctx, obj, "previousElementSibling", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, obj, "nextElementSibling", JS_UNDEFINED);
+    /* Add id, className */
+    JS_SetPropertyStr(ctx, obj, "id", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "className", JS_NewString(ctx, ""));
+    /* Add title */
+    JS_SetPropertyStr(ctx, obj, "title", JS_NewString(ctx, ""));
+    /* Add lang */
+    JS_SetPropertyStr(ctx, obj, "lang", JS_NewString(ctx, ""));
+    /* Add dir */
+    JS_SetPropertyStr(ctx, obj, "dir", JS_NewString(ctx, ""));
     return obj;
 }
 
@@ -4745,9 +4810,9 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
     JS_SetPropertyStr(ctx, obj, "offsetTop",        JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "setAttribute",     JS_NewCFunction(ctx, js_noop, "setAttribute", 2));
     JS_SetPropertyStr(ctx, obj, "getAttribute",     JS_NewCFunction(ctx, js_noop, "getAttribute", 1));
-    JS_SetPropertyStr(ctx, obj, "nextSibling",      JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "nextSibling",      JS_UNDEFINED);
     JS_SetPropertyStr(ctx, obj, "parentNode",       js_make_element_stub(ctx));
-    JS_SetPropertyStr(ctx, obj, "offsetParent",     JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "offsetParent",     JS_UNDEFINED);
 
     JSAtom width_atom = JS_NewAtom(ctx, "width");
     JSValue width_getter = JS_NewCFunction(ctx, js_canvas_get_width, "width", 0);
@@ -5030,10 +5095,14 @@ static JSValue js_document_get_body(JSContext *ctx, JSValueConst this_val) {
 }
 
 static JSValue js_document_get_documentElement(JSContext *ctx, JSValueConst this_val) {
-    if (JS_IsUndefined(g_cached_documentElement)) {
-        g_cached_documentElement = js_make_element_stub(ctx);
-        JS_SetPropertyStr(ctx, g_cached_documentElement, "nodeName", JS_NewString(ctx, "HTML"));
+    /* If already set as property, return it */
+    if (!JS_IsUndefined(g_cached_documentElement)) {
+        return JS_DupValue(ctx, g_cached_documentElement);
     }
+    /* Otherwise create new - this shouldn't happen since we set it as property */
+    g_cached_documentElement = js_make_element_stub(ctx);
+    JS_SetPropertyStr(ctx, g_cached_documentElement, "nodeName", JS_NewString(ctx, "HTML"));
+    JS_SetPropertyStr(ctx, g_cached_documentElement, "nodeType", JS_NewInt32(ctx, 1));
     return JS_DupValue(ctx, g_cached_documentElement);
 }
 
@@ -5139,6 +5208,7 @@ static const JSCFunctionListEntry js_document_props[] = {
     JS_CGETSET_DEF("body", js_document_get_body, NULL),
     JS_CGETSET_DEF("documentElement", js_document_get_documentElement, NULL),
     JS_CGETSET_DEF("head", js_document_get_head, NULL),
+    JS_CGETSET_DEF("activeElement", js_document_get_body, NULL),
     JS_PROP_STRING_DEF("readyState", "complete", JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE),
 };
 
@@ -5326,6 +5396,7 @@ static const JSCFunctionListEntry js_window_funcs[] = {
 };
 
 static JSValue js_window_get_frameElement(JSContext *ctx, JSValueConst this_val) {
+    /* Browsers return null when not in iframe */
     return JS_NULL;
 }
 
@@ -5345,6 +5416,18 @@ static JSValue js_window_get_closed(JSContext *ctx, JSValueConst this_val) {
     return JS_NewBool(ctx, 0);
 }
 
+static JSValue js_window_get_name(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, "");
+}
+
+static JSValue js_window_get_pageXOffset(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, 0);
+}
+
+static JSValue js_window_get_pageYOffset(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, 0);
+}
+
 static const JSCFunctionListEntry js_window_props[] = {
     JS_CGETSET_DEF("innerWidth", js_window_get_innerWidth, NULL),
     JS_CGETSET_DEF("innerHeight", js_window_get_innerHeight, NULL),
@@ -5357,6 +5440,9 @@ static const JSCFunctionListEntry js_window_props[] = {
     JS_CGETSET_DEF("parent", js_window_get_parent, NULL),
     JS_CGETSET_DEF("length", js_window_get_length, NULL),
     JS_CGETSET_DEF("closed", js_window_get_closed, NULL),
+    JS_CGETSET_DEF("name", js_window_get_name, NULL),
+    JS_CGETSET_DEF("pageXOffset", js_window_get_pageXOffset, NULL),
+    JS_CGETSET_DEF("pageYOffset", js_window_get_pageYOffset, NULL),
 };
 
 /* ============================================================================
@@ -5392,6 +5478,14 @@ static JSValue js_navigator_get_maxTouchPoints(JSContext *ctx, JSValueConst this
     return JS_NewInt32(ctx, 0);
 }
 
+static JSValue js_navigator_get_cookieEnabled(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewBool(ctx, 1);
+}
+
+static JSValue js_navigator_get_hardwareConcurrency(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, 4);
+}
+
 static const JSCFunctionListEntry js_navigator_props[] = {
     JS_CGETSET_DEF("userAgent",     js_navigator_get_userAgent,    NULL),
     JS_CGETSET_DEF("platform",      js_navigator_get_platform,     NULL),
@@ -5401,6 +5495,12 @@ static const JSCFunctionListEntry js_navigator_props[] = {
     JS_CGETSET_DEF("appVersion",    js_navigator_get_appVersion,   NULL),
     JS_CGETSET_DEF("appName",       js_navigator_get_appName,      NULL),
     JS_CGETSET_DEF("maxTouchPoints",js_navigator_get_maxTouchPoints, NULL),
+    JS_CGETSET_DEF("cookieEnabled", js_navigator_get_cookieEnabled, NULL),
+    JS_CGETSET_DEF("hardwareConcurrency", js_navigator_get_hardwareConcurrency, NULL),
+    JS_CGETSET_DEF("languages",     js_navigator_get_language,     NULL),
+    JS_CGETSET_DEF("userLanguage",  js_navigator_get_language,     NULL),
+    JS_CGETSET_DEF("browserLanguage", js_navigator_get_language,  NULL),
+    JS_CGETSET_DEF("systemLanguage", js_navigator_get_language,    NULL),
 };
 
 /* ============================================================================
@@ -6533,12 +6633,137 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, document, "msHidden", JS_NewBool(ctx, 0));
     /* Add compatMode (needed by some libraries like dat.gui) */
     JS_SetPropertyStr(ctx, document, "compatMode", JS_NewString(ctx, "CSS1Compat"));
+    /* Add nodeType (jQuery checks this) */
+    JS_SetPropertyStr(ctx, document, "nodeType", JS_NewInt32(ctx, 9));
+    /* Add readyState (jQuery checks this) */
+    JS_SetPropertyStr(ctx, document, "readyState", JS_NewString(ctx, "complete"));
+    /* Add defaultView (jQuery checks this) */
+    JS_SetPropertyStr(ctx, document, "defaultView", JS_GetGlobalObject(ctx));
+    /* Add documentElement as plain property too (jQuery might access it this way) */
+    JSValue docElem = js_make_element_stub(ctx);
+    JS_SetPropertyStr(ctx, docElem, "nodeName", JS_NewString(ctx, "HTML"));
+    JS_SetPropertyStr(ctx, docElem, "nodeType", JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, docElem, "scrollHeight", JS_NewInt32(ctx, 600));
+    JS_SetPropertyStr(ctx, docElem, "scrollWidth", JS_NewInt32(ctx, 800));
+    JS_SetPropertyStr(ctx, docElem, "clientHeight", JS_NewInt32(ctx, 600));
+    JS_SetPropertyStr(ctx, docElem, "clientWidth", JS_NewInt32(ctx, 800));
+    JS_SetPropertyStr(ctx, document, "documentElement", docElem);
+    /* Also update cached variable for getter */
+    g_cached_documentElement = docElem;
+    /* Add all (IE specific, jQuery checks this) */
+    JSValue allCollection = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, allCollection, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "all", allCollection);
+    /* Add ownerDocument (elements might check this) */
+    JS_SetPropertyStr(ctx, document, "ownerDocument", JS_NewInt32(ctx, 9));
+    /* Add characterSet / charset */
+    JS_SetPropertyStr(ctx, document, "characterSet", JS_NewString(ctx, "UTF-8"));
+    JS_SetPropertyStr(ctx, document, "charset", JS_NewString(ctx, "UTF-8"));
+    JS_SetPropertyStr(ctx, document, "inputEncoding", JS_NewString(ctx, "UTF-8"));
+    JS_SetPropertyStr(ctx, document, "contentType", JS_NewString(ctx, "text/html"));
+    /* Add documentElement properties */
+    JS_SetPropertyStr(ctx, document, "scrollingElement", JS_UNDEFINED);
+    /* Add visibilityState */
+    JS_SetPropertyStr(ctx, document, "visibilityState", JS_NewString(ctx, "visible"));
+    /* Add scrollingElement */
+    JSValue scrollingElement = js_make_element_stub(ctx);
+    JS_SetPropertyStr(ctx, scrollingElement, "nodeName", JS_NewString(ctx, "HTML"));
+    JS_SetPropertyStr(ctx, document, "scrollingElement", scrollingElement);
+    /* Add documentMode (IE compatibility) */
+    JS_SetPropertyStr(ctx, document, "documentMode", JS_NewInt32(ctx, 0));
+    /* Add doctype */
+    JSValue doctype = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, doctype, "nodeType", JS_NewInt32(ctx, 10));
+    JS_SetPropertyStr(ctx, doctype, "name", JS_NewString(ctx, "html"));
+    JS_SetPropertyStr(ctx, doctype, "nodeName", JS_NewString(ctx, "html"));
+    JS_SetPropertyStr(ctx, doctype, "publicId", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, doctype, "systemId", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, document, "doctype", doctype);
+    /* Add implementation (DOMImplementation) */
+    JSValue implementation = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, implementation, "hasFeature", JS_NewCFunction(ctx, js_noop, "hasFeature", 1));
+    JS_SetPropertyStr(ctx, document, "implementation", implementation);
+    /* Add createDocumentFragment, createTextNode, createComment */
+    JS_SetPropertyStr(ctx, document, "createDocumentFragment", JS_NewCFunction(ctx, js_document_createDocumentFragment, "createDocumentFragment", 0));
+    JS_SetPropertyStr(ctx, document, "createTextNode", JS_NewCFunction(ctx, js_document_createTextNode, "createTextNode", 1));
+    JS_SetPropertyStr(ctx, document, "createComment", JS_NewCFunction(ctx, js_document_createComment, "createComment", 1));
+    JS_SetPropertyStr(ctx, document, "createEvent", JS_NewCFunction(ctx, js_document_createEvent, "createEvent", 1));
+    /* Add getElementsByClassName */
+    JS_SetPropertyStr(ctx, document, "getElementsByClassName", JS_NewCFunction(ctx, js_noop, "getElementsByClassName", 1));
+    /* Add querySelector / querySelectorAll (stubs) */
+    JS_SetPropertyStr(ctx, document, "querySelector", JS_NewCFunction(ctx, js_noop, "querySelector", 1));
+    JS_SetPropertyStr(ctx, document, "querySelectorAll", JS_NewCFunction(ctx, js_noop, "querySelectorAll", 1));
+    /* Add getElementById (returns null for unknown ids) */
+    JS_SetPropertyStr(ctx, document, "getElementById", JS_NewCFunction(ctx, js_document_getElementById, "getElementById", 1));
     /* Add document.write (some libraries use it) */
     JS_SetPropertyStr(ctx, document, "write", JS_NewCFunction(ctx, js_noop, "write", 1));
     JS_SetPropertyStr(ctx, document, "writeln", JS_NewCFunction(ctx, js_noop, "writeln", 1));
     /* Add addEventListener/removeEventListener to document directly */
     JS_SetPropertyStr(ctx, document, "addEventListener", JS_NewCFunction2(ctx, js_window_addEventListener, "addEventListener", 2, JS_CFUNC_generic, 0));
     JS_SetPropertyStr(ctx, document, "removeEventListener", JS_NewCFunction2(ctx, js_window_removeEventListener, "removeEventListener", 2, JS_CFUNC_generic, 0));
+    /* Add forms, images, links, scripts arrays */
+    JSValue forms = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, forms, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "forms", forms);
+    JSValue images = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, images, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "images", images);
+    JSValue links = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, links, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "links", links);
+    JSValue scripts = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, scripts, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "scripts", scripts);
+    /* Add anchors */
+    JSValue anchors = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, anchors, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "anchors", anchors);
+    /* Add applets */
+    JSValue applets = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, applets, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "applets", applets);
+    /* Add embeds */
+    JSValue embeds = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, embeds, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, document, "embeds", embeds);
+    /* Add plugins (same as embeds) */
+    JS_SetPropertyStr(ctx, document, "plugins", embeds);
+    /* Add cookie (stub) */
+    JS_SetPropertyStr(ctx, document, "cookie", JS_NewString(ctx, ""));
+    /* Add domain (stub) */
+    JS_SetPropertyStr(ctx, document, "domain", JS_NewString(ctx, ""));
+    /* Add referrer (stub) */
+    JS_SetPropertyStr(ctx, document, "referrer", JS_NewString(ctx, ""));
+    /* Add title */
+    JS_SetPropertyStr(ctx, document, "title", JS_NewString(ctx, ""));
+    /* Add lastModified */
+    JS_SetPropertyStr(ctx, document, "lastModified", JS_NewString(ctx, ""));
+    /* Add URL */
+    JS_SetPropertyStr(ctx, document, "URL", JS_NewString(ctx, ""));
+    /* Add baseURI */
+    JS_SetPropertyStr(ctx, document, "baseURI", JS_NewString(ctx, ""));
+    /* Add documentURI */
+    JS_SetPropertyStr(ctx, document, "documentURI", JS_NewString(ctx, ""));
+    /* Add xmlVersion (IE) */
+    JS_SetPropertyStr(ctx, document, "xmlVersion", JS_NewString(ctx, ""));
+    /* Add xmlEncoding (IE) */
+    JS_SetPropertyStr(ctx, document, "xmlEncoding", JS_NewString(ctx, ""));
+    /* Add strictErrorChecking */
+    JS_SetPropertyStr(ctx, document, "strictErrorChecking", JS_NewBool(ctx, 1));
+    /* Add rootElement (SVG) */
+    JS_SetPropertyStr(ctx, document, "rootElement", JS_UNDEFINED);
+    /* Add createAttribute, createComment, createDocumentFragment */
+    JS_SetPropertyStr(ctx, document, "createAttribute", JS_NewCFunction(ctx, js_noop, "createAttribute", 1));
+    /* Add getAttribute / setAttribute / hasAttribute */
+    JS_SetPropertyStr(ctx, document, "getAttribute", JS_NewCFunction(ctx, js_noop, "getAttribute", 1));
+    JS_SetPropertyStr(ctx, document, "setAttribute", JS_NewCFunction(ctx, js_noop, "setAttribute", 2));
+    JS_SetPropertyStr(ctx, document, "hasAttribute", JS_NewCFunction(ctx, js_noop, "hasAttribute", 1));
+    /* Add removeAttribute */
+    JS_SetPropertyStr(ctx, document, "removeAttribute", JS_NewCFunction(ctx, js_noop, "removeAttribute", 1));
+    /* Add document.evaluate (XPath) */
+    JS_SetPropertyStr(ctx, document, "evaluate", JS_UNDEFINED);
+    /* Add uniqueID (IE) */
+    JS_SetPropertyStr(ctx, document, "uniqueID", JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, global, "document", document);
 
     /* Navigator */
@@ -6570,6 +6795,59 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyFunctionList(ctx, localStorage, js_storage_props,
                                sizeof(js_storage_props) / sizeof(js_storage_props[0]));
     JS_SetPropertyStr(ctx, global, "localStorage", localStorage);
+
+    /* Add missing window properties that libraries check */
+    JS_SetPropertyStr(ctx, global, "ActiveXObject", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "XMLHttpRequest", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "webkitXMLHttpRequest", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "opera", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "yandex", JS_UNDEFINED);
+    /* Add XDomainRequest (IE) */
+    JS_SetPropertyStr(ctx, global, "XDomainRequest", JS_UNDEFINED);
+    /* Add event compatibility */
+    JS_SetPropertyStr(ctx, global, "Event", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "HTMLElement", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "Node", JS_UNDEFINED);
+    /* Add Promise (jQuery Deferred might use it) */
+    JS_SetPropertyStr(ctx, global, "Promise", JS_UNDEFINED);
+    /* Add Map, Set, WeakMap, WeakSet */
+    JS_SetPropertyStr(ctx, global, "Map", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "Set", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "WeakMap", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, global, "WeakSet", JS_UNDEFINED);
+    /* Add Symbol */
+    JS_SetPropertyStr(ctx, global, "Symbol", JS_UNDEFINED);
+    /* Add Proxy */
+    JS_SetPropertyStr(ctx, global, "Proxy", JS_UNDEFINED);
+    /* Add Reflect */
+    JS_SetPropertyStr(ctx, global, "Reflect", JS_UNDEFINED);
+    /* Add screen properties */
+    JSValue screenObj = JS_GetPropertyStr(ctx, global, "screen");
+    JS_SetPropertyStr(ctx, screenObj, "availLeft", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, screenObj, "availTop", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, screenObj, "colorDepth", JS_NewInt32(ctx, 24));
+    JS_SetPropertyStr(ctx, screenObj, "pixelDepth", JS_NewInt32(ctx, 24));
+    JS_FreeValue(ctx, screenObj);
+    /* Add chrome, webkit, moz, ms prefixes (libraries check these) */
+    JS_SetPropertyStr(ctx, global, "chrome", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, global, "webkit", JS_NewBool(ctx, 1));
+    JS_SetPropertyStr(ctx, global, "moz", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, global, "ms", JS_NewBool(ctx, 0));
+    /* Add globalStorage (old Firefox) */
+    JSValue globalStorage = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, global, "globalStorage", globalStorage);
+    /* Add sessionStorage (need proper implementation) */
+    JS_SetPropertyStr(ctx, global, "sessionStorage", localStorage);
+    /* Add postMessage, addEventListener, removeEventListener to window */
+    JS_SetPropertyStr(ctx, global, "postMessage", JS_NewCFunction(ctx, js_noop, "postMessage", 2));
+    /* Add frameElement (should be null, not undefined, for compatibility) */
+    JSValue windowObj = JS_GetPropertyStr(ctx, global, "window");
+    JS_SetPropertyStr(ctx, windowObj, "frameElement", JS_NULL);
+    /* Add other window properties */
+    JS_SetPropertyStr(ctx, windowObj, "name", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, windowObj, "closed", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, windowObj, "length", JS_NewInt32(ctx, 0));
+    JS_FreeValue(ctx, windowObj);
 
     /* Path2D constructor */
     JSValue path2d_ctor = JS_NewCFunction2(ctx, js_path2d_new, "Path2D", 0, JS_CFUNC_constructor, 0);

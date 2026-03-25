@@ -56,8 +56,11 @@ static int extract_attribute(const char* tag, const char* attr,
  * Helper: resolve a relative path against the base directory
  * ============================================================================ */
 static void resolve_relative_path(const char* relative, char* out, size_t out_size) {
-    /* If it's an absolute path or data URL, return as-is */
-    if (relative[0] == '/' || strncmp(relative, "data:", 5) == 0) {
+    /* If it's an absolute path, data URL, or http(s) URL, return as-is */
+    if (relative[0] == '/' || 
+        strncmp(relative, "data:", 5) == 0 ||
+        strncmp(relative, "http://", 7) == 0 ||
+        strncmp(relative, "https://", 8) == 0) {
         strncpy(out, relative, out_size - 1);
         out[out_size - 1] = '\0';
         return;
