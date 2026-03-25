@@ -1307,6 +1307,9 @@ static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueCons
         else if (strcmp(op, "destination-in") == 0) g_ctx2d.global_composite = 6;
         else if (strcmp(op, "xor") == 0)           g_ctx2d.global_composite = 7;
         else if (strcmp(op, "multiply") == 0)      g_ctx2d.global_composite = 8;
+        else if (strcmp(op, "source-atop") == 0)   g_ctx2d.global_composite = 9;
+        else if (strcmp(op, "destination-out") == 0) g_ctx2d.global_composite = 10;
+        else if (strcmp(op, "destination-atop") == 0) g_ctx2d.global_composite = 11;
         /* else: keep previous value (invalid op ignored) */
         JS_FreeCString(ctx, op);
     }
@@ -1323,6 +1326,9 @@ static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueCons
         case 6: return JS_NewString(ctx, "destination-in");
         case 7: return JS_NewString(ctx, "xor");
         case 8: return JS_NewString(ctx, "multiply");
+        case 9: return JS_NewString(ctx, "source-atop");
+        case 10: return JS_NewString(ctx, "destination-out");
+        case 11: return JS_NewString(ctx, "destination-atop");
         default: return JS_NewString(ctx, "source-over");
     }
 }

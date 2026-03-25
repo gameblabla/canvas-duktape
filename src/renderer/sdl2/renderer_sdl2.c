@@ -504,6 +504,15 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 8) { /* multiply */
         bm = SDL_BLENDMODE_MOD;
+    } else if (blend_add == 9) { /* source-atop: Src*DstA + Dst*(1-SrcA) */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 10) { /* destination-out: Dst*(1-SrcA) */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 11) { /* destination-atop: Src*(1-DstA) + Dst*SrcA */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else {
         bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     }
@@ -817,10 +826,15 @@ static void r_fill_polygon(void* target, const double* pts, int count,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 8) {
         bm = SDL_BLENDMODE_MOD;
-    } else if (blend_add == 9) {
-        /* clear: set destination to transparent black */
-        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
-                                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 9) { /* source-atop: Src*DstA + Dst*(1-SrcA) */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 10) { /* destination-out: Dst*(1-SrcA) */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 11) { /* destination-atop: Src*(1-DstA) + Dst*SrcA */
+        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                                        SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else {
         bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     }
