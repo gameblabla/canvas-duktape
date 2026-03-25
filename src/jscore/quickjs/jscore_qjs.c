@@ -234,7 +234,9 @@ typedef struct {
     char style[512];
 } CanvasObject;
 
-static CanvasObject g_canvases[64];
+#define CANVASES_INIT_CAP 256
+static CanvasObject *g_canvases = NULL;
+static int g_canvases_cap = 0;
 
 /* Audio elements - HTML5 Audio wrapper */
 #define MAX_HTML5_AUDIO_ELEMENTS 16
@@ -349,7 +351,7 @@ static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     }
 
     /* Find canvas by ID */
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == canvas_id) {
 #ifdef EXTRA_DEBUG
             fprintf(stderr, "[get_current_canvas_texture] Found canvas %d: tex=%p\n", i, g_canvases[i].tex_handle);
@@ -426,7 +428,7 @@ static void pop_state(void) {
             if (g_ctx2d.canvas_id == 0) {
                 target = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
             } else {
-                for (int i = 0; i < 64; i++) {
+                for (int i = 0; i < g_canvases_cap; i++) {
                     if (g_canvases[i].id == g_ctx2d.canvas_id) {
                         target = g_canvases[i].tex_handle;
                         break;
@@ -728,7 +730,7 @@ static void js_canvas_finalizer(JSRuntime *rt, JSValue val) {
     (void)rt;
     int id = (int)(intptr_t)JS_GetOpaque(val, js_canvas_class_id);
     if (id <= 0) return;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
             /* Don't free the primary rendering canvas (id=1) */
             if (id == 1) return;
@@ -2192,7 +2194,7 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
                 int pw = w, ph = h;
                 /* Clamp to canvas */
                 int cw = 0, ch = 0;
-                for (int i = 0; i < 64; i++) {
+                for (int i = 0; i < g_canvases_cap; i++) {
                     if (g_canvases[i].id == g_ctx2d.canvas_id || (g_ctx2d.canvas_id == 0 && i == 0)) {
                         cw = g_canvases[i].width; ch = g_canvases[i].height; break;
                     }
@@ -2274,7 +2276,7 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
     if (g_ctx2d.fill_pattern_canvas_id > 0 && g_renderer->fill_rect_pattern) {
         void *pat_tex = NULL;
         int pat_w = 0, pat_h = 0;
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < g_canvases_cap; i++) {
             if (g_canvases[i].id == g_ctx2d.fill_pattern_canvas_id) {
                 pat_tex = g_canvases[i].tex_handle;
                 pat_w = g_canvases[i].width;
@@ -2458,7 +2460,7 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
         img_h = g_images[img_idx].height;
     } else if (canvas_id > 0) {
         /* Canvas as image */
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < g_canvases_cap; i++) {
             if (g_canvases[i].id == canvas_id) {
                 img_handle = g_canvases[i].tex_handle;
                 img_w = g_canvases[i].width;
@@ -3146,7 +3148,7 @@ static JSValue js_canvas_toDataURL(JSContext *ctx, JSValueConst this_val,
     if (!JS_IsUndefined(canvasIdVal)) {
         JS_ToInt32(ctx, &id, canvasIdVal);
         /* Get canvas dimensions */
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < g_canvases_cap; i++) {
             if (g_canvases[i].id == id) {
                 width = g_canvases[i].width;
                 height = g_canvases[i].height;
@@ -3194,7 +3196,7 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyFunctionList(ctx, ctx_obj, js_ctx2d_props,
                                sizeof(js_ctx2d_props) / sizeof(js_ctx2d_props[0]));
 
-    /* Store reference to canvas */
+    /* Store reference to canvas (needed by game code that accesses ctx.canvas.width etc.) */
     JS_SetPropertyStr(ctx, ctx_obj, "canvas", JS_DupValue(ctx, this_val));
 
     /* Store canvas ID for texture lookup */
@@ -3206,7 +3208,7 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
 static JSValue js_canvas_get_width(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
             return JS_NewInt32(ctx, g_canvases[i].width);
         }
@@ -3219,7 +3221,7 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
     int new_width = 0;
     if (argc > 0) JS_ToInt32(ctx, &new_width, argv[0]);
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
             if (g_canvases[i].width != new_width) {
                 /* Don't recreate main canvas (id=1) texture - it's managed by the renderer */
@@ -3252,7 +3254,7 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
 static JSValue js_canvas_get_height(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
             return JS_NewInt32(ctx, g_canvases[i].height);
         }
@@ -3265,7 +3267,7 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
     int new_height = 0;
     if (argc > 0) JS_ToInt32(ctx, &new_height, argv[0]);
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
             if (g_canvases[i].height != new_height) {
                 /* Don't recreate main canvas (id=1) texture - it's managed by the renderer */
@@ -3297,7 +3299,7 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_canvas_get_style(JSContext *ctx, JSValueConst this_val) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
             return JS_NewString(ctx, g_canvases[i].style);
         }
@@ -4499,7 +4501,7 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
     if (!id) return JS_NULL;
 
     /* Check canvases — match by HTML id="canvas" or style name */
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id != 0) {
             char buf[256];
             snprintf(buf, sizeof(buf), "canvas%d", g_canvases[i].id);
@@ -4550,7 +4552,7 @@ static JSValue js_document_getElementsByTagName(JSContext *ctx, JSValueConst thi
 
     /* Check canvases */
     if (strcmp(tag, "canvas") == 0 || strcmp(tag, "*") == 0) {
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < g_canvases_cap; i++) {
             if (g_canvases[i].id != 0) {
                 JSValue obj = JS_NewObjectClass(ctx, js_canvas_class_id);
                 JS_SetOpaque(obj, (void*)(intptr_t)g_canvases[i].id);
@@ -4675,7 +4677,7 @@ static JSValue js_canvas_getBoundingClientRect(JSContext *ctx, JSValueConst this
     JS_FreeValue(ctx, idv);
 
     int w = g_win_w, h = g_win_h;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == canvas_id) {
             w = g_canvases[i].width;
             h = g_canvases[i].height;
@@ -4926,8 +4928,27 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
         } else {
             /* Subsequent canvas creations (buffers etc.) get their own texture */
             int idx = -1;
-            for (int i = 0; i < 64; i++) {
+            for (int i = 0; i < g_canvases_cap; i++) {
                 if (g_canvases[i].id == 0) { idx = i; break; }
+            }
+            /* Pool full: try GC first (may free cyclic garbage), then grow */
+            if (idx < 0) {
+                JS_RunGC(g_rt);
+                for (int i = 0; i < g_canvases_cap; i++) {
+                    if (g_canvases[i].id == 0) { idx = i; break; }
+                }
+            }
+            /* Still full: grow the array */
+            if (idx < 0) {
+                int new_cap = g_canvases_cap * 2;
+                CanvasObject *new_arr = realloc(g_canvases, new_cap * sizeof(CanvasObject));
+                if (new_arr) {
+                    memset(new_arr + g_canvases_cap, 0,
+                           g_canvases_cap * sizeof(CanvasObject));
+                    g_canvases = new_arr;
+                    idx = g_canvases_cap;
+                    g_canvases_cap = new_cap;
+                }
             }
             if (idx >= 0) {
                 static int canvas_id_counter = 1000;
@@ -5803,7 +5824,12 @@ static int jscore_qjs_init(RendererInterface *renderer,
     memset(g_key_listeners, 0, sizeof(g_key_listeners));
     memset(g_storage, 0, sizeof(g_storage));
     memset(g_images, 0, sizeof(g_images));
-    memset(g_canvases, 0, sizeof(g_canvases));
+    if (!g_canvases) {
+        g_canvases_cap = CANVASES_INIT_CAP;
+        g_canvases = calloc(g_canvases_cap, sizeof(CanvasObject));
+    } else {
+        memset(g_canvases, 0, g_canvases_cap * sizeof(CanvasObject));
+    }
     memset(g_raf_callbacks, 0, sizeof(g_raf_callbacks));
     memset(g_audio_elements, 0, sizeof(g_audio_elements));
     for (int i = 0; i < MAX_HTML5_AUDIO_ELEMENTS; i++) {
@@ -6496,6 +6522,20 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global, "encodeURIComponent", JS_NewCFunction(ctx, js_encodeURIComponent, "encodeURIComponent", 1));
     JS_SetPropertyStr(ctx, global, "decodeURIComponent", JS_NewCFunction(ctx, js_decodeURIComponent, "decodeURIComponent", 1));
 
+    /* Compatibility shim: Function.caller is not supported in QuickJS but some
+     * legacy GameMaker JS uses it (e.g. _uN.caller.name for error reporting).
+     * Provide a getter on Function.prototype that returns a dummy with name="". */
+    JS_Eval(ctx,
+        "(function(){"
+        "  try {"
+        "    Object.defineProperty(Function.prototype,'caller',{"
+        "      get:function(){return{name:''}},"
+        "      configurable:true,enumerable:false"
+        "    });"
+        "  } catch(e){}"
+        "})();",
+        -1, "<compat>", JS_EVAL_TYPE_GLOBAL);
+
     JS_FreeValue(ctx, global);
 }
 
@@ -6511,7 +6551,7 @@ static void jscore_qjs_setup_globals(int win_w, int win_h,
     setup_globals_object(g_ctx);
 
     /* Pre-setup canvases */
-    for (int i = 0; i < canvas_count && i < 64; i++) {
+    for (int i = 0; i < canvas_count && i < g_canvases_cap; i++) {
         g_canvases[i].id = i + 1;
         g_canvases[i].width = canvases[i].width;
         g_canvases[i].height = canvases[i].height;
