@@ -362,6 +362,9 @@ int main(int argc, char** argv) {
     /* Set base directory for sound (for resolving relative audio paths) */
     sound_set_base_dir(g_base_dir);
 
+    /* Set base directory for XHR (for resolving relative file paths in scripts) */
+    jscore_qjs_set_base_dir(g_base_dir);
+
     if (!renderer.init(win_w, win_h, "Canvas Demo")) {
         fprintf(stderr, "Renderer init failed.\n");
         return 1;

@@ -4097,6 +4097,11 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
         JS_NewCFunction(ctx, js_canvas_getBoundingClientRect, "getBoundingClientRect", 0));
     JS_SetPropertyStr(ctx, obj, "offsetLeft",       JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "offsetTop",        JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "setAttribute",     JS_NewCFunction(ctx, js_noop, "setAttribute", 2));
+    JS_SetPropertyStr(ctx, obj, "getAttribute",     JS_NewCFunction(ctx, js_noop, "getAttribute", 1));
+    JS_SetPropertyStr(ctx, obj, "nextSibling",      JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "parentNode",       js_make_element_stub(ctx));
+    JS_SetPropertyStr(ctx, obj, "offsetParent",     JS_NULL);
 
     JSAtom width_atom = JS_NewAtom(ctx, "width");
     JSValue width_getter = JS_NewCFunction(ctx, js_canvas_get_width, "width", 0);
@@ -4392,6 +4397,7 @@ static const JSCFunctionListEntry js_window_funcs[] = {
     JS_CFUNC_DEF("addEventListener", 2, js_window_addEventListener),
     JS_CFUNC_DEF("removeEventListener", 2, js_window_removeEventListener),
     JS_CFUNC_DEF("requestAnimationFrame", 1, js_window_requestAnimationFrame_global),
+    JS_CFUNC_DEF("requestAnimFrame", 1, js_window_requestAnimationFrame_global),
     JS_CFUNC_DEF("cancelAnimationFrame", 1, js_window_cancelAnimationFrame_global),
     JS_CFUNC_DEF("setInterval", 2, js_window_setInterval_global),
     JS_CFUNC_DEF("setTimeout", 2, js_window_setTimeout_global),
@@ -4436,11 +4442,28 @@ static JSValue js_navigator_get_online(JSContext *ctx, JSValueConst this_val) {
     return JS_NewBool(ctx, true);
 }
 
+static JSValue js_navigator_get_vendor(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, "Google Inc.");
+}
+static JSValue js_navigator_get_appVersion(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, "5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+}
+static JSValue js_navigator_get_appName(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewString(ctx, "Netscape");
+}
+static JSValue js_navigator_get_maxTouchPoints(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, 0);
+}
+
 static const JSCFunctionListEntry js_navigator_props[] = {
-    JS_CGETSET_DEF("userAgent", js_navigator_get_userAgent, NULL),
-    JS_CGETSET_DEF("platform", js_navigator_get_platform, NULL),
-    JS_CGETSET_DEF("language", js_navigator_get_language, NULL),
-    JS_CGETSET_DEF("onLine", js_navigator_get_online, NULL),
+    JS_CGETSET_DEF("userAgent",     js_navigator_get_userAgent,    NULL),
+    JS_CGETSET_DEF("platform",      js_navigator_get_platform,     NULL),
+    JS_CGETSET_DEF("language",      js_navigator_get_language,     NULL),
+    JS_CGETSET_DEF("onLine",        js_navigator_get_online,       NULL),
+    JS_CGETSET_DEF("vendor",        js_navigator_get_vendor,       NULL),
+    JS_CGETSET_DEF("appVersion",    js_navigator_get_appVersion,   NULL),
+    JS_CGETSET_DEF("appName",       js_navigator_get_appName,      NULL),
+    JS_CGETSET_DEF("maxTouchPoints",js_navigator_get_maxTouchPoints, NULL),
 };
 
 /* ============================================================================
@@ -5134,6 +5157,167 @@ static JSValue js_path2d_new(JSContext *ctx, JSValueConst new_target,
     return obj;
 }
 
+/* ============================================================================
+ * XMLHttpRequest Implementation (local file I/O only)
+ * ============================================================================ */
+static char g_jscore_base_dir[1024] = {0};
+
+void jscore_qjs_set_base_dir(const char *dir) {
+    if (dir) {
+        strncpy(g_jscore_base_dir, dir, sizeof(g_jscore_base_dir) - 1);
+        g_jscore_base_dir[sizeof(g_jscore_base_dir) - 1] = '\0';
+    } else {
+        g_jscore_base_dir[0] = '\0';
+    }
+}
+
+static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int success) {
+    JSValue cb = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
+    if (JS_IsFunction(ctx, cb)) {
+        JSValue ret = JS_Call(ctx, cb, this_val, 0, NULL);
+        if (JS_IsException(ret)) JS_GetException(ctx);
+        JS_FreeValue(ctx, ret);
+    }
+    JS_FreeValue(ctx, cb);
+
+    if (success) {
+        cb = JS_GetPropertyStr(ctx, this_val, "onload");
+        if (JS_IsFunction(ctx, cb)) {
+            JSValue ev = JS_NewObject(ctx);
+            JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
+            if (JS_IsException(ret)) JS_GetException(ctx);
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, ev);
+        }
+        JS_FreeValue(ctx, cb);
+    } else {
+        cb = JS_GetPropertyStr(ctx, this_val, "onerror");
+        if (JS_IsFunction(ctx, cb)) {
+            JSValue ev = JS_NewObject(ctx);
+            JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
+            if (JS_IsException(ret)) JS_GetException(ctx);
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, ev);
+        }
+        JS_FreeValue(ctx, cb);
+    }
+}
+
+static JSValue js_xhr_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc >= 1) JS_SetPropertyStr(ctx, this_val, "_method", JS_DupValue(ctx, argv[0]));
+    if (argc >= 2) JS_SetPropertyStr(ctx, this_val, "_url",    JS_DupValue(ctx, argv[1]));
+    if (argc >= 3) JS_SetPropertyStr(ctx, this_val, "_async",  JS_DupValue(ctx, argv[2]));
+    JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 1));
+    return JS_UNDEFINED;
+}
+
+static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSValue url_v = JS_GetPropertyStr(ctx, this_val, "_url");
+    const char *url = JS_ToCString(ctx, url_v);
+    JS_FreeValue(ctx, url_v);
+    if (!url) return JS_UNDEFINED;
+
+    /* Skip network URLs — only local files supported */
+    if (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0 ||
+        strncmp(url, "//", 2) == 0) {
+        JS_FreeCString(ctx, url);
+        JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 4));
+        JS_SetPropertyStr(ctx, this_val, "status", JS_NewInt32(ctx, 0));
+        xhr_fire_callbacks(ctx, this_val, 0);
+        return JS_UNDEFINED;
+    }
+
+    JSValue rt_v = JS_GetPropertyStr(ctx, this_val, "responseType");
+    const char *resp_type = JS_ToCString(ctx, rt_v);
+    JS_FreeValue(ctx, rt_v);
+    int is_arraybuffer = resp_type && strcmp(resp_type, "arraybuffer") == 0;
+    JS_FreeCString(ctx, resp_type);
+
+    char filepath[2048];
+    if (g_jscore_base_dir[0] && url[0] != '/') {
+        snprintf(filepath, sizeof(filepath), "%s/%s", g_jscore_base_dir, url);
+    } else {
+        strncpy(filepath, url, sizeof(filepath) - 1);
+        filepath[sizeof(filepath) - 1] = '\0';
+    }
+    JS_FreeCString(ctx, url);
+
+    FILE *fp = fopen(filepath, "rb");
+    if (!fp) {
+        JS_SetPropertyStr(ctx, this_val, "readyState",  JS_NewInt32(ctx, 4));
+        JS_SetPropertyStr(ctx, this_val, "status",      JS_NewInt32(ctx, 404));
+        JS_SetPropertyStr(ctx, this_val, "statusText",  JS_NewString(ctx, "Not Found"));
+        xhr_fire_callbacks(ctx, this_val, 0);
+        return JS_UNDEFINED;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    uint8_t *data = (uint8_t *)malloc(fsize > 0 ? (size_t)fsize : 1);
+    if (!data) { fclose(fp); return JS_UNDEFINED; }
+    fread(data, 1, (size_t)fsize, fp);
+    fclose(fp);
+
+    JS_SetPropertyStr(ctx, this_val, "readyState",  JS_NewInt32(ctx, 4));
+    JS_SetPropertyStr(ctx, this_val, "status",      JS_NewInt32(ctx, 200));
+    JS_SetPropertyStr(ctx, this_val, "statusText",  JS_NewString(ctx, "OK"));
+
+    if (is_arraybuffer) {
+        JSValue ab = JS_NewArrayBufferCopy(ctx, data, (size_t)fsize);
+        JS_SetPropertyStr(ctx, this_val, "response",     ab);
+        JS_SetPropertyStr(ctx, this_val, "responseText", JS_NewString(ctx, ""));
+    } else {
+        JSValue txt = JS_NewStringLen(ctx, (const char *)data, (size_t)fsize);
+        JS_SetPropertyStr(ctx, this_val, "responseText", txt);
+        JS_SetPropertyStr(ctx, this_val, "response",     JS_DupValue(ctx, txt));
+    }
+    free(data);
+
+    xhr_fire_callbacks(ctx, this_val, 1);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_xhr_setHeader(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_xhr_getAllHeaders(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewString(ctx, "");
+}
+
+static JSValue js_xhr_abort(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
+    (void)new_target; (void)argc; (void)argv;
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "readyState",          JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "status",              JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "statusText",          JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "responseType",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "responseText",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "response",            JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "onload",              JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "onerror",             JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "onreadystatechange",  JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "ontimeout",           JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "timeout",             JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "_url",                JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "_method",             JS_NewString(ctx, "GET"));
+    JS_SetPropertyStr(ctx, obj, "_async",              JS_NewBool(ctx, 1));
+    JS_SetPropertyStr(ctx, obj, "open",                JS_NewCFunction(ctx, js_xhr_open,       "open",                3));
+    JS_SetPropertyStr(ctx, obj, "send",                JS_NewCFunction(ctx, js_xhr_send,       "send",                1));
+    JS_SetPropertyStr(ctx, obj, "setRequestHeader",    JS_NewCFunction(ctx, js_xhr_setHeader,  "setRequestHeader",    2));
+    JS_SetPropertyStr(ctx, obj, "getAllResponseHeaders", JS_NewCFunction(ctx, js_xhr_getAllHeaders, "getAllResponseHeaders", 0));
+    JS_SetPropertyStr(ctx, obj, "abort",               JS_NewCFunction(ctx, js_xhr_abort,      "abort",               0));
+    return obj;
+}
+
 static void setup_globals_object(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
 
@@ -5203,6 +5387,8 @@ static void setup_globals_object(JSContext *ctx) {
                                sizeof(js_document_props) / sizeof(js_document_props[0]));
     /* Add location to document (same as window.location) */
     JS_SetPropertyStr(ctx, document, "location", js_window_get_location(ctx, JS_UNDEFINED));
+    /* Add URL property (GMS2 checks document.URL.substring(0,5)) */
+    JS_SetPropertyStr(ctx, document, "URL", JS_NewString(ctx, ""));
     /* Add addEventListener/removeEventListener to document (copied from global) */
     JS_SetPropertyStr(ctx, document, "addEventListener", JS_GetPropertyStr(ctx, global, "addEventListener"));
     JS_SetPropertyStr(ctx, document, "removeEventListener", JS_GetPropertyStr(ctx, global, "removeEventListener"));
@@ -5241,6 +5427,22 @@ static void setup_globals_object(JSContext *ctx) {
     /* Path2D constructor */
     JSValue path2d_ctor = JS_NewCFunction2(ctx, js_path2d_new, "Path2D", 0, JS_CFUNC_constructor, 0);
     JS_SetPropertyStr(ctx, global, "Path2D", path2d_ctor);
+
+    /* XMLHttpRequest constructor */
+    JSValue xhr_ctor = JS_NewCFunction2(ctx, js_xhr_ctor, "XMLHttpRequest", 0, JS_CFUNC_constructor, 0);
+    JSValue xhr_proto = JS_NewObject(ctx);
+    /* Populate prototype so "response" in XMLHttpRequest.prototype is true */
+    JS_SetPropertyStr(ctx, xhr_proto, "response",     JS_NULL);
+    JS_SetPropertyStr(ctx, xhr_proto, "responseText", JS_NULL);
+    JS_SetPropertyStr(ctx, xhr_ctor, "prototype", xhr_proto);
+    /* Standard readyState constants */
+    JS_SetPropertyStr(ctx, xhr_ctor, "UNSENT",           JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, xhr_ctor, "OPENED",           JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, xhr_ctor, "HEADERS_RECEIVED", JS_NewInt32(ctx, 2));
+    JS_SetPropertyStr(ctx, xhr_ctor, "LOADING",          JS_NewInt32(ctx, 3));
+    JS_SetPropertyStr(ctx, xhr_ctor, "DONE",             JS_NewInt32(ctx, 4));
+    JS_SetPropertyStr(ctx, xhr_ctor, "_hs2",             JS_NewInt32(ctx, 4)); /* GMS2-obfuscated DONE */
+    JS_SetPropertyStr(ctx, global, "XMLHttpRequest", xhr_ctor);
 
     /* Global utility functions */
     JS_SetPropertyStr(ctx, global, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));
@@ -5422,12 +5624,24 @@ static void jscore_qjs_call_window_onload(void) {
     JSValue onload = JS_GetPropertyStr(g_ctx, global, "onload");
 
     if (JS_IsFunction(g_ctx, onload)) {
+        fprintf(stderr, "[jscore] calling window.onload\n");
         JSValue ret = JS_Call(g_ctx, onload, global, 0, NULL);
         if (JS_IsException(ret)) {
             JSValue exc = JS_GetException(g_ctx);
+            const char *s = JS_ToCString(g_ctx, exc);
+            if (s) { fprintf(stderr, "[jscore] window.onload exception: %s\n", s); JS_FreeCString(g_ctx, s); }
+            /* Print stack trace */
+            JSValue stack = JS_GetPropertyStr(g_ctx, exc, "stack");
+            if (!JS_IsUndefined(stack)) {
+                const char *ss = JS_ToCString(g_ctx, stack);
+                if (ss) { fprintf(stderr, "[jscore] Stack: %s\n", ss); JS_FreeCString(g_ctx, ss); }
+            }
+            JS_FreeValue(g_ctx, stack);
             JS_FreeValue(g_ctx, exc);
         }
         JS_FreeValue(g_ctx, ret);
+    } else {
+        fprintf(stderr, "[jscore] window.onload not a function (type=%d)\n", (int)JS_VALUE_GET_TAG(onload));
     }
 
     JS_FreeValue(g_ctx, onload);
@@ -5536,6 +5750,16 @@ static void jscore_qjs_check_timers(void) {
                     fprintf(stderr, "RAF error: %s\n", exc_str);
                     JS_FreeCString(g_ctx, exc_str);
                 }
+                /* Print stack trace */
+                JSValue stack = JS_GetPropertyStr(g_ctx, exc, "stack");
+                if (!JS_IsUndefined(stack)) {
+                    const char *stack_str = JS_ToCString(g_ctx, stack);
+                    if (stack_str) {
+                        fprintf(stderr, "RAF stack: %s\n", stack_str);
+                        JS_FreeCString(g_ctx, stack_str);
+                    }
+                }
+                JS_FreeValue(g_ctx, stack);
                 JS_FreeValue(g_ctx, exc);
             }
 
