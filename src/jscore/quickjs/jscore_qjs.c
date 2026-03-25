@@ -2760,10 +2760,15 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
     uint8_t *pixels = malloc(sw * sh * 4);
     if (g_renderer->get_pixels) {
         g_renderer->get_pixels(target, sx, sy, sw, sh, pixels);
-#ifdef EXTRA_DEBUG
-        fprintf(stderr, "[getImageData] canvas_id=%d, target=%p, rect=(%d,%d,%d,%d), pixel[0]=(%d,%d,%d,%d)\n",
-                g_ctx2d.canvas_id, target, sx, sy, sw, sh, pixels[0], pixels[1], pixels[2], pixels[3]);
-#endif
+        /* SDL2 textures store premultiplied alpha; canvas spec requires straight alpha */
+        for (int i = 0; i < sw * sh; i++) {
+            uint8_t a = pixels[i*4+3];
+            if (a > 0 && a < 255) {
+                pixels[i*4+0] = (uint8_t)((pixels[i*4+0] * 255 + a/2) / a);
+                pixels[i*4+1] = (uint8_t)((pixels[i*4+1] * 255 + a/2) / a);
+                pixels[i*4+2] = (uint8_t)((pixels[i*4+2] * 255 + a/2) / a);
+            }
+        }
     }
 
     JSValue data_arr = JS_NewArray(ctx);
