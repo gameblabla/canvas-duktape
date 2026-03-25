@@ -59,37 +59,58 @@ static void get_resource_path(const char* filename, char* out, size_t out_size) 
 }
 
 static TTF_Font* get_font(const char* family, int size) {
+    /* Check for bold/italic prefix (e.g., "bold Arial", "bold sans-serif") */
+    int is_bold = 0, is_italic = 0;
+    const char* fam = family ? family : "";
+    if (strncmp(fam, "bold-italic ", 12) == 0) { is_bold = 1; is_italic = 1; fam += 12; }
+    else if (strncmp(fam, "bold ", 5) == 0)    { is_bold = 1; fam += 5; }
+    else if (strncmp(fam, "italic ", 7) == 0)  { is_italic = 1; fam += 7; }
+
     /* Normalize family name */
     char family_norm[32] = "sans-serif";
-    if (family && family[0]) {
-        if (strcmp(family, "Arial") == 0 || strcmp(family, "Helvetica") == 0 ||
-            strcmp(family, "Helvetica Neue") == 0 || strcmp(family, "sans-serif") == 0) {
+    if (fam && fam[0]) {
+        if (strcmp(fam, "Arial") == 0 || strcmp(fam, "Helvetica") == 0 ||
+            strcmp(fam, "Helvetica Neue") == 0 || strcmp(fam, "sans-serif") == 0) {
             strncpy(family_norm, "sans-serif", sizeof(family_norm) - 1);
-        } else if (strcmp(family, "Times") == 0 || strcmp(family, "Times New Roman") == 0 ||
-                   strcmp(family, "Georgia") == 0 || strcmp(family, "serif") == 0) {
+        } else if (strcmp(fam, "Times") == 0 || strcmp(fam, "Times New Roman") == 0 ||
+                   strcmp(fam, "Georgia") == 0 || strcmp(fam, "serif") == 0) {
             strncpy(family_norm, "serif", sizeof(family_norm) - 1);
-        } else if (strcmp(family, "Courier") == 0 || strcmp(family, "Courier New") == 0 ||
-                   strcmp(family, "monospace") == 0 || strcmp(family, "Lucida Console") == 0) {
+        } else if (strcmp(fam, "Courier") == 0 || strcmp(fam, "Courier New") == 0 ||
+                   strcmp(fam, "monospace") == 0 || strcmp(fam, "Lucida Console") == 0) {
             strncpy(family_norm, "monospace", sizeof(family_norm) - 1);
         } else {
             strncpy(family_norm, "sans-serif", sizeof(family_norm) - 1);
         }
     }
 
-    /* Map normalized family to TTF file */
+    /* Build cache key that includes bold/italic */
+    char cache_key[48];
+    snprintf(cache_key, sizeof(cache_key), "%s%s%s",
+             is_bold ? "bold-" : "", is_italic ? "italic-" : "", family_norm);
+
+    /* Map normalized family + style to TTF file */
     const char* ttf_file;
     if (strcmp(family_norm, "serif") == 0) {
-        ttf_file = "TTF/DejaVuSerif.ttf";
+        ttf_file = (is_bold && is_italic) ? "TTF/DejaVuSerif-BoldItalic.ttf" :
+                   is_bold   ? "TTF/DejaVuSerif-Bold.ttf" :
+                   is_italic ? "TTF/DejaVuSerif-Italic.ttf" :
+                               "TTF/DejaVuSerif.ttf";
     } else if (strcmp(family_norm, "monospace") == 0) {
-        ttf_file = "TTF/DejaVuSansMono.ttf";
+        ttf_file = (is_bold && is_italic) ? "TTF/DejaVuSansMono-BoldOblique.ttf" :
+                   is_bold   ? "TTF/DejaVuSansMono-Bold.ttf" :
+                   is_italic ? "TTF/DejaVuSansMono-Oblique.ttf" :
+                               "TTF/DejaVuSansMono.ttf";
     } else {
-        ttf_file = "TTF/DejaVuSans.ttf";
+        ttf_file = (is_bold && is_italic) ? "TTF/DejaVuSans-BoldOblique.ttf" :
+                   is_bold   ? "TTF/DejaVuSans-Bold.ttf" :
+                   is_italic ? "TTF/DejaVuSans-Oblique.ttf" :
+                               "TTF/DejaVuSans.ttf";
     }
 
-    /* Look up (family_norm, size) in cache */
+    /* Look up (cache_key, size) in cache */
     for (int i = 0; i < g_font_cache_count; i++) {
         if (g_font_cache[i].size == size &&
-            strcmp(g_font_cache[i].family, family_norm) == 0) {
+            strcmp(g_font_cache[i].family, cache_key) == 0) {
             return g_font_cache[i].font;
         }
     }
@@ -100,12 +121,12 @@ static TTF_Font* get_font(const char* family, int size) {
         get_resource_path(ttf_file, font_path, sizeof(font_path));
         TTF_Font* f = TTF_OpenFont(font_path, size);
         if (!f) {
-            /* Fallback: try Arial.ttf */
-            get_resource_path("Arial.ttf", font_path, sizeof(font_path));
+            /* Fallback: try plain sans-serif */
+            get_resource_path("TTF/DejaVuSans.ttf", font_path, sizeof(font_path));
             f = TTF_OpenFont(font_path, size);
         }
         if (f) {
-            strncpy(g_font_cache[g_font_cache_count].family, family_norm,
+            strncpy(g_font_cache[g_font_cache_count].family, cache_key,
                     sizeof(g_font_cache[g_font_cache_count].family) - 1);
             g_font_cache[g_font_cache_count].family[sizeof(g_font_cache[g_font_cache_count].family) - 1] = '\0';
             g_font_cache[g_font_cache_count].size = size;

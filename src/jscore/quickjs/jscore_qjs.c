@@ -1313,12 +1313,22 @@ static JSValue js_ctx2d_set_font(JSContext *ctx, JSValueConst this_val, JSValueC
         if (fam) {
             fam += 2; /* skip "px" */
             while (*fam == ' ') fam++; /* skip spaces */
-            strncpy(g_ctx2d.font_family, fam, sizeof(g_ctx2d.font_family) - 1);
-            g_ctx2d.font_family[sizeof(g_ctx2d.font_family) - 1] = '\0';
+            /* Detect bold/italic from the part before "px" */
+            int has_bold = (strstr(font, "bold") != NULL);
+            int has_italic = (strstr(font, "italic") != NULL || strstr(font, "oblique") != NULL);
+            char prefix[32] = "";
+            if (has_bold && has_italic) strncpy(prefix, "bold-italic ", sizeof(prefix)-1);
+            else if (has_bold)          strncpy(prefix, "bold ", sizeof(prefix)-1);
+            else if (has_italic)        strncpy(prefix, "italic ", sizeof(prefix)-1);
+            /* Build family with optional bold/italic prefix */
+            char tmp[512];
+            snprintf(tmp, sizeof(tmp), "%s%s", prefix, fam);
             /* Remove trailing whitespace */
-            int flen = strlen(g_ctx2d.font_family);
-            while (flen > 0 && (g_ctx2d.font_family[flen-1] == ' ' || g_ctx2d.font_family[flen-1] == '\t'))
-                g_ctx2d.font_family[--flen] = '\0';
+            int tlen = strlen(tmp);
+            while (tlen > 0 && (tmp[tlen-1] == ' ' || tmp[tlen-1] == '\t'))
+                tmp[--tlen] = '\0';
+            strncpy(g_ctx2d.font_family, tmp, sizeof(g_ctx2d.font_family) - 1);
+            g_ctx2d.font_family[sizeof(g_ctx2d.font_family) - 1] = '\0';
         } else {
             strncpy(g_ctx2d.font_family, "sans-serif", sizeof(g_ctx2d.font_family) - 1);
         }
@@ -2469,6 +2479,21 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
             strncpy(rtl_align, "left", sizeof(rtl_align)-1);
             effective_align = rtl_align;
         }
+    }
+
+    /* Draw shadow first if configured */
+    if (g_renderer->fill_text && g_ctx2d.shadow_color[3] > 0 &&
+        (g_ctx2d.shadow_offset_x != 0.0 || g_ctx2d.shadow_offset_y != 0.0 || g_ctx2d.shadow_blur > 0.0)) {
+        uint8_t sr = color_to_byte(g_ctx2d.shadow_color[0]);
+        uint8_t sg = color_to_byte(g_ctx2d.shadow_color[1]);
+        uint8_t sb = color_to_byte(g_ctx2d.shadow_color[2]);
+        uint8_t sa = color_to_byte(g_ctx2d.shadow_color[3]);
+        g_renderer->fill_text(target, text,
+                              tx + g_ctx2d.shadow_offset_x,
+                              ty + g_ctx2d.shadow_offset_y,
+                              sr, sg, sb, sa,
+                              g_ctx2d.font_size, effective_align, g_ctx2d.text_baseline,
+                              g_ctx2d.font_family);
     }
 
     if (g_renderer->fill_text) {
