@@ -596,7 +596,7 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
 }
 
 static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
-                                 void* img) {
+                                 void* img, uint8_t alpha) {
     SDL_Texture* tex = (SDL_Texture*)target;
     SDL_Texture* pat = (SDL_Texture*)img;
     if (!tex || !pat) return;
@@ -605,6 +605,9 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
     /* Apply clip rect for this texture */
     apply_clip_for_texture(tex);
+    /* Set pattern alpha */
+    SDL_SetTextureAlphaMod(pat, alpha);
+    SDL_SetTextureBlendMode(pat, SDL_BLENDMODE_BLEND);
     /* Tile the pattern */
     for (int ty = y; ty < y+h; ty += ph) {
         for (int tx = x; tx < x+w; tx += pw) {
@@ -615,6 +618,8 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
             SDL_RenderCopy(g_sdl_renderer, pat, &src, &dst);
         }
     }
+    /* Reset pattern alpha */
+    SDL_SetTextureAlphaMod(pat, 255);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
     SDL_RenderFlush(g_sdl_renderer);
 }
@@ -1058,30 +1063,37 @@ static void r_put_pixels(void* target, const uint8_t* rgba,
                           int x, int y, int w, int h) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || !rgba) return;
-    Uint32* buf = malloc(w * h * 4);
-    if (!buf) return;
-    for (int i = 0; i < w*h; i++) {
-        buf[i] = ((Uint32)rgba[i*4+0] << 24)
-               | ((Uint32)rgba[i*4+1] << 16)
-               | ((Uint32)rgba[i*4+2] <<  8)
-               |  (Uint32)rgba[i*4+3];
-    }
+    
+    /* Create temporary texture with alpha blending */
     SDL_Texture* tmp = SDL_CreateTexture(g_sdl_renderer,
-                                         SDL_PIXELFORMAT_RGBA8888,
+                                         SDL_PIXELFORMAT_ABGR8888,
                                          SDL_TEXTUREACCESS_STREAMING, w, h);
-    if (tmp) {
-        SDL_UpdateTexture(tmp, NULL, buf, w * 4);
-        SDL_SetTextureBlendMode(tmp, SDL_BLENDMODE_NONE);
-        SDL_SetRenderTarget(g_sdl_renderer, tex);
-        /* Apply clip rect for this texture */
-        apply_clip_for_texture(tex);
-        SDL_Rect dst = {x, y, w, h};
-        SDL_RenderCopy(g_sdl_renderer, tmp, NULL, &dst);
-        SDL_SetRenderTarget(g_sdl_renderer, NULL);
-        SDL_RenderFlush(g_sdl_renderer);
-        SDL_DestroyTexture(tmp);
+    if (!tmp) return;
+    
+    /* Convert RGBA to ABGR format for SDL */
+    Uint32* buf = malloc(w * h * 4);
+    if (!buf) { SDL_DestroyTexture(tmp); return; }
+    for (int i = 0; i < w*h; i++) {
+        Uint8 r = rgba[i*4+0];
+        Uint8 g = rgba[i*4+1];
+        Uint8 b = rgba[i*4+2];
+        Uint8 a = rgba[i*4+3];
+        /* SDL_PIXELFORMAT_ABGR8888: A in bits 24-31, B in 16-23, G in 8-15, R in 0-7 */
+        buf[i] = ((Uint32)a << 24) | ((Uint32)b << 16) | ((Uint32)g << 8) | (Uint32)r;
     }
+    
+    SDL_UpdateTexture(tmp, NULL, buf, w * 4);
     free(buf);
+    
+    SDL_SetTextureBlendMode(tmp, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderTarget(g_sdl_renderer, tex);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
+    SDL_Rect dst = {x, y, w, h};
+    SDL_RenderCopy(g_sdl_renderer, tmp, NULL, &dst);
+    SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
+    SDL_DestroyTexture(tmp);
 }
 
 static char* r_to_data_url(void* target, int w, int h) {

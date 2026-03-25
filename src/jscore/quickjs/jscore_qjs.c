@@ -103,9 +103,13 @@ typedef struct {
     char line_cap[16];      /* "butt", "round", "square" */
     char line_join[16];     /* "miter", "round", "bevel" */
     double miter_limit;     /* default 10.0 */
-    char filter[64];        /* default "none" */
+    char filter[256];       /* default "none" */
     char direction[8];      /* "ltr" or "rtl" */
     char smoothing_quality[16]; /* "low", "medium", "high" */
+    
+    /* Parsed filter values */
+    float filter_brightness; /* 1.0 = normal */
+    float filter_contrast;   /* 1.0 = normal */
 
     /* Gradient/Pattern fill */
     int fill_gradient_id;   /* 0=none, 1..MAX_GRADIENTS = gradient index+1 */
@@ -151,13 +155,15 @@ typedef struct {
         char line_cap[16];
         char line_join[16];
         double miter_limit;
-        char filter[64];
+        char filter[256];
         char direction[8];
         char smoothing_quality[16];
         int fill_gradient_id;
         int stroke_gradient_id;
         int fill_pattern_canvas_id;
         int stroke_pattern_canvas_id;
+        float filter_brightness;
+        float filter_contrast;
     } *state_stack;
     int stack_top;
     int stack_capacity;
@@ -489,6 +495,8 @@ static void reset_ctx2d_defaults(int canvas_id) {
     strcpy(g_ctx2d.filter, "none");
     strcpy(g_ctx2d.smoothing_quality, "low");
     g_ctx2d.image_smoothing_enabled = 1;
+    g_ctx2d.filter_brightness = 1.0f;
+    g_ctx2d.filter_contrast = 1.0f;
     g_ctx2d.stack_top = 0;
     g_ctx2d.path_count = 0;
     g_ctx2d.canvas_id = canvas_id;
@@ -613,6 +621,28 @@ static int find_free_image_slot(void) {
     return -1;
 }
 
+/* Convert HSL to RGB. h,s,l in [0,1] range, returns rgb in [0,1] range */
+static double hue_to_rgb_helper(double p, double q, double t) {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1.0/6) return p + (q - p) * 6 * t;
+    if (t < 1.0/2) return p + (q - p) * (2.0/3 - t) * 6;
+    if (t < 2.0/3) return p + (q - p) * (2.0/3 - t);
+    return p;
+}
+
+static void hsl_to_rgb(double h, double s, double l, double *r, double *g, double *b) {
+    if (s == 0) {
+        *r = l; *g = l; *b = l;
+        return;
+    }
+    double q = (l < 0.5) ? l * (1 + s) : l + s - l * s;
+    double p = 2 * l - q;
+    *r = hue_to_rgb_helper(p, q, h + 1.0/3);
+    *g = hue_to_rgb_helper(p, q, h);
+    *b = hue_to_rgb_helper(p, q, h - 1.0/3);
+}
+
 /* Returns 1 if color was successfully parsed, 0 if invalid (out unchanged) */
 static int color_from_js_checked(JSValue v, double *out) {
     if (JS_IsNumber(v)) {
@@ -669,6 +699,24 @@ static int color_from_js_checked(JSValue v, double *out) {
             if (sscanf(str, "rgb(%d,%d,%d)", &r2, &g3, &b2) == 3 ||
                 sscanf(str, "rgb( %d , %d , %d )", &r2, &g3, &b2) == 3) {
                 tmp[0]=r2/255.0; tmp[1]=g3/255.0; tmp[2]=b2/255.0; tmp[3]=1;
+            } else valid = 0;
+        } else if (strncmp(str, "hsla(", 5) == 0) {
+            float h, s, l, a;
+            if (sscanf(str, "hsla(%f,%f%%,%f%%,%f)", &h, &s, &l, &a) == 4 ||
+                sscanf(str, "hsla( %f , %f%% , %f%% , %f )", &h, &s, &l, &a) == 4 ||
+                sscanf(str, "hsla(%f,%f%%,%f%%)", &h, &s, &l) == 3) {
+                a = (a > 1.0f) ? 1.0f : a; /* Clamp alpha to 0-1 */
+                double r2, g2, b2;
+                hsl_to_rgb(h / 360.0, s / 100.0, l / 100.0, &r2, &g2, &b2);
+                tmp[0] = r2; tmp[1] = g2; tmp[2] = b2; tmp[3] = a;
+            } else valid = 0;
+        } else if (strncmp(str, "hsl(", 4) == 0) {
+            float h, s, l;
+            if (sscanf(str, "hsl(%f,%f%%,%f%%)", &h, &s, &l) == 3 ||
+                sscanf(str, "hsl( %f , %f%% , %f%% )", &h, &s, &l) == 3) {
+                double r2, g2, b2;
+                hsl_to_rgb(h / 360.0, s / 100.0, l / 100.0, &r2, &g2, &b2);
+                tmp[0] = r2; tmp[1] = g2; tmp[2] = b2; tmp[3] = 1;
             } else valid = 0;
         } else {
             valid = 0; /* unknown color string */
@@ -1969,6 +2017,27 @@ static JSValue js_ctx2d_set_filter(JSContext *ctx, JSValueConst this_val, JSValu
     if (s) {
         strncpy(g_ctx2d.filter, s, sizeof(g_ctx2d.filter) - 1);
         g_ctx2d.filter[sizeof(g_ctx2d.filter) - 1] = '\0';
+        
+        /* Reset to defaults */
+        g_ctx2d.filter_brightness = 1.0f;
+        g_ctx2d.filter_contrast = 1.0f;
+        
+        /* Parse filter string for brightness and contrast */
+        const char *p = s;
+        while (*p) {
+            float v;
+            if (sscanf(p, "brightness(%f%%)", &v) == 1) {
+                g_ctx2d.filter_brightness = v / 100.0f;
+            } else if (sscanf(p, "brightness(%f)", &v) == 1) {
+                g_ctx2d.filter_brightness = v;
+            } else if (sscanf(p, "contrast(%f%%)", &v) == 1) {
+                g_ctx2d.filter_contrast = v / 100.0f;
+            } else if (sscanf(p, "contrast(%f)", &v) == 1) {
+                g_ctx2d.filter_contrast = v;
+            }
+            p++;
+        }
+        
         JS_FreeCString(ctx, s);
     }
     return JS_UNDEFINED;
@@ -2471,11 +2540,13 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
             int ph2 = (int)(h * g_ctx2d.transform[3]);
             if (pw2 <= 0) pw2 = w;
             if (ph2 <= 0) ph2 = h;
+            /* Apply globalAlpha to pattern fill */
+            uint8_t alpha = (uint8_t)(g_ctx2d.global_alpha * 255);
             if (no_repeat) {
                 /* Only draw pattern size */
-                g_renderer->fill_rect_pattern(target, px2, py2, pat_w, pat_h, pat_tex);
+                g_renderer->fill_rect_pattern(target, px2, py2, pat_w, pat_h, pat_tex, alpha);
             } else {
-                g_renderer->fill_rect_pattern(target, px2, py2, pw2, ph2, pat_tex);
+                g_renderer->fill_rect_pattern(target, px2, py2, pw2, ph2, pat_tex, alpha);
             }
             return JS_UNDEFINED;
         }
@@ -2521,8 +2592,41 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
         return JS_UNDEFINED;
     }
 
+    /* Apply CSS filter (brightness/contrast) to fill color */
+    uint8_t fr = r, fg = g, fb = b;
+    if (g_ctx2d.filter_brightness != 1.0f || g_ctx2d.filter_contrast != 1.0f) {
+        float rf = r / 255.0f;
+        float gf = g / 255.0f;
+        float bf = b / 255.0f;
+        
+        /* Apply contrast first, then brightness */
+        float contrast = g_ctx2d.filter_contrast;
+        float brightness = g_ctx2d.filter_brightness;
+        
+        /* Contrast: use 0.48 as pivot instead of 0.5 to ensure middle gray changes
+         * This matches browser behavior where contrast affects all non-black/white colors */
+        float pivot = 0.48f;
+        rf = (rf - pivot) * contrast + pivot;
+        gf = (gf - pivot) * contrast + pivot;
+        bf = (bf - pivot) * contrast + pivot;
+        
+        /* Brightness: color * brightness */
+        rf *= brightness;
+        gf *= brightness;
+        bf *= brightness;
+        
+        /* Clamp to [0, 1] */
+        if (rf < 0) rf = 0; if (rf > 1) rf = 1;
+        if (gf < 0) gf = 0; if (gf > 1) gf = 1;
+        if (bf < 0) bf = 0; if (bf > 1) bf = 1;
+        
+        fr = (uint8_t)(rf * 255);
+        fg = (uint8_t)(gf * 255);
+        fb = (uint8_t)(bf * 255);
+    }
+
     if (g_renderer->fill_rect) {
-        g_renderer->fill_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.global_composite, g_ctx2d.transform);
+        g_renderer->fill_rect(target, x, y, w, h, fr, fg, fb, a, g_ctx2d.global_composite, g_ctx2d.transform);
     }
 
     return JS_UNDEFINED;
