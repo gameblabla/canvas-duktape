@@ -31,9 +31,33 @@ typedef struct { char family[32]; int size; TTF_Font* font; } FontCacheEntry;
 static FontCacheEntry g_font_cache[MAX_FONTS];
 static int g_font_cache_count = 0;
 
-/* Clip state */
-static int g_has_clip = 0;
-static int g_clip_x = 0, g_clip_y = 0, g_clip_w = 0, g_clip_h = 0;
+/* Per-texture clip state */
+#define MAX_CLIP_STATES 256
+typedef struct {
+    void* texture;
+    int has_clip;
+    int clip_x, clip_y, clip_w, clip_h;
+} ClipStateEntry;
+static ClipStateEntry g_clip_states[MAX_CLIP_STATES];
+static int g_clip_state_count = 0;
+
+/* Get or create clip state entry for a texture */
+static ClipStateEntry* get_clip_state(void* tex) {
+    for (int i = 0; i < g_clip_state_count; i++) {
+        if (g_clip_states[i].texture == tex) {
+            return &g_clip_states[i];
+        }
+    }
+    /* Create new entry */
+    if (g_clip_state_count < MAX_CLIP_STATES) {
+        ClipStateEntry* e = &g_clip_states[g_clip_state_count++];
+        e->texture = tex;
+        e->has_clip = 0;
+        e->clip_x = 0; e->clip_y = 0; e->clip_w = 0; e->clip_h = 0;
+        return e;
+    }
+    return NULL;
+}
 
 /* ============================================================================
  * Internal helpers
@@ -447,15 +471,22 @@ static void r_get_image_size(void* img, int* w, int* h) {
     SDL_QueryTexture((SDL_Texture*)img, NULL, NULL, w, h);
 }
 
-/* Apply stored clip rect to current render target, if any. */
-static void apply_clip(void) {
-    if (g_has_clip) {
-        SDL_Rect cr = { g_clip_x, g_clip_y, g_clip_w, g_clip_h };
+/* Apply stored clip rect for a specific texture */
+static void apply_clip_for_texture(void* tex) {
+    ClipStateEntry* e = get_clip_state(tex);
+    if (e && e->has_clip) {
+        SDL_Rect cr = { e->clip_x, e->clip_y, e->clip_w, e->clip_h };
         SDL_RenderSetClipRect(g_sdl_renderer, &cr);
+    } else {
+        SDL_RenderSetClipRect(g_sdl_renderer, NULL);
     }
 }
-static void remove_clip(void) {
-    if (g_has_clip) SDL_RenderSetClipRect(g_sdl_renderer, NULL);
+static void remove_clip_for_texture(void* tex) {
+    ClipStateEntry* e = get_clip_state(tex);
+    if (e) {
+        e->has_clip = 0;
+    }
+    SDL_RenderSetClipRect(g_sdl_renderer, NULL);
 }
 
 static void r_fill_rect(void* target, int x, int y, int w, int h,
@@ -464,7 +495,7 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex) return;
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
-    apply_clip();
+    apply_clip_for_texture(tex);
     SDL_BlendMode bm;
     if (blend_add == 1) {
         bm = SDL_BLENDMODE_ADD;
@@ -557,7 +588,7 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     } else {
         SDL_RenderFillRect(g_sdl_renderer, &((SDL_Rect){x,y,w,h}));
     }
-    remove_clip();
+    remove_clip_for_texture(tex);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
     SDL_RenderFlush(g_sdl_renderer);
@@ -572,8 +603,8 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
     int pw, ph;
     SDL_QueryTexture(pat, NULL, NULL, &pw, &ph);
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
-    /* Clear any SDL clip rect on this target */
-    SDL_RenderSetClipRect(g_sdl_renderer, NULL);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     /* Tile the pattern */
     for (int ty = y; ty < y+h; ty += ph) {
         for (int tx = x; tx < x+w; tx += pw) {
@@ -592,6 +623,8 @@ static void r_clear_rect(void* target, int x, int y, int w, int h) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex) return;
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_RenderFillRect(g_sdl_renderer, &((SDL_Rect){x,y,w,h}));
@@ -605,6 +638,8 @@ static void r_stroke_rect(void* target, double x, double y, double w, double h,
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex) return;
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, blend_add ? SDL_BLENDMODE_ADD : SDL_BLENDMODE_BLEND);
     int half_lw = lw / 2;
@@ -630,6 +665,8 @@ static void r_draw_image(void* target, void* img,
     apply_transform_to_dst(dx, dy, dw, dh, m, &dstRect);
     SDL_SetTextureAlphaMod(src, alpha);
     SDL_SetRenderTarget(g_sdl_renderer, dst);
+    /* Apply clip rect for the target texture */
+    apply_clip_for_texture(dst);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
     render_with_transform(src, &srcRect, &dstRect, m, alpha, dx, dy, dw, dh);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
@@ -681,6 +718,8 @@ static void r_fill_text(void* target, const char* text, double x, double y,
         ry = (int)y - ascent;
     }
     SDL_SetRenderTarget(g_sdl_renderer, tex);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_Rect dst = {rx, ry, tw, th};
     SDL_RenderCopy(g_sdl_renderer, tt, NULL, &dst);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
@@ -707,6 +746,8 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
     int ry = (int)y - ascent; /* stroke_text uses alphabetic baseline */
     if (lw < 1) lw = 1;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
     for (int ox = -lw; ox <= lw; ox++) {
         for (int oy = -lw; oy <= lw; oy++) {
@@ -775,6 +816,8 @@ static void r_draw_arc_points(void* target,
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex) return;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
     double step = 1.0 / radius;
@@ -801,6 +844,8 @@ static void r_fill_polygon(void* target, const double* pts, int count,
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || count < 3) return;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_BlendMode bm;
     if (blend_add == 1) {
         bm = SDL_BLENDMODE_ADD;
@@ -895,6 +940,8 @@ static void r_fill_circle(void* target, double cx, double cy, int radius,
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex) return;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer,
         blend_add ? SDL_BLENDMODE_ADD :
@@ -915,6 +962,8 @@ static void r_stroke_circle(void* target, double cx, double cy, int radius,
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex) return;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
     for (double angle = 0; angle < 2*M_PI; angle += (radius > 0 ? 1.0/radius : 0.1)) {
@@ -932,6 +981,8 @@ static void r_draw_line(void* target, int x1, int y1, int x2, int y2,
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex) return;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
+    /* Apply clip rect for this texture */
+    apply_clip_for_texture(tex);
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
     SDL_RenderDrawLine(g_sdl_renderer, x1, y1, x2, y2);
@@ -941,27 +992,39 @@ static void r_draw_line(void* target, int x1, int y1, int x2, int y2,
 }
 
 static void r_set_clip_rect(void* target, int x, int y, int w, int h) {
-    g_has_clip = 1;
-    g_clip_x = x; g_clip_y = y; g_clip_w = w; g_clip_h = h;
     SDL_Texture* tex = (SDL_Texture*)target;
-    if (tex) {
-        SDL_SetRenderTarget(g_sdl_renderer, tex);
-        SDL_Rect cr = {x, y, w, h};
-        SDL_RenderSetClipRect(g_sdl_renderer, &cr);
-        SDL_SetRenderTarget(g_sdl_renderer, NULL);
-    SDL_RenderFlush(g_sdl_renderer);
+    if (!tex) return;
+    
+    /* Store clip state for this texture */
+    ClipStateEntry* e = get_clip_state(tex);
+    if (e) {
+        e->has_clip = 1;
+        e->clip_x = x; e->clip_y = y; e->clip_w = w; e->clip_h = h;
     }
+    
+    /* Apply clip rect to the texture */
+    SDL_SetRenderTarget(g_sdl_renderer, tex);
+    SDL_Rect cr = {x, y, w, h};
+    SDL_RenderSetClipRect(g_sdl_renderer, &cr);
+    SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_clear_clip_rect(void* target) {
-    g_has_clip = 0;
     SDL_Texture* tex = (SDL_Texture*)target;
-    if (tex) {
-        SDL_SetRenderTarget(g_sdl_renderer, tex);
-        SDL_RenderSetClipRect(g_sdl_renderer, NULL);
-        SDL_SetRenderTarget(g_sdl_renderer, NULL);
-    SDL_RenderFlush(g_sdl_renderer);
+    if (!tex) return;
+    
+    /* Clear clip state for this texture */
+    ClipStateEntry* e = get_clip_state(tex);
+    if (e) {
+        e->has_clip = 0;
     }
+    
+    /* Remove clip rect from the texture */
+    SDL_SetRenderTarget(g_sdl_renderer, tex);
+    SDL_RenderSetClipRect(g_sdl_renderer, NULL);
+    SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    SDL_RenderFlush(g_sdl_renderer);
 }
 
 static void r_get_pixels(void* target, int x, int y, int w, int h,
@@ -1010,13 +1073,8 @@ static void r_put_pixels(void* target, const uint8_t* rgba,
         SDL_UpdateTexture(tmp, NULL, buf, w * 4);
         SDL_SetTextureBlendMode(tmp, SDL_BLENDMODE_NONE);
         SDL_SetRenderTarget(g_sdl_renderer, tex);
-        /* Apply logical clip rect (don't let stale SDL per-target clip interfere) */
-        if (g_has_clip) {
-            SDL_Rect cr = {g_clip_x, g_clip_y, g_clip_w, g_clip_h};
-            SDL_RenderSetClipRect(g_sdl_renderer, &cr);
-        } else {
-            SDL_RenderSetClipRect(g_sdl_renderer, NULL);
-        }
+        /* Apply clip rect for this texture */
+        apply_clip_for_texture(tex);
         SDL_Rect dst = {x, y, w, h};
         SDL_RenderCopy(g_sdl_renderer, tmp, NULL, &dst);
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
