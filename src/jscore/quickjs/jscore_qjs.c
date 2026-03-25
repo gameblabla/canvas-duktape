@@ -171,6 +171,7 @@ static Canvas2DContext g_ctx2d = {0};
 typedef struct {
     int id;
     JSValue func;
+    JSValue this_val;  /* JS_UNDEFINED = use global object as this */
     int interval_ms;
     int64_t next_fire;
     int repeat;
@@ -198,6 +199,9 @@ typedef struct {
 } CanvasMouseListener;
 
 static CanvasMouseListener g_mouse_listeners[MAX_MOUSE_LISTENERS];
+
+/* Base directory for resolving relative paths (set from HTML file location) */
+static char g_jscore_base_dir[1024] = {0};
 
 /* localStorage */
 typedef struct {
@@ -455,7 +459,7 @@ static int find_timer_by_id(int id) {
 
 /* Schedule a one-shot 0ms timer to call func asynchronously (deferred).
  * Used to make image onload/onerror async like a real browser. */
-static void schedule_deferred_call(JSContext *ctx, JSValue func) {
+static void schedule_deferred_call_this(JSContext *ctx, JSValue func, JSValue this_val) {
     int slot = -1;
     for (int i = 0; i < MAX_INTERVALS; i++) {
         if (!g_timers[i].active) { slot = i; break; }
@@ -464,10 +468,14 @@ static void schedule_deferred_call(JSContext *ctx, JSValue func) {
     int id = g_timer_next_id++;
     g_timers[slot].id = id;
     g_timers[slot].func = JS_DupValue(ctx, func);
+    g_timers[slot].this_val = JS_IsUndefined(this_val) ? JS_UNDEFINED : JS_DupValue(ctx, this_val);
     g_timers[slot].interval_ms = 0;
     g_timers[slot].next_fire = 0; /* fire ASAP */
     g_timers[slot].repeat = 0;
     g_timers[slot].active = 1;
+}
+static void schedule_deferred_call(JSContext *ctx, JSValue func) {
+    schedule_deferred_call_this(ctx, func, JS_UNDEFINED);
 }
 
 static int find_free_timer_slot(void) {
@@ -835,8 +843,7 @@ static JSValue js_image_ctor(JSContext *ctx, JSValueConst new_target,
     JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, width));
     JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, height));
     JS_SetPropertyStr(ctx, obj, "complete", JS_NewBool(ctx, 0));
-    JS_SetPropertyStr(ctx, obj, "onload", JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "onerror", JS_NULL);
+    /* onload/onerror are handled via CGETSET on the prototype - do NOT set own props */
 
     return obj;
 }
@@ -926,17 +933,17 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                         JS_SetPropertyStr(ctx, this_val, "width", JS_NewInt32(ctx, g_images[idx].width));
                         JS_SetPropertyStr(ctx, this_val, "height", JS_NewInt32(ctx, g_images[idx].height));
 
-                        /* Defer onload via 0ms timer to be async like a real browser */
+                        /* Defer onload (with image as this) to be async like a real browser */
                         JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
                         if (JS_IsFunction(ctx, onload)) {
-                            schedule_deferred_call(ctx, onload);
+                            schedule_deferred_call_this(ctx, onload, this_val);
                         }
                         JS_FreeValue(ctx, onload);
                     } else {
-                        /* Load failed - defer onerror */
+                        /* Load failed - defer onerror (with image as this) */
                         JSValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
                         if (JS_IsFunction(ctx, onerror)) {
-                            schedule_deferred_call(ctx, onerror);
+                            schedule_deferred_call_this(ctx, onerror, this_val);
                         }
                         JS_FreeValue(ctx, onerror);
                     }
@@ -980,10 +987,41 @@ static JSValue js_image_get_height(JSContext *ctx, JSValueConst this_val) {
     return JS_NewInt32(ctx, 0);
 }
 
+/* onload/onerror CGETSET: when callback is set on an already-loaded image,
+ * schedule it immediately so GameMaker's pattern of "img.src = x; img.onload = f"
+ * works correctly even though load is synchronous. */
+static JSValue js_image_get_onload(JSContext *ctx, JSValueConst this_val) {
+    return JS_GetPropertyStr(ctx, this_val, "_onload_cb");
+}
+static JSValue js_image_set_onload(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    JS_SetPropertyStr(ctx, this_val, "_onload_cb", JS_DupValue(ctx, val));
+    if (JS_IsFunction(ctx, val)) {
+        JSValue imageIdVal = JS_GetPropertyStr(ctx, this_val, "_imageId");
+        int id = -1;
+        JS_ToInt32(ctx, &id, imageIdVal);
+        JS_FreeValue(ctx, imageIdVal);
+        int idx = find_image_by_id(id);
+        if (idx >= 0 && g_images[idx].loaded) {
+            schedule_deferred_call_this(ctx, val, this_val);
+        }
+    }
+    return JS_UNDEFINED;
+}
+static JSValue js_image_get_onerror(JSContext *ctx, JSValueConst this_val) {
+    return JS_GetPropertyStr(ctx, this_val, "_onerror_cb");
+}
+static JSValue js_image_set_onerror(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    JS_SetPropertyStr(ctx, this_val, "_onerror_cb", JS_DupValue(ctx, val));
+    /* No need to fire immediately on error - errors are rare and usually set before src */
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry js_image_props[] = {
-    JS_CGETSET_DEF("src", js_image_get_src, js_image_set_src),
-    JS_CGETSET_DEF("width", js_image_get_width, NULL),
-    JS_CGETSET_DEF("height", js_image_get_height, NULL),
+    JS_CGETSET_DEF("src",     js_image_get_src,     js_image_set_src),
+    JS_CGETSET_DEF("width",   js_image_get_width,   NULL),
+    JS_CGETSET_DEF("height",  js_image_get_height,  NULL),
+    JS_CGETSET_DEF("onload",  js_image_get_onload,  js_image_set_onload),
+    JS_CGETSET_DEF("onerror", js_image_get_onerror, js_image_set_onerror),
 };
 
 /* ============================================================================
@@ -4170,8 +4208,9 @@ static JSValue js_setInterval(JSContext *ctx, JSValueConst this_val,
     int id = g_timer_next_id++;
     g_timers[slot].id = id;
     g_timers[slot].func = JS_DupValue(ctx, argv[0]);
+    g_timers[slot].this_val = JS_UNDEFINED;
     g_timers[slot].interval_ms = ms;
-    g_timers[slot].next_fire = (int64_t)(g_renderer && g_renderer->get_time_ms ? 
+    g_timers[slot].next_fire = (int64_t)(g_renderer && g_renderer->get_time_ms ?
                                           g_renderer->get_time_ms() : 0) + ms;
     g_timers[slot].repeat = 1;
     g_timers[slot].active = 1;
@@ -4197,6 +4236,7 @@ static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val,
     int id = g_timer_next_id++;
     g_timers[slot].id = id;
     g_timers[slot].func = JS_DupValue(ctx, argv[0]);
+    g_timers[slot].this_val = JS_UNDEFINED;
     g_timers[slot].interval_ms = ms;
     g_timers[slot].next_fire = (int64_t)(g_renderer && g_renderer->get_time_ms ?
                                           g_renderer->get_time_ms() : 0) + ms;
@@ -4218,9 +4258,11 @@ static JSValue js_clearInterval(JSContext *ctx, JSValueConst this_val,
     int slot = find_timer_by_id(id);
     if (slot >= 0) {
         JS_FreeValue(ctx, g_timers[slot].func);
+        if (!JS_IsUndefined(g_timers[slot].this_val))
+            JS_FreeValue(ctx, g_timers[slot].this_val);
         g_timers[slot].active = 0;
     }
-    
+
     return JS_UNDEFINED;
 }
 
@@ -4673,29 +4715,86 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
 
 static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv) {
-    /* Simplified - just return the newChild */
-    if (argc >= 1) {
-        /* Handle audio source element append */
-        JSValue child = argv[0];
-        JSValue src_val = JS_GetPropertyStr(ctx, child, "src");
-        if (!JS_IsUndefined(src_val) && !JS_IsNull(src_val)) {
-            const char* src = JS_ToCString(ctx, src_val);
-            if (src && src[0] != '\0') {
-                /* Update parent's src */
-                JS_SetPropertyStr(ctx, this_val, "src", JS_NewString(ctx, src));
-                /* Trigger load if available */
-                JSValue load_func = JS_GetPropertyStr(ctx, this_val, "load");
-                if (JS_IsFunction(ctx, load_func)) {
-                    JS_Call(ctx, load_func, this_val, 0, NULL);
-                }
-                JS_FreeValue(ctx, load_func);
-            }
-            if (src) JS_FreeCString(ctx, src);
-        }
-        JS_FreeValue(ctx, src_val);
-        return JS_DupValue(ctx, child);
+    if (argc < 1) return JS_UNDEFINED;
+    JSValue child = argv[0];
+
+    /* Check if this is a script element being injected dynamically.
+     * GameMaker (and others) do: var e = createElement('script'); e.src = ...; body.appendChild(e)
+     * We need to load and eval the file, then call e.onload or e.onerror. */
+    JSValue type_val = JS_GetPropertyStr(ctx, child, "type");
+    JSValue src_val  = JS_GetPropertyStr(ctx, child, "src");
+    int is_js = 0;
+    if (!JS_IsUndefined(type_val) && !JS_IsNull(type_val)) {
+        const char *t = JS_ToCString(ctx, type_val);
+        if (t && strstr(t, "javascript")) is_js = 1;
+        JS_FreeCString(ctx, t);
     }
-    return JS_UNDEFINED;
+    const char *src = NULL;
+    if (!JS_IsUndefined(src_val) && !JS_IsNull(src_val)) {
+        src = JS_ToCString(ctx, src_val);
+        if (src && !is_js) {
+            /* If no explicit type, treat .js files as scripts */
+            size_t len = strlen(src);
+            if (len > 3 && strcmp(src + len - 3, ".js") == 0) is_js = 1;
+        }
+    }
+    JS_FreeValue(ctx, type_val);
+
+    if (is_js && src && src[0] != '\0') {
+        /* Resolve path relative to base dir */
+        char full_path[2048];
+        if (src[0] == '/' || g_jscore_base_dir[0] == '\0') {
+            snprintf(full_path, sizeof(full_path), "%s", src);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", g_jscore_base_dir, src);
+        }
+
+        /* Load and eval the script */
+        size_t buf_len;
+        char *buf = (char *)js_load_file(ctx, &buf_len, full_path);
+        JSValue onload = JS_GetPropertyStr(ctx, child, "onload");
+        JSValue onerror = JS_GetPropertyStr(ctx, child, "onerror");
+
+        if (buf) {
+            JSValue result = JS_Eval(ctx, buf, buf_len, full_path,
+                                     JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_BACKTRACE_BARRIER);
+            js_free(ctx, buf);
+            if (JS_IsException(result)) {
+                JSValue exc = JS_GetException(ctx);
+                const char *exc_str = JS_ToCString(ctx, exc);
+                if (exc_str) {
+                    fprintf(stderr, "[appendChild] Script error in %s: %s\n", src, exc_str);
+                    JS_FreeCString(ctx, exc_str);
+                }
+                JS_FreeValue(ctx, exc);
+                if (JS_IsFunction(ctx, onerror)) {
+                    JSValue ret = JS_Call(ctx, onerror, child, 0, NULL);
+                    if (JS_IsException(ret)) JS_GetException(ctx);
+                    JS_FreeValue(ctx, ret);
+                }
+            } else {
+                if (JS_IsFunction(ctx, onload)) {
+                    JSValue ret = JS_Call(ctx, onload, child, 0, NULL);
+                    if (JS_IsException(ret)) JS_GetException(ctx);
+                    JS_FreeValue(ctx, ret);
+                }
+            }
+            JS_FreeValue(ctx, result);
+        } else {
+            fprintf(stderr, "[appendChild] Failed to load script: %s\n", full_path);
+            if (JS_IsFunction(ctx, onerror)) {
+                JSValue ret = JS_Call(ctx, onerror, child, 0, NULL);
+                if (JS_IsException(ret)) JS_GetException(ctx);
+                JS_FreeValue(ctx, ret);
+            }
+        }
+        JS_FreeValue(ctx, onload);
+        JS_FreeValue(ctx, onerror);
+    }
+
+    JS_FreeCString(ctx, src);
+    JS_FreeValue(ctx, src_val);
+    return JS_DupValue(ctx, child);
 }
 
 static JSValue js_element_insertBefore(JSContext *ctx, JSValueConst this_val,
@@ -5667,6 +5766,7 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_stroke_style_obj = JS_UNDEFINED;
 
     memset(g_timers, 0, sizeof(g_timers));
+    for (int i = 0; i < MAX_INTERVALS; i++) g_timers[i].this_val = JS_UNDEFINED;
     memset(g_key_listeners, 0, sizeof(g_key_listeners));
     memset(g_storage, 0, sizeof(g_storage));
     memset(g_images, 0, sizeof(g_images));
@@ -5691,6 +5791,8 @@ static void jscore_qjs_quit(void) {
     for (int i = 0; i < MAX_INTERVALS; i++) {
         if (g_timers[i].active) {
             JS_FreeValue(g_ctx, g_timers[i].func);
+            if (!JS_IsUndefined(g_timers[i].this_val))
+                JS_FreeValue(g_ctx, g_timers[i].this_val);
         }
     }
 
@@ -5879,7 +5981,6 @@ static JSValue js_path2d_new(JSContext *ctx, JSValueConst new_target,
 /* ============================================================================
  * XMLHttpRequest Implementation (local file I/O only)
  * ============================================================================ */
-static char g_jscore_base_dir[1024] = {0};
 
 void jscore_qjs_set_base_dir(const char *dir) {
     if (dir) {
@@ -6231,6 +6332,8 @@ static void setup_globals_object(JSContext *ctx) {
                                sizeof(js_image_props) / sizeof(js_image_props[0]));
     JS_SetPropertyStr(ctx, image_ctor, "prototype", g_image_proto);
     JS_SetPropertyStr(ctx, global, "Image", image_ctor);
+    /* HTMLImageElement = Image so "x instanceof HTMLImageElement" works */
+    JS_SetPropertyStr(ctx, global, "HTMLImageElement", JS_DupValue(ctx, image_ctor));
 
     /* Audio constructor */
     JSValue audio_ctor = JS_NewCFunction2(ctx, js_audio_ctor, "Audio", 0,
@@ -6600,7 +6703,10 @@ static void jscore_qjs_check_timers(void) {
     for (int i = 0; i < MAX_INTERVALS; i++) {
         if (g_timers[i].active && now >= g_timers[i].next_fire) {
             JSValue func = JS_DupValue(g_ctx, g_timers[i].func);
-            JSValue result = JS_Call(g_ctx, func, global, 0, NULL);
+            JSValue call_this = JS_IsUndefined(g_timers[i].this_val) ? JS_DupValue(g_ctx, global)
+                                                                      : JS_DupValue(g_ctx, g_timers[i].this_val);
+            JSValue result = JS_Call(g_ctx, func, call_this, 0, NULL);
+            JS_FreeValue(g_ctx, call_this);
 
             if (JS_IsException(result)) {
                 JSValue exc = JS_GetException(g_ctx);
@@ -6629,6 +6735,10 @@ static void jscore_qjs_check_timers(void) {
                 g_timers[i].next_fire = now + g_timers[i].interval_ms;
             } else {
                 JS_FreeValue(g_ctx, g_timers[i].func);
+                if (!JS_IsUndefined(g_timers[i].this_val)) {
+                    JS_FreeValue(g_ctx, g_timers[i].this_val);
+                    g_timers[i].this_val = JS_UNDEFINED;
+                }
                 g_timers[i].active = 0;
             }
         }
