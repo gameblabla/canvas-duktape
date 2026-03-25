@@ -6760,6 +6760,17 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     }
     free(data);
 
+    /* Fire onload callback for GameMaker async tracking */
+    JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
+    if (!JS_IsNull(onload) && !JS_IsUndefined(onload)) {
+        JSValue event = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, event, "currentTarget", JS_DupValue(ctx, this_val));
+        JS_SetPropertyStr(ctx, event, "target", JS_DupValue(ctx, this_val));
+        JS_Call(ctx, onload, JS_UNDEFINED, 1, (JSValueConst[]){event});
+        JS_FreeValue(ctx, event);
+    }
+    JS_FreeValue(ctx, onload);
+
     xhr_fire_callbacks(ctx, this_val, 1);
     /* Run GC after each XHR response to free jQuery Deferred objects and parsed JSON intermediates */
     JS_RunGC(g_rt);
