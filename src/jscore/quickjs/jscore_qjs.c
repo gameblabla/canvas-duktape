@@ -3760,10 +3760,12 @@ static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val,
             JS_Call(ctx, elem->canplaythrough_listener, this_val, 0, NULL);
         }
     } else {
-#ifdef EXTRA_DEBUG
         fprintf(stderr, "[Audio] Failed to load: %s\n", src);
-#endif
         elem->native_index = -1;
+        /* Fire canplaythrough even on failure so loading screens don't hang */
+        if (!JS_IsUndefined(elem->canplaythrough_listener)) {
+            JS_Call(ctx, elem->canplaythrough_listener, this_val, 0, NULL);
+        }
     }
 
     /* Return this for method chaining */

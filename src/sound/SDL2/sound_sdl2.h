@@ -6,7 +6,7 @@
 /* ============================================================================
  * Audio source structure for mixing multiple sounds
  * ============================================================================ */
-#define MAX_AUDIO_SOURCES 64
+#define MAX_AUDIO_SOURCES 128
 #define AUDIO_SAMPLE_RATE 44100
 #define AUDIO_CHANNELS    2
 #define AUDIO_FORMAT      AUDIO_S16LSB
