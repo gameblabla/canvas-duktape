@@ -167,11 +167,13 @@ static void apply_transform_to_dst(int dx, int dy, int dw, int dh,
     out->h = (int)ceil(maxY - minY);
 }
 
-/* Render src_tex with full transform (scale/rotate/flip). */
+/* Render src_tex with full transform (scale/rotate/flip).
+ * local_dw/local_dh are the destination size in LOCAL (pre-transform) coords. */
 static void render_with_transform(SDL_Texture* src_tex,
                                    const SDL_Rect* s, const SDL_Rect* d,
                                    const double* m, Uint8 alphaMod,
-                                   int orig_dx, int orig_dy) {
+                                   int orig_dx, int orig_dy,
+                                   int local_dw, int local_dh) {
     if (m[0]==1 && m[1]==0 && m[2]==0 && m[3]==1 && m[4]==0 && m[5]==0) {
         SDL_SetTextureAlphaMod(src_tex, alphaMod);
         SDL_RenderCopy(g_sdl_renderer, src_tex, s, d);
@@ -210,16 +212,18 @@ static void render_with_transform(SDL_Texture* src_tex,
         SDL_SetTextureAlphaMod(src_tex, 255);
         return;
     }
-    /* Full rotation */
-    float scale_x = (float)d->w / (float)s->w;
-    float scale_y = (float)d->h / (float)s->h;
+    /* Full rotation: map each source pixel through the full CTM.
+     * Use local_dw/local_dh (destination size in LOCAL coords) as the
+     * source→local scale, then apply the CTM to get world coords. */
+    float scale_x = (s->w > 0) ? (float)local_dw / (float)s->w : 1.0f;
+    float scale_y = (s->h > 0) ? (float)local_dh / (float)s->h : 1.0f;
     SDL_SetTextureAlphaMod(src_tex, alphaMod);
     for (int sy = s->y; sy < s->y + s->h; sy++) {
         for (int sx = s->x; sx < s->x + s->w; sx++) {
-            float scaled_x = orig_dx + (sx - s->x) * scale_x;
-            float scaled_y = orig_dy + (sy - s->y) * scale_y;
-            double dx_d = m[0]*scaled_x + m[2]*scaled_y + m[4];
-            double dy_d = m[1]*scaled_x + m[3]*scaled_y + m[5];
+            float lx = orig_dx + (sx - s->x) * scale_x;
+            float ly = orig_dy + (sy - s->y) * scale_y;
+            double dx_d = m[0]*lx + m[2]*ly + m[4];
+            double dy_d = m[1]*lx + m[3]*ly + m[5];
             int dx_i = (int)floor(dx_d);
             int dy_i = (int)floor(dy_d);
             SDL_Rect sr = { sx, sy, 1, 1 };
@@ -298,6 +302,19 @@ static void png_write_chunk(unsigned char** out, size_t* out_len,
     *out_len += 12 + data_len;
 }
 
+/* Canvas textures store premultiplied alpha (drawing via SDL_BLENDMODE_BLEND
+ * premultiplies src_RGB by src_A). Compositing FROM them requires ONE +
+ * ONE_MINUS_SRC_ALPHA so alpha isn't applied twice. */
+static SDL_BlendMode get_premult_blend_mode(void) {
+    return SDL_ComposeCustomBlendMode(
+        SDL_BLENDFACTOR_ONE,
+        SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+        SDL_BLENDOPERATION_ADD,
+        SDL_BLENDFACTOR_ONE,
+        SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+        SDL_BLENDOPERATION_ADD);
+}
+
 /* ============================================================================
  * Interface implementations
  * ============================================================================ */
@@ -346,7 +363,7 @@ static int r_init(int w, int h, const char* title) {
         SDL_DestroyWindow(g_window);
         TTF_Quit(); IMG_Quit(); SDL_Quit(); return 0;
     }
-    SDL_SetTextureBlendMode(g_offscreen, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureBlendMode(g_offscreen, get_premult_blend_mode());
     SDL_SetRenderTarget(g_sdl_renderer, g_offscreen);
     SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
     SDL_RenderClear(g_sdl_renderer);
@@ -376,7 +393,7 @@ static void* r_create_texture(int w, int h) {
     fprintf(stderr, "[r_create_texture] %dx%d -> %p\n", w, h, t);
 #endif
     if (!t) return NULL;
-    SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureBlendMode(t, get_premult_blend_mode());
     SDL_SetRenderTarget(g_sdl_renderer, t);
     SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
@@ -604,7 +621,7 @@ static void r_draw_image(void* target, void* img,
     SDL_SetTextureAlphaMod(src, alpha);
     SDL_SetRenderTarget(g_sdl_renderer, dst);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
-    render_with_transform(src, &srcRect, &dstRect, m, alpha, dx, dy);
+    render_with_transform(src, &srcRect, &dstRect, m, alpha, dx, dy, dw, dh);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
     SDL_RenderFlush(g_sdl_renderer);
