@@ -3266,6 +3266,9 @@ static JSValue js_canvas_get_style(JSContext *ctx, JSValueConst this_val) {
  * Audio Constructor
  * ============================================================================ */
 
+/* Forward declaration - defined later */
+extern JSValue g_audio_proto;
+
 static JSValue js_audio_ctor(JSContext *ctx, JSValueConst new_target,
                              int argc, JSValueConst *argv) {
     /* Get the prototype from the constructor */
@@ -3273,7 +3276,12 @@ static JSValue js_audio_ctor(JSContext *ctx, JSValueConst new_target,
     if (!JS_IsUndefined(new_target)) {
         proto = JS_GetPropertyStr(ctx, new_target, "prototype");
     }
-    
+
+    /* If no prototype from new_target, use the global Audio prototype */
+    if (!JS_IsObject(proto) && !JS_IsUndefined(g_audio_proto)) {
+        proto = g_audio_proto;
+    }
+
     JSValue obj;
     if (JS_IsObject(proto)) {
         obj = JS_NewObjectProtoClass(ctx, proto, js_audio_class_id);
@@ -3415,7 +3423,7 @@ static JSValue js_audio_set_currentTime(JSContext *ctx, JSValueConst this_val, J
 static JSValue js_audio_get_ended(JSContext *ctx, JSValueConst this_val) {
     AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
     if (!audio) return JS_NewBool(ctx, false);
-    
+
     int elem_idx = audio->elem_index;
     if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
         Html5AudioElement *elem = &g_audio_elements[elem_idx];
@@ -3424,6 +3432,72 @@ static JSValue js_audio_get_ended(JSContext *ctx, JSValueConst this_val) {
         }
     }
     return JS_NewBool(ctx, false);
+}
+
+static JSValue js_audio_get_loop(JSContext *ctx, JSValueConst this_val) {
+    (void)this_val;
+    return JS_NewBool(ctx, 0);
+}
+
+static JSValue js_audio_set_loop(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    (void)ctx; (void)this_val; (void)val;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audio_get_muted(JSContext *ctx, JSValueConst this_val) {
+    (void)this_val;
+    return JS_NewBool(ctx, 0);
+}
+
+static JSValue js_audio_set_muted(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    (void)ctx; (void)this_val; (void)val;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audio_get_playbackRate(JSContext *ctx, JSValueConst this_val) {
+    (void)this_val;
+    return JS_NewFloat64(ctx, 1.0);
+}
+
+static JSValue js_audio_set_playbackRate(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    (void)ctx; (void)this_val; (void)val;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audio_get_readyState(JSContext *ctx, JSValueConst this_val) {
+    (void)this_val;
+    return JS_NewInt32(ctx, 4); /* HAVE_ENOUGH_DATA */
+}
+
+static JSValue js_audio_get_networkState(JSContext *ctx, JSValueConst this_val) {
+    (void)this_val;
+    return JS_NewInt32(ctx, 1); /* NETWORK_IDLE */
+}
+
+static JSValue js_audio_get_played(JSContext *ctx, JSValueConst this_val) {
+    /* Return empty TimeRanges-like object */
+    JSValue arr = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, 0));
+    return arr;
+}
+
+static JSValue js_audio_get_buffered(JSContext *ctx, JSValueConst this_val) {
+    /* Return empty TimeRanges-like object */
+    JSValue arr = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, 0));
+    return arr;
+}
+
+static JSValue js_audio_get_seekable(JSContext *ctx, JSValueConst this_val) {
+    /* Return empty TimeRanges-like object */
+    JSValue arr = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, 0));
+    return arr;
+}
+
+static JSValue js_audio_get_error(JSContext *ctx, JSValueConst this_val) {
+    (void)this_val;
+    return JS_NULL;
 }
 
 static JSValue js_audio_play(JSContext *ctx, JSValueConst this_val,
@@ -3601,10 +3675,10 @@ static JSValue js_audio_load(JSContext *ctx, JSValueConst this_val,
 static JSValue js_audio_canPlayType(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NewString(ctx, "");
-    
+
     const char *type = JS_ToCString(ctx, argv[0]);
     if (!type) return JS_NewString(ctx, "");
-    
+
     /* Simple implementation - return "maybe" for ogg and mp3 */
     JSValue result = JS_NewString(ctx, "");
     if (strstr(type, "ogg") || strstr(type, "vorbis")) {
@@ -3612,7 +3686,7 @@ static JSValue js_audio_canPlayType(JSContext *ctx, JSValueConst this_val,
     } else if (strstr(type, "mp3") || strstr(type, "mpeg")) {
         result = JS_NewString(ctx, "maybe");
     }
-    
+
     JS_FreeCString(ctx, type);
     return result;
 }
@@ -3623,6 +3697,24 @@ static JSValue js_audio_removeEventListener(JSContext *ctx, JSValueConst this_va
     return JS_UNDEFINED;
 }
 
+static JSValue js_audio_whenReady(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    /* Call the callback immediately - audio is always "ready" in our stub */
+    if (argc >= 1 && JS_IsFunction(ctx, argv[0])) {
+        JSValue ret = JS_Call(ctx, argv[0], this_val, 0, NULL);
+        if (JS_IsException(ret)) JS_GetException(ctx);
+        JS_FreeValue(ctx, ret);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audio_removeAttribute(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+    /* No-op for now */
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry js_audio_funcs[] = {
     JS_CFUNC_DEF("play", 0, js_audio_play),
     JS_CFUNC_DEF("pause", 0, js_audio_pause),
@@ -3630,6 +3722,8 @@ static const JSCFunctionListEntry js_audio_funcs[] = {
     JS_CFUNC_DEF("addEventListener", 2, js_audio_addEventListener),
     JS_CFUNC_DEF("removeEventListener", 2, js_audio_removeEventListener),
     JS_CFUNC_DEF("canPlayType", 1, js_audio_canPlayType),
+    JS_CFUNC_DEF("whenReady", 1, js_audio_whenReady),
+    JS_CFUNC_DEF("removeAttribute", 1, js_audio_removeAttribute),
 };
 
 static const JSCFunctionListEntry js_audio_props[] = {
@@ -3639,6 +3733,17 @@ static const JSCFunctionListEntry js_audio_props[] = {
     JS_CGETSET_DEF("duration", js_audio_get_duration, NULL),
     JS_CGETSET_DEF("currentTime", js_audio_get_currentTime, js_audio_set_currentTime),
     JS_CGETSET_DEF("ended", js_audio_get_ended, NULL),
+    JS_CGETSET_DEF("loop", js_audio_get_loop, js_audio_set_loop),
+    JS_CGETSET_DEF("muted", js_audio_get_muted, js_audio_set_muted),
+    JS_CGETSET_DEF("playbackRate", js_audio_get_playbackRate, js_audio_set_playbackRate),
+    JS_CGETSET_DEF("readyState", js_audio_get_readyState, NULL),
+    JS_CGETSET_DEF("networkState", js_audio_get_networkState, NULL),
+    /* These return TimeRanges objects - return empty array for now */
+    JS_CGETSET_DEF("played", js_audio_get_played, NULL),
+    JS_CGETSET_DEF("buffered", js_audio_get_buffered, NULL),
+    JS_CGETSET_DEF("seekable", js_audio_get_seekable, NULL),
+    /* Error object */
+    JS_CGETSET_DEF("error", js_audio_get_error, NULL),
 };
 
 /* ============================================================================
@@ -4551,6 +4656,9 @@ static int g_load_listener_count = 0;
 
 /* Image prototype - used by constructor */
 JSValue g_image_proto = JS_UNDEFINED;
+
+/* Audio prototype - used by constructor */
+JSValue g_audio_proto = JS_UNDEFINED;
 
 static JSValue js_window_addEventListener(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv) {
@@ -5723,14 +5831,14 @@ static void setup_globals_object(JSContext *ctx) {
     /* Audio constructor */
     JSValue audio_ctor = JS_NewCFunction2(ctx, js_audio_ctor, "Audio", 0,
                                           JS_CFUNC_constructor, 0);
-    
+
     /* Create prototype object and add methods to it */
-    JSValue audio_proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, audio_proto, js_audio_funcs,
+    g_audio_proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, g_audio_proto, js_audio_funcs,
                                sizeof(js_audio_funcs) / sizeof(js_audio_funcs[0]));
-    JS_SetPropertyFunctionList(ctx, audio_proto, js_audio_props,
+    JS_SetPropertyFunctionList(ctx, g_audio_proto, js_audio_props,
                                sizeof(js_audio_props) / sizeof(js_audio_props[0]));
-    JS_SetPropertyStr(ctx, audio_ctor, "prototype", audio_proto);
+    JS_SetPropertyStr(ctx, audio_ctor, "prototype", JS_DupValue(ctx, g_audio_proto));
     
     JS_SetPropertyStr(ctx, global, "Audio", audio_ctor);
 
