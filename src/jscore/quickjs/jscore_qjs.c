@@ -305,6 +305,10 @@ typedef struct {
     double duration;
     int paused;
     int ended;
+    /* Simulated playback tracking for when audio isn't actually playing */
+    double simulated_position;  /* Simulated playback position in seconds */
+    int64_t simulated_start_time;  /* When playback started (for simulation) */
+    int is_simulating;  /* Whether we're simulating playback */
     JSValue loadeddata_listener;
     JSValue canplaythrough_listener;
     JSValue canplay_listener;
@@ -3751,12 +3755,25 @@ static JSValue js_audio_get_duration(JSContext *ctx, JSValueConst this_val) {
 static JSValue js_audio_get_currentTime(JSContext *ctx, JSValueConst this_val) {
     AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
     if (!audio) return JS_NewFloat64(ctx, 0);
-    
+
     int elem_idx = audio->elem_index;
     if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
         Html5AudioElement *elem = &g_audio_elements[elem_idx];
         if (elem->native_index >= 0) {
-            return JS_NewFloat64(ctx, sound_get_current_time(elem->native_index));
+            /* Try to get actual playback position first */
+            float actual_time = sound_get_current_time(elem->native_index);
+            if (actual_time > 0) {
+                return JS_NewFloat64(ctx, actual_time);
+            }
+            /* Fall back to simulated playback for GameMaker compatibility */
+            if (elem->is_simulating && elem->duration > 0) {
+                int64_t now = (int64_t)(g_renderer->get_time_ms ? g_renderer->get_time_ms() : 0);
+                double elapsed = (now - elem->simulated_start_time) / 1000.0;
+                double position = elem->simulated_position + elapsed;
+                if (position > elem->duration) position = elem->duration;
+                return JS_NewFloat64(ctx, position);
+            }
+            return JS_NewFloat64(ctx, elem->simulated_position);
         }
     }
     return JS_NewFloat64(ctx, 0);
@@ -3773,6 +3790,14 @@ static JSValue js_audio_set_currentTime(JSContext *ctx, JSValueConst this_val, J
             double time;
             JS_ToFloat64(ctx, &time, val);
             sound_set_current_time(elem->native_index, (float)time);
+            /* Reset simulation when seeking */
+            if (time == 0) {
+                elem->simulated_position = 0;
+                elem->is_simulating = 0;
+            } else {
+                elem->simulated_position = time;
+                elem->is_simulating = 0;
+            }
         }
     }
     /* Return this for method chaining */
@@ -3874,6 +3899,9 @@ static JSValue js_audio_play(JSContext *ctx, JSValueConst this_val,
             sound_play(elem->native_index);
             elem->paused = 0;
         }
+        /* Start simulated playback for GameMaker compatibility */
+        elem->is_simulating = 1;
+        elem->simulated_start_time = (int64_t)(g_renderer->get_time_ms ? g_renderer->get_time_ms() : 0);
     }
     /* Return this for method chaining */
     return JS_DupValue(ctx, this_val);
@@ -3890,6 +3918,12 @@ static JSValue js_audio_pause(JSContext *ctx, JSValueConst this_val,
         if (elem->native_index >= 0) {
             sound_pause(elem->native_index);
             elem->paused = 1;
+        }
+        /* Stop simulated playback, preserve position */
+        if (elem->is_simulating) {
+            int64_t now = (int64_t)(g_renderer->get_time_ms ? g_renderer->get_time_ms() : 0);
+            elem->simulated_position += (now - elem->simulated_start_time) / 1000.0;
+            elem->is_simulating = 0;
         }
     }
     /* Return this for method chaining */
@@ -6759,6 +6793,9 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
         JS_SetPropertyStr(ctx, this_val, "response",     JS_DupValue(ctx, txt));
     }
     free(data);
+
+    /* Set complete property for GameMaker sound loading */
+    JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 1));
 
     /* Fire onload callback for GameMaker async tracking */
     JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
