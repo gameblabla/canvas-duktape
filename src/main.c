@@ -329,12 +329,31 @@ static void get_exe_dir(const char* argv0, char* out, size_t out_size) {
 /* ============================================================================
  * Main entry point
  * ============================================================================ */
+
+/* Global flag to disable WebAudio API (for debugging) */
+static int g_disable_webaudio = 0;
+
 int main(int argc, char** argv) {
+    /* Parse command-line arguments */
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file.html>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--no-webaudio] <file.html>\n", argv[0]);
         return 1;
     }
-    const char* html_path = argv[1];
+    
+    const char* html_path = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--no-webaudio") == 0) {
+            g_disable_webaudio = 1;
+            fprintf(stderr, "[main] WebAudio API disabled via command line\n");
+        } else {
+            html_path = argv[i];
+        }
+    }
+    
+    if (!html_path) {
+        fprintf(stderr, "Usage: %s [--no-webaudio] <file.html>\n", argv[0]);
+        return 1;
+    }
 
     /* --- Get executable directory for resource files (fonts, etc.) --- */
     get_exe_dir(argv[0], g_original_cwd, sizeof(g_original_cwd));
@@ -435,6 +454,16 @@ int main(int argc, char** argv) {
 
     /* --- Main loop --- */
     int running = 1;
+    int frame_count = 0;
+    int screenshot_taken = 0;
+    int enter_pressed = 0;
+    int mouse_clicked = 0;
+    const int SCREENSHOT_FRAME = 30;  /* Take screenshot after N frames */
+    const int SCREENSHOT_FRAME2 = 100;  /* Take another screenshot later */
+    const int SCREENSHOT_FRAME3 = 300;  /* Take a third screenshot for slow-loading games */
+    const int ENTER_FRAME = 5;  /* Simulate ENTER keypress after N frames */
+    const int CLICK_FRAME = 10;  /* Simulate mouse click after N frames */
+    
     while (running) {
         InputEvent ev;
         while (input.poll(&ev)) {
@@ -451,8 +480,56 @@ int main(int argc, char** argv) {
             }
         }
 
+        /* Simulate ENTER keypress to start tests/games that require user input */
+        if (frame_count == ENTER_FRAME && !enter_pressed) {
+            jscore.dispatch_key(13, 1);  /* VK_RETURN = 13 */
+            jscore.dispatch_key(13, 0);
+            enter_pressed = 1;
+            fprintf(stderr, "[main] Simulated ENTER keypress\n");
+        }
+        
+        /* Simulate mouse click for games that require click to start */
+        if (frame_count == CLICK_FRAME && !mouse_clicked) {
+            jscore.dispatch_mouse(INPUT_EVENT_MOUSEDOWN, 100, 100, 0);
+            jscore.dispatch_mouse(INPUT_EVENT_MOUSEUP, 100, 100, 0);
+            mouse_clicked = 1;
+            fprintf(stderr, "[main] Simulated mouse click at (100, 100)\n");
+        }
+
         jscore.check_timers();
         renderer.present();
+        frame_count++;
+        
+        /* Auto-screenshot for testing - verify rendering is working */
+        /* Take screenshot AFTER present to capture rendered content */
+        if (frame_count >= SCREENSHOT_FRAME && screenshot_taken == 0) {
+            char screenshot_path[512];
+            snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_frame_%d.bmp", frame_count);
+            /* Take screenshot before present to capture offscreen content */
+            if (renderer.screenshot(screenshot_path) == 0) {
+                fprintf(stderr, "[screenshot] Saved %s (after present)\n", screenshot_path);
+            } else {
+                fprintf(stderr, "[screenshot] Failed to save %s\n", screenshot_path);
+            }
+            screenshot_taken = 1;
+        }
+        if (frame_count >= SCREENSHOT_FRAME2 && screenshot_taken == 1) {
+            char screenshot_path[512];
+            snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_frame_%d.bmp", frame_count);
+            if (renderer.screenshot(screenshot_path) == 0) {
+                fprintf(stderr, "[screenshot] Saved %s (after present)\n", screenshot_path);
+            }
+            screenshot_taken = 2;
+        }
+        if (frame_count >= SCREENSHOT_FRAME3 && screenshot_taken == 2) {
+            char screenshot_path[512];
+            snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_frame_%d.bmp", frame_count);
+            if (renderer.screenshot(screenshot_path) == 0) {
+                fprintf(stderr, "[screenshot] Saved %s (late)\n", screenshot_path);
+            }
+            screenshot_taken = 3;
+        }
+        
         renderer.sleep_ms(10);
     }
 

@@ -1180,6 +1180,42 @@ static void r_clear_main(void) {
 static double r_get_time_ms(void) { return (double)SDL_GetTicks(); }
 static void   r_sleep_ms(int ms)  { SDL_Delay(ms); }
 
+/* Screenshot - save current frame to BMP file */
+static int r_screenshot(const char* filename) {
+    if (!g_sdl_renderer) return -1;
+    
+    /* Read pixels from the offscreen texture (where content is drawn) */
+    SDL_Texture* target = g_offscreen ? g_offscreen : NULL;
+    if (!target) return -1;
+    
+    SDL_SetRenderTarget(g_sdl_renderer, target);
+    SDL_RenderFlush(g_sdl_renderer);
+    
+    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(0, g_win_w, g_win_h, 24,
+                                                      SDL_PIXELFORMAT_RGB24);
+    if (!sf) {
+        SDL_SetRenderTarget(g_sdl_renderer, NULL);
+        return -1;
+    }
+    
+    if (SDL_RenderReadPixels(g_sdl_renderer, NULL,
+                             SDL_PIXELFORMAT_RGB24,
+                             sf->pixels, sf->pitch) != 0) {
+        SDL_FreeSurface(sf);
+        SDL_SetRenderTarget(g_sdl_renderer, NULL);
+        return -1;
+    }
+    
+    /* Save to BMP */
+    int result = SDL_SaveBMP(sf, filename);
+    SDL_FreeSurface(sf);
+    
+    /* Reset render target */
+    SDL_SetRenderTarget(g_sdl_renderer, NULL);
+    
+    return result;
+}
+
 /* ============================================================================
  * Interface initializer
  * ============================================================================ */
@@ -1217,4 +1253,5 @@ void renderer_sdl2_init_iface(RendererInterface* iface) {
     iface->clear_main       = r_clear_main;
     iface->get_time_ms      = r_get_time_ms;
     iface->sleep_ms         = r_sleep_ms;
+    iface->screenshot       = r_screenshot;
 }

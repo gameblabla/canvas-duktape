@@ -126,6 +126,9 @@ typedef struct {
     /* Time */
     double (*get_time_ms)(void);
     void   (*sleep_ms)(int ms);
+    
+    /* Screenshot */
+    int    (*screenshot)(const char* filename);
 } RendererInterface;
 
 /* ============================================================================

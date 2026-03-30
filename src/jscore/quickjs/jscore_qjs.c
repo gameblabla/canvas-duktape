@@ -384,6 +384,26 @@ static JSValue js_audiocontext_decodeAudioData(JSContext *ctx, JSValueConst this
 static JSValue js_audiocontext_close(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_suspend(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_resume(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+/* Additional WebAudio methods */
+static JSValue js_audiocontext_createOscillator(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_createBiquadFilter(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_createBuffer(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_createAnalyser(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+/* Analyser methods */
+static JSValue js_audiocontext_analyser_getByteFrequencyData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_analyser_getByteTimeDomainData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+/* Buffer methods */
+static JSValue js_audiocontext_buffer_getChannelData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+/* AudioParam methods */
+static JSValue js_audiocontext_audioparam_setValueAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_audioparam_linearRampToValueAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_audioparam_exponentialRampToValueAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_audioparam_setTargetAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_audioparam_setValueCurveAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_audioparam_cancelScheduledValues(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_audioparam_cancelAndHoldAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+/* Internal helper */
+static void setup_audiocontext_prototype(JSContext *ctx);
 
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     /* Get canvas ID from the context object's _canvasId property */
@@ -3624,6 +3644,11 @@ static JSValue js_canvas_get_style(JSContext *ctx, JSValueConst this_val) {
 /* Forward declaration - defined later */
 extern JSValue g_audio_proto;
 
+/* Audio play() Promise-like callbacks */
+static JSValue js_audio_play_then(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audio_play_catch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audio_play_finally(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+
 static JSValue js_audio_ctor(JSContext *ctx, JSValueConst new_target,
                              int argc, JSValueConst *argv) {
     /* Get the prototype from the constructor */
@@ -3903,7 +3928,51 @@ static JSValue js_audio_play(JSContext *ctx, JSValueConst this_val,
         elem->is_simulating = 1;
         elem->simulated_start_time = (int64_t)(g_renderer->get_time_ms ? g_renderer->get_time_ms() : 0);
     }
-    /* Return this for method chaining */
+    
+    /* Return a Promise-like object for autoplay detection */
+    /* Modern browsers return a Promise from play() */
+    JSValue promise = JS_NewObject(ctx);
+    
+    JS_SetPropertyStr(ctx, promise, "then", 
+        JS_NewCFunction(ctx, js_audio_play_then, "then", 2));
+    JS_SetPropertyStr(ctx, promise, "catch", 
+        JS_NewCFunction(ctx, js_audio_play_catch, "catch", 1));
+    JS_SetPropertyStr(ctx, promise, "finally", 
+        JS_NewCFunction(ctx, js_audio_play_finally, "finally", 1));
+    
+    return promise;
+}
+
+/* Promise-like callbacks for play() */
+static JSValue js_audio_play_then(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    /* Call the success callback if provided */
+    if (argc >= 1 && JS_IsFunction(ctx, argv[0])) {
+        JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(result)) {
+            JS_GetException(ctx);
+        }
+        JS_FreeValue(ctx, result);
+    }
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_audio_play_catch(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    /* Ignore error callback for now - autoplay usually succeeds in our context */
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_audio_play_finally(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    /* Call finally callback if provided */
+    if (argc >= 1 && JS_IsFunction(ctx, argv[0])) {
+        JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(result)) {
+            JS_GetException(ctx);
+        }
+        JS_FreeValue(ctx, result);
+    }
     return JS_DupValue(ctx, this_val);
 }
 
@@ -5253,24 +5322,71 @@ static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, type_val);
 
     if (is_js && src && src[0] != '\0') {
-        /* Resolve path relative to base dir */
-        char full_path[2048];
-        if (src[0] == '/' || g_jscore_base_dir[0] == '\0') {
-            snprintf(full_path, sizeof(full_path), "%s", src);
-        } else {
-            snprintf(full_path, sizeof(full_path), "%s/%s", g_jscore_base_dir, src);
+        /* Try multiple paths to find the script file */
+        char *paths_to_try[4];
+        int num_paths = 0;
+        
+        /* Path 1: Relative to base directory */
+        if (src[0] != '/' && g_jscore_base_dir[0] != '\0') {
+            char *path1 = malloc(2048);
+            snprintf(path1, 2048, "%s/%s", g_jscore_base_dir, src);
+            paths_to_try[num_paths++] = path1;
+        }
+        
+        /* Path 2: Relative to current working directory */
+        char *path2 = malloc(2048);
+        snprintf(path2, 2048, "%s", src);
+        paths_to_try[num_paths++] = path2;
+        
+        /* Path 3: Absolute path if src starts with / */
+        if (src[0] == '/') {
+            char *path3 = malloc(2048);
+            strncpy(path3, src, 2047);
+            path3[2047] = '\0';
+            paths_to_try[num_paths++] = path3;
+        }
+        
+        FILE *fp = NULL;
+        char full_path[2048] = {0};
+        
+        for (int i = 0; i < num_paths; i++) {
+            fp = fopen(paths_to_try[i], "rb");
+            if (fp) {
+                strncpy(full_path, paths_to_try[i], sizeof(full_path) - 1);
+                full_path[sizeof(full_path) - 1] = '\0';
+                break;
+            }
+        }
+        
+        /* Free allocated paths */
+        for (int i = 0; i < num_paths; i++) {
+            free(paths_to_try[i]);
         }
 
         /* Load and eval the script */
         size_t buf_len;
-        char *buf = (char *)js_load_file(ctx, &buf_len, full_path);
+        char *buf = NULL;
+        if (fp) {
+            fseek(fp, 0, SEEK_END);
+            buf_len = ftell(fp);
+            fseek(fp, 0, SEEK_SET);
+            buf = (char *)malloc(buf_len + 1);
+            if (buf) {
+                fread(buf, 1, buf_len, fp);
+                buf[buf_len] = '\0';
+            }
+            fclose(fp);
+        } else {
+            buf = (char *)js_load_file(ctx, &buf_len, full_path);
+        }
+        
         JSValue onload = JS_GetPropertyStr(ctx, child, "onload");
         JSValue onerror = JS_GetPropertyStr(ctx, child, "onerror");
 
         if (buf) {
             JSValue result = JS_Eval(ctx, buf, buf_len, full_path,
                                      JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_BACKTRACE_BARRIER);
-            js_free(ctx, buf);
+            free(buf);
             if (JS_IsException(result)) {
                 JSValue exc = JS_GetException(ctx);
                 const char *exc_str = JS_ToCString(ctx, exc);
@@ -5293,7 +5409,7 @@ static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val,
             }
             JS_FreeValue(ctx, result);
         } else {
-            fprintf(stderr, "[appendChild] Failed to load script: %s\n", full_path);
+            fprintf(stderr, "[appendChild] Failed to load script: %s\n", src);
             if (JS_IsFunction(ctx, onerror)) {
                 JSValue ret = JS_Call(ctx, onerror, child, 0, NULL);
                 if (JS_IsException(ret)) JS_GetException(ctx);
@@ -6752,24 +6868,59 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     int is_arraybuffer = resp_type && strcmp(resp_type, "arraybuffer") == 0;
     JS_FreeCString(ctx, resp_type);
 
-    char filepath[2048];
+    /* Try multiple paths to find the file */
+    char *paths_to_try[4];
+    int num_paths = 0;
+    
+    /* Path 1: Relative to base directory */
     if (g_jscore_base_dir[0] && url[0] != '/') {
-        snprintf(filepath, sizeof(filepath), "%s/%s", g_jscore_base_dir, url);
-    } else {
-        strncpy(filepath, url, sizeof(filepath) - 1);
-        filepath[sizeof(filepath) - 1] = '\0';
+        char *path1 = malloc(2048);
+        snprintf(path1, 2048, "%s/%s", g_jscore_base_dir, url);
+        paths_to_try[num_paths++] = path1;
     }
-    JS_FreeCString(ctx, url);
+    
+    /* Path 2: Relative to current working directory */
+    char *path2 = malloc(2048);
+    snprintf(path2, 2048, "%s", url);
+    paths_to_try[num_paths++] = path2;
+    
+    /* Path 3: Absolute path if URL starts with / */
+    if (url[0] == '/') {
+        char *path3 = malloc(2048);
+        strncpy(path3, url, 2047);
+        path3[2047] = '\0';
+        paths_to_try[num_paths++] = path3;
+    }
+    
+    FILE *fp = NULL;
+    char filepath[2048] = {0};
+    
+    for (int i = 0; i < num_paths; i++) {
+        fp = fopen(paths_to_try[i], "rb");
+        if (fp) {
+            strncpy(filepath, paths_to_try[i], sizeof(filepath) - 1);
+            filepath[sizeof(filepath) - 1] = '\0';
+            break;
+        }
+    }
+    
+    /* Free allocated paths */
+    for (int i = 0; i < num_paths; i++) {
+        free(paths_to_try[i]);
+    }
 
-    fprintf(stderr, "[xhr] loading: %s\n", filepath);
-    FILE *fp = fopen(filepath, "rb");
     if (!fp) {
+        fprintf(stderr, "[xhr] file not found: %s (tried from base_dir=%s)\n", url, g_jscore_base_dir);
+        JS_FreeCString(ctx, url);
         JS_SetPropertyStr(ctx, this_val, "readyState",  JS_NewInt32(ctx, 4));
         JS_SetPropertyStr(ctx, this_val, "status",      JS_NewInt32(ctx, 404));
         JS_SetPropertyStr(ctx, this_val, "statusText",  JS_NewString(ctx, "Not Found"));
         xhr_fire_callbacks(ctx, this_val, 0);
         return JS_UNDEFINED;
     }
+    
+    fprintf(stderr, "[xhr] loaded: %s\n", filepath);
+    JS_FreeCString(ctx, url);
 
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
@@ -6865,23 +7016,65 @@ static JSValue g_audiocontext_proto = JS_UNDEFINED;
 
 static JSValue js_audiocontext_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
     (void)argc; (void)argv; (void)new_target;
+
+    /* Setup prototype if not already done */
+    setup_audiocontext_prototype(ctx);
+
     /* Create instance with prototype */
     JSValue obj = JS_NewObjectProto(ctx, g_audiocontext_proto);
+
+    /* Properties */
     JS_SetPropertyStr(ctx, obj, "currentTime", JS_NewFloat64(ctx, 0.0));
     JS_SetPropertyStr(ctx, obj, "sampleRate", JS_NewFloat64(ctx, 44100.0));
     JS_SetPropertyStr(ctx, obj, "state", JS_NewString(ctx, "running"));
+    JS_SetPropertyStr(ctx, obj, "baseLatency", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, obj, "outputLatencyHint", JS_NewString(ctx, "interactive"));
+    
+    /* Store event listeners for statechange */
+    JSValue listeners = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "_listeners", listeners);
+
     /* Create persistent listener if not already created */
     if (JS_IsUndefined(g_audiocontext_listener)) {
         g_audiocontext_listener = js_audiocontext_getListener(ctx);
     }
     JS_SetPropertyStr(ctx, obj, "listener", JS_DupValue(ctx, g_audiocontext_listener));
+
     /* destination - a gain node that connects to output */
     JS_SetPropertyStr(ctx, obj, "destination", js_audiocontext_createGain(ctx, JS_UNDEFINED, 0, NULL));
+    
+    /* addEventListener on instance for direct access */
+    JS_SetPropertyStr(ctx, obj, "addEventListener", 
+        JS_NewCFunction(ctx, js_audiocontext_addEventListener, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, obj, "removeEventListener", 
+        JS_NewCFunction(ctx, js_audiocontext_removeEventListener, "removeEventListener", 2));
+
     return obj;
 }
 
 static JSValue js_audiocontext_addEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    if (argc < 2) return JS_UNDEFINED;
+    
+    const char *event_type = JS_ToCString(ctx, argv[0]);
+    if (!event_type) return JS_UNDEFINED;
+    
+    /* Store the listener for statechange events */
+    if (strcmp(event_type, "statechange") == 0 && JS_IsFunction(ctx, argv[1])) {
+        JSValue listeners = JS_GetPropertyStr(ctx, this_val, "_listeners");
+        if (JS_IsObject(listeners)) {
+            JS_SetPropertyStr(ctx, listeners, "statechange", JS_DupValue(ctx, argv[1]));
+        }
+        JS_FreeValue(ctx, listeners);
+        
+        /* Fire event immediately since state is already "running" */
+        JSValue event = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, event, "type", JS_NewString(ctx, "statechange"));
+        JS_SetPropertyStr(ctx, event, "target", JS_DupValue(ctx, this_val));
+        JS_Call(ctx, argv[1], JS_UNDEFINED, 1, &event);
+        JS_FreeValue(ctx, event);
+    }
+    
+    JS_FreeCString(ctx, event_type);
     return JS_UNDEFINED;
 }
 
@@ -6908,6 +7101,42 @@ static JSValue js_audiocontext_getListener(JSContext *ctx) {
     return listener;
 }
 
+/* AudioContext prototype with all methods */
+
+static void setup_audiocontext_prototype(JSContext *ctx) {
+    if (!JS_IsUndefined(g_audiocontext_proto)) return;
+    
+    g_audiocontext_proto = JS_NewObject(ctx);
+    
+    /* Methods */
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "addEventListener", 
+        JS_NewCFunction(ctx, js_audiocontext_addEventListener, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "removeEventListener", 
+        JS_NewCFunction(ctx, js_audiocontext_removeEventListener, "removeEventListener", 2));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createGain", 
+        JS_NewCFunction(ctx, js_audiocontext_createGain, "createGain", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createOscillator", 
+        JS_NewCFunction(ctx, js_audiocontext_createOscillator, "createOscillator", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createBufferSource", 
+        JS_NewCFunction(ctx, js_audiocontext_createBufferSource, "createBufferSource", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createBuffer", 
+        JS_NewCFunction(ctx, js_audiocontext_createBuffer, "createBuffer", 3));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createAnalyser", 
+        JS_NewCFunction(ctx, js_audiocontext_createAnalyser, "createAnalyser", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createPanner", 
+        JS_NewCFunction(ctx, js_audiocontext_createPanner, "createPanner", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createBiquadFilter", 
+        JS_NewCFunction(ctx, js_audiocontext_createBiquadFilter, "createBiquadFilter", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "decodeAudioData", 
+        JS_NewCFunction(ctx, js_audiocontext_decodeAudioData, "decodeAudioData", 1));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "close", 
+        JS_NewCFunction(ctx, js_audiocontext_close, "close", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "suspend", 
+        JS_NewCFunction(ctx, js_audiocontext_suspend, "suspend", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "resume", 
+        JS_NewCFunction(ctx, js_audiocontext_resume, "resume", 0));
+}
+
 static JSValue js_audiocontext_listener_setOrientation(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
     return JS_UNDEFINED;
@@ -6921,9 +7150,35 @@ static JSValue js_audiocontext_listener_setPosition(JSContext *ctx, JSValueConst
 static JSValue js_audiocontext_createGain(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val; (void)argc;
     JSValue gain = JS_NewObject(ctx);
-    /* gain.gain is an object with a value property */
+    /* gain.gain is an AudioParam-like object with value and methods */
     JSValue gain_param = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, gain_param, "value", JS_NewFloat64(ctx, 1.0));
+    /* Add AudioParam methods */
+    JS_SetPropertyStr(ctx, gain_param, "defaultValue", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, gain_param, "minValue", JS_NewFloat64(ctx, -3.402823466e+38));
+    JS_SetPropertyStr(ctx, gain_param, "maxValue", JS_NewFloat64(ctx, 3.402823466e+38));
+    /* setValueAtTime method */
+    JS_SetPropertyStr(ctx, gain_param, "setValueAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    /* linearRampToValueAtTime method */
+    JS_SetPropertyStr(ctx, gain_param, "linearRampToValueAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_linearRampToValueAtTime, "linearRampToValueAtTime", 2));
+    /* exponentialRampToValueAtTime method */
+    JS_SetPropertyStr(ctx, gain_param, "exponentialRampToValueAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_exponentialRampToValueAtTime, "exponentialRampToValueAtTime", 2));
+    /* setTargetAtTime method */
+    JS_SetPropertyStr(ctx, gain_param, "setTargetAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setTargetAtTime, "setTargetAtTime", 3));
+    /* setValueCurveAtTime method */
+    JS_SetPropertyStr(ctx, gain_param, "setValueCurveAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueCurveAtTime, "setValueCurveAtTime", 3));
+    /* cancelScheduledValues method */
+    JS_SetPropertyStr(ctx, gain_param, "cancelScheduledValues", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_cancelScheduledValues, "cancelScheduledValues", 1));
+    /* cancelAndHoldAtTime method */
+    JS_SetPropertyStr(ctx, gain_param, "cancelAndHoldAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_cancelAndHoldAtTime, "cancelAndHoldAtTime", 1));
+    
     JS_SetPropertyStr(ctx, gain, "gain", gain_param);
     /* Add connect method */
     JSValue connect_func = JS_NewCFunction2(ctx, js_audiocontext_node_connect, "connect", 1, JS_CFUNC_generic, 0);
@@ -6981,24 +7236,300 @@ static JSValue js_audiocontext_node_disconnect(JSContext *ctx, JSValueConst this
     return JS_UNDEFINED;
 }
 
+/* Stub functions for analyser methods */
+static JSValue js_audiocontext_analyser_getByteFrequencyData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        JSValue arr = argv[0];
+        JSValue length_val = JS_GetPropertyStr(ctx, arr, "length");
+        int32_t length = 0;
+        if (!JS_IsUndefined(length_val)) {
+            JS_ToInt32(ctx, &length, length_val);
+        }
+        JS_FreeValue(ctx, length_val);
+        /* Fill array with zeros */
+        for (int32_t i = 0; i < length; i++) {
+            JS_SetPropertyUint32(ctx, arr, i, JS_NewInt32(ctx, 0));
+        }
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_audiocontext_analyser_getByteTimeDomainData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        JSValue arr = argv[0];
+        JSValue length_val = JS_GetPropertyStr(ctx, arr, "length");
+        int32_t length = 0;
+        if (!JS_IsUndefined(length_val)) {
+            JS_ToInt32(ctx, &length, length_val);
+        }
+        JS_FreeValue(ctx, length_val);
+        /* Fill array with 128 (center value for waveform) */
+        for (int32_t i = 0; i < length; i++) {
+            JS_SetPropertyUint32(ctx, arr, i, JS_NewInt32(ctx, 128));
+        }
+    }
+    return JS_UNDEFINED;
+}
+
+/* Buffer getChannelData method */
+static JSValue js_audiocontext_buffer_getChannelData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) {
+        JS_ThrowTypeError(ctx, "getChannelData requires an index argument");
+        return JS_EXCEPTION;
+    }
+    
+    int32_t idx = 0;
+    JS_ToInt32(ctx, &idx, argv[0]);
+    
+    /* Get numberOfChannels */
+    JSValue num_channels_val = JS_GetPropertyStr(ctx, this_val, "numberOfChannels");
+    int32_t num_channels = 0;
+    if (!JS_IsUndefined(num_channels_val)) {
+        JS_ToInt32(ctx, &num_channels, num_channels_val);
+    }
+    JS_FreeValue(ctx, num_channels_val);
+    
+    /* Validate index */
+    if (idx < 0 || idx >= num_channels) {
+        JS_ThrowRangeError(ctx, "Channel index out of range");
+        return JS_EXCEPTION;
+    }
+    
+    /* Get length */
+    JSValue length_val = JS_GetPropertyStr(ctx, this_val, "length");
+    int32_t length = 0;
+    if (!JS_IsUndefined(length_val)) {
+        JS_ToInt32(ctx, &length, length_val);
+    }
+    JS_FreeValue(ctx, length_val);
+    
+    /* Check if channel already exists */
+    JSValue channels = JS_GetPropertyStr(ctx, this_val, "_channels");
+    if (JS_IsUndefined(channels)) {
+        channels = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, this_val, "_channels", channels);
+    }
+    
+    /* Use atom-based property access */
+    JSAtom channel_atom = JS_NewAtomUInt32(ctx, (uint32_t)idx);
+    JSValue channel_data = JS_GetProperty(ctx, channels, channel_atom);
+    
+    if (JS_IsUndefined(channel_data)) {
+        /* Create new channel data array */
+        channel_data = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, channel_data, "length", JS_NewInt32(ctx, length));
+        /* Initialize with zeros */
+        for (int32_t i = 0; i < length; i++) {
+            JS_SetPropertyUint32(ctx, channel_data, i, JS_NewFloat64(ctx, 0.0));
+        }
+        /* Store in _channels object */
+        JS_SetProperty(ctx, channels, channel_atom, JS_DupValue(ctx, channel_data));
+    }
+    
+    JS_FreeAtom(ctx, channel_atom);
+    JS_FreeValue(ctx, channels);
+    return channel_data;
+}
+
+/* AudioParam methods - stub implementations */
+static JSValue js_audiocontext_audioparam_setValueAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx;
+    if (argc >= 1) {
+        JS_SetPropertyStr(ctx, this_val, "value", JS_DupValue(ctx, argv[0]));
+    }
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_audiocontext_audioparam_linearRampToValueAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx;
+    if (argc >= 1) {
+        JS_SetPropertyStr(ctx, this_val, "value", JS_DupValue(ctx, argv[0]));
+    }
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_audiocontext_audioparam_exponentialRampToValueAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx;
+    if (argc >= 1) {
+        JS_SetPropertyStr(ctx, this_val, "value", JS_DupValue(ctx, argv[0]));
+    }
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_audiocontext_audioparam_setTargetAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx;
+    if (argc >= 1) {
+        JS_SetPropertyStr(ctx, this_val, "value", JS_DupValue(ctx, argv[0]));
+    }
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_audiocontext_audioparam_setValueCurveAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx;
+    if (argc >= 1) {
+        JS_SetPropertyStr(ctx, this_val, "value", JS_DupValue(ctx, argv[0]));
+    }
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_audiocontext_audioparam_cancelScheduledValues(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc;
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue js_audiocontext_audioparam_cancelAndHoldAtTime(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc;
+    return JS_DupValue(ctx, this_val);
+}
+
 static JSValue js_audiocontext_source_start(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    (void)argc; (void)argv;
+    JSValue buffer = JS_GetPropertyStr(ctx, this_val, "buffer");
+    if (!JS_IsNull(buffer) && !JS_IsUndefined(buffer)) {
+        JSValue slot_val = JS_GetPropertyStr(ctx, buffer, "_nativeSlot");
+        if (!JS_IsUndefined(slot_val)) {
+            int32_t slot = 0;
+            JS_ToInt32(ctx, &slot, slot_val);
+            JS_FreeValue(ctx, slot_val);
+            JSValue loop_val = JS_GetPropertyStr(ctx, this_val, "loop");
+            sound_set_loop(slot, JS_ToBool(ctx, loop_val));
+            JS_FreeValue(ctx, loop_val);
+            sound_play(slot);
+        } else {
+            JS_FreeValue(ctx, slot_val);
+        }
+    }
+    JS_FreeValue(ctx, buffer);
     return JS_UNDEFINED;
 }
 
 static JSValue js_audiocontext_source_stop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    (void)argc; (void)argv;
+    JSValue buffer = JS_GetPropertyStr(ctx, this_val, "buffer");
+    if (!JS_IsNull(buffer) && !JS_IsUndefined(buffer)) {
+        JSValue slot_val = JS_GetPropertyStr(ctx, buffer, "_nativeSlot");
+        if (!JS_IsUndefined(slot_val)) {
+            int32_t slot = 0;
+            JS_ToInt32(ctx, &slot, slot_val);
+            JS_FreeValue(ctx, slot_val);
+            sound_stop(slot);
+        } else {
+            JS_FreeValue(ctx, slot_val);
+        }
+    }
+    JS_FreeValue(ctx, buffer);
     return JS_UNDEFINED;
 }
 
 static JSValue js_audiocontext_decodeAudioData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    /* Stub: immediately call success callback with null buffer */
-    if (argc >= 1 && JS_IsFunction(ctx, argv[0])) {
-        JSValue null_buffer = JS_NULL;
-        JSValue ret = JS_Call(ctx, argv[0], JS_UNDEFINED, 1, &null_buffer);
+    /* argv[0] = ArrayBuffer, argv[1] = successCallback, argv[2] = errorCallback */
+    (void)this_val;
+    JSValue success_cb = (argc >= 2) ? argv[1] : JS_UNDEFINED;
+    JSValue error_cb   = (argc >= 3) ? argv[2] : JS_UNDEFINED;
+
+    /* Extract raw bytes from the ArrayBuffer */
+    size_t byte_len = 0;
+    uint8_t *bytes = NULL;
+    if (argc >= 1) {
+        bytes = JS_GetArrayBuffer(ctx, &byte_len, argv[0]);
+    }
+
+    if (!bytes || byte_len == 0) {
+        fprintf(stderr, "[webaudio] decodeAudioData: no data\n");
+        if (JS_IsFunction(ctx, error_cb)) {
+            JSValue err = JS_NewString(ctx, "No audio data");
+            JSValue ret = JS_Call(ctx, error_cb, JS_UNDEFINED, 1, &err);
+            if (JS_IsException(ret)) JS_GetException(ctx);
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, err);
+        }
+        return JS_UNDEFINED;
+    }
+
+    /* Detect format from magic bytes */
+    const char *ext = ".ogg"; /* default */
+    if (byte_len >= 4 &&
+        bytes[0] == 0x4F && bytes[1] == 0x67 && bytes[2] == 0x67 && bytes[3] == 0x53) {
+        ext = ".ogg"; /* OggS */
+    } else if (byte_len >= 3 &&
+               bytes[0] == 0x49 && bytes[1] == 0x44 && bytes[2] == 0x33) {
+        ext = ".mp3"; /* ID3 tag */
+    } else if (byte_len >= 2 &&
+               bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0) {
+        ext = ".mp3"; /* MPEG frame sync */
+    }
+
+    /* Compute a simple hash for a unique temp filename */
+    unsigned int hash = (unsigned int)byte_len;
+    for (size_t i = 0; i < byte_len && i < 32; i++) {
+        hash = hash * 31u + bytes[i];
+    }
+
+    /* Write bytes to a temp file so the sound backend can decode it */
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "/tmp/canvas_audio_%08x%s", hash, ext);
+
+    FILE *f = fopen(tmppath, "wb");
+    if (!f) {
+        fprintf(stderr, "[webaudio] decodeAudioData: cannot write temp file %s\n", tmppath);
+        if (JS_IsFunction(ctx, error_cb)) {
+            JSValue err = JS_NewString(ctx, "Cannot write temp file");
+            JSValue ret = JS_Call(ctx, error_cb, JS_UNDEFINED, 1, &err);
+            if (JS_IsException(ret)) JS_GetException(ctx);
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, err);
+        }
+        return JS_UNDEFINED;
+    }
+    fwrite(bytes, 1, byte_len, f);
+    fclose(f);
+
+    /* Decode via the SDL2 sound backend */
+    int native_slot = -1;
+    int loaded = sound_load_audio(tmppath, &native_slot);
+    remove(tmppath); /* clean up temp file regardless */
+
+    if (loaded < 0 || native_slot < 0) {
+        fprintf(stderr, "[webaudio] decodeAudioData: decode failed for %s\n", tmppath);
+        if (JS_IsFunction(ctx, error_cb)) {
+            JSValue err = JS_NewString(ctx, "Decode failed");
+            JSValue ret = JS_Call(ctx, error_cb, JS_UNDEFINED, 1, &err);
+            if (JS_IsException(ret)) JS_GetException(ctx);
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, err);
+        }
+        return JS_UNDEFINED;
+    }
+
+    /* Build the AudioBuffer JS object */
+    float duration   = sound_get_duration(native_slot);
+    int sample_rate  = 44100;
+    int num_channels = 2;
+    int length       = (int)(duration * (float)sample_rate);
+
+    JSValue audio_buffer = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, audio_buffer, "sampleRate",       JS_NewInt32(ctx, sample_rate));
+    JS_SetPropertyStr(ctx, audio_buffer, "length",           JS_NewInt32(ctx, length));
+    JS_SetPropertyStr(ctx, audio_buffer, "numberOfChannels", JS_NewInt32(ctx, num_channels));
+    JS_SetPropertyStr(ctx, audio_buffer, "duration",         JS_NewFloat64(ctx, (double)duration));
+    /* Store native slot so source.start() can play it */
+    JS_SetPropertyStr(ctx, audio_buffer, "_nativeSlot",      JS_NewInt32(ctx, native_slot));
+    JS_SetPropertyStr(ctx, audio_buffer, "getChannelData",
+        JS_NewCFunction(ctx, js_audiocontext_buffer_getChannelData, "getChannelData", 1));
+
+    fprintf(stderr, "[webaudio] decodeAudioData: slot=%d duration=%.2fs\n", native_slot, duration);
+
+    /* Call success callback */
+    if (JS_IsFunction(ctx, success_cb)) {
+        JSValue ret = JS_Call(ctx, success_cb, JS_UNDEFINED, 1, &audio_buffer);
         if (JS_IsException(ret)) JS_GetException(ctx);
         JS_FreeValue(ctx, ret);
     }
+
+    JS_FreeValue(ctx, audio_buffer);
     return JS_UNDEFINED;
 }
 
@@ -7015,6 +7546,116 @@ static JSValue js_audiocontext_suspend(JSContext *ctx, JSValueConst this_val, in
 static JSValue js_audiocontext_resume(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
     return JS_UNDEFINED;
+}
+
+/* ========== Additional WebAudio API Methods ========== */
+
+static JSValue js_audiocontext_createOscillator(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc;
+    JSValue osc = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, osc, "type", JS_NewString(ctx, "sine"));
+    /* frequency is an AudioParam-like object */
+    JSValue frequency = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, frequency, "value", JS_NewFloat64(ctx, 440.0));
+    JS_SetPropertyStr(ctx, frequency, "defaultValue", JS_NewFloat64(ctx, 440.0));
+    JS_SetPropertyStr(ctx, frequency, "minValue", JS_NewFloat64(ctx, -22050.0));
+    JS_SetPropertyStr(ctx, frequency, "maxValue", JS_NewFloat64(ctx, 22050.0));
+    JS_SetPropertyStr(ctx, frequency, "setValueAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, frequency, "linearRampToValueAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_linearRampToValueAtTime, "linearRampToValueAtTime", 2));
+    JS_SetPropertyStr(ctx, osc, "frequency", frequency);
+    /* detune is also an AudioParam */
+    JSValue detune = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, detune, "value", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, detune, "setValueAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, osc, "detune", detune);
+    JS_SetPropertyStr(ctx, osc, "periodicWave", JS_NULL);
+    /* Add connect/disconnect methods */
+    JS_SetPropertyStr(ctx, osc, "connect", JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
+    JS_SetPropertyStr(ctx, osc, "disconnect", JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
+    /* Oscillator nodes can be started/stopped (but we stub it) */
+    JS_SetPropertyStr(ctx, osc, "start", JS_NewCFunction(ctx, js_audiocontext_source_start, "start", 1));
+    JS_SetPropertyStr(ctx, osc, "stop", JS_NewCFunction(ctx, js_audiocontext_source_stop, "stop", 1));
+    return osc;
+}
+
+static JSValue js_audiocontext_createBiquadFilter(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc;
+    JSValue filter = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, filter, "type", JS_NewString(ctx, "lowpass"));
+    /* frequency is an AudioParam-like object */
+    JSValue frequency = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, frequency, "value", JS_NewFloat64(ctx, 350.0));
+    JS_SetPropertyStr(ctx, frequency, "defaultValue", JS_NewFloat64(ctx, 350.0));
+    JS_SetPropertyStr(ctx, frequency, "setValueAtTime", 
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, filter, "frequency", frequency);
+    /* detune AudioParam */
+    JSValue detune = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, detune, "value", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, filter, "detune", detune);
+    /* Q AudioParam */
+    JSValue q = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, q, "value", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, filter, "Q", q);
+    /* gain AudioParam */
+    JSValue gain_param = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, gain_param, "value", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, filter, "gain", gain_param);
+    /* Add connect/disconnect methods */
+    JS_SetPropertyStr(ctx, filter, "connect", JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
+    JS_SetPropertyStr(ctx, filter, "disconnect", JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
+    return filter;
+}
+
+static JSValue js_audiocontext_createBuffer(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    int num_channels = 1;
+    int length = 0;
+    int sample_rate = 44100;
+    
+    if (argc >= 3) {
+        JS_ToInt32(ctx, &num_channels, argv[0]);
+        JS_ToInt32(ctx, &length, argv[1]);
+        JS_ToInt32(ctx, &sample_rate, argv[2]);
+    }
+    
+    JSValue buffer = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, buffer, "sampleRate", JS_NewInt32(ctx, sample_rate));
+    JS_SetPropertyStr(ctx, buffer, "length", JS_NewInt32(ctx, length));
+    JS_SetPropertyStr(ctx, buffer, "numberOfChannels", JS_NewInt32(ctx, num_channels));
+    
+    /* Create getChannelData method - returns a Float32Array-like object */
+    JSValue get_channel_data_fn = JS_NewCFunction(ctx, js_audiocontext_buffer_getChannelData, "getChannelData", 1);
+    JS_SetPropertyStr(ctx, buffer, "getChannelData", get_channel_data_fn);
+    
+    return buffer;
+}
+
+static JSValue js_audiocontext_createAnalyser(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc;
+    JSValue analyser = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, analyser, "fftSize", JS_NewInt32(ctx, 2048));
+    JS_SetPropertyStr(ctx, analyser, "frequencyBinCount", JS_NewInt32(ctx, 1024));
+    JS_SetPropertyStr(ctx, analyser, "minDecibels", JS_NewFloat64(ctx, -100.0));
+    JS_SetPropertyStr(ctx, analyser, "maxDecibels", JS_NewFloat64(ctx, -30.0));
+    JS_SetPropertyStr(ctx, analyser, "smoothingTimeConstant", JS_NewFloat64(ctx, 0.8));
+    /* Add connect/disconnect methods */
+    JS_SetPropertyStr(ctx, analyser, "connect", JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
+    JS_SetPropertyStr(ctx, analyser, "disconnect", JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
+    /* Analysis methods */
+    JS_SetPropertyStr(ctx, analyser, "getByteFrequencyData", 
+        JS_NewCFunction(ctx, js_audiocontext_analyser_getByteFrequencyData, "getByteFrequencyData", 1));
+    JS_SetPropertyStr(ctx, analyser, "getByteTimeDomainData", 
+        JS_NewCFunction(ctx, js_audiocontext_analyser_getByteTimeDomainData, "getByteTimeDomainData", 1));
+    /* Add getterFrequencyData for Float32Array support */
+    JS_SetPropertyStr(ctx, analyser, "getFloatFrequencyData", 
+        JS_NewCFunction(ctx, js_audiocontext_analyser_getByteFrequencyData, "getFloatFrequencyData", 1));
+    JS_SetPropertyStr(ctx, analyser, "getFloatTimeDomainData", 
+        JS_NewCFunction(ctx, js_audiocontext_analyser_getByteTimeDomainData, "getFloatTimeDomainData", 1));
+    return analyser;
 }
 
 static JSValue js_getComputedStyle(JSContext *ctx, JSValueConst this_val,
@@ -7352,10 +7993,17 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, xhr_ctor, "_hs2",             JS_NewInt32(ctx, 4)); /* GMS2-obfuscated DONE */
     JS_SetPropertyStr(ctx, global, "XMLHttpRequest", xhr_ctor);
 
-    /* Web Audio API - DISABLED to force use of HTML5 Audio elements */
-    /* Games like buzz.js will use HTML5 Audio API instead */
-    /* JS_SetPropertyStr(ctx, global, "AudioContext", AudioContext_ctor); */
-    /* JS_SetPropertyStr(ctx, global, "webkitAudioContext", JS_DupValue(ctx, AudioContext_ctor)); */
+    /* Web Audio API - Enable AudioContext constructor */
+    /* Create AudioContext constructor function */
+    JSValue AudioContext_ctor = JS_NewCFunction2(ctx, js_audiocontext_ctor, "AudioContext", 0,
+                                                  JS_CFUNC_constructor, 0);
+    /* Setup prototype */
+    setup_audiocontext_prototype(ctx);
+    JS_SetPropertyStr(ctx, AudioContext_ctor, "prototype", JS_DupValue(ctx, g_audiocontext_proto));
+    
+    /* Register AudioContext and webkitAudioContext (for compatibility) */
+    JS_SetPropertyStr(ctx, global, "AudioContext", AudioContext_ctor);
+    JS_SetPropertyStr(ctx, global, "webkitAudioContext", JS_DupValue(ctx, AudioContext_ctor));
 
     /* Global utility functions */
     JS_SetPropertyStr(ctx, global, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));
