@@ -191,4 +191,7 @@ typedef struct {
     void (*check_timers)(void);
     void (*dispatch_key)(int keycode, int is_down);
     void (*dispatch_mouse)(int event_type, int x, int y, int button);
+    
+    /* Optional: enable broken WebGL support */
+    void (*set_broken_webgl)(int enable);
 } JSCoreInterface;

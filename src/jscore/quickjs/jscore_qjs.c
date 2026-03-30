@@ -29,6 +29,9 @@ static JSRuntime *g_rt = NULL;
 static JSContext *g_ctx = NULL;
 static int g_initialized = 0;
 
+/* WebGL support flag (disabled by default, enable via --broken-webgl) */
+static int g_broken_webgl = 0;
+
 /* Interfaces */
 static RendererInterface *g_renderer = NULL;
 static InputInterface *g_input = NULL;
@@ -220,6 +223,7 @@ typedef struct {
     int64_t next_fire;
     int repeat;
     int active;
+    int is_event;    /* 1 if this is an event callback (onload/onerror) */
 } TimerEntry;
 
 static TimerEntry g_timers[MAX_INTERVALS];
@@ -584,7 +588,7 @@ static int find_timer_by_id(int id) {
     return -1;
 }
 
-/* Schedule a one-shot 0ms timer to call func asynchronously (deferred).
+/* Deferred call with event object for image onload/onerror.
  * Used to make image onload/onerror async like a real browser. */
 static void schedule_deferred_call_this(JSContext *ctx, JSValue func, JSValue this_val) {
     int slot = -1;
@@ -595,11 +599,13 @@ static void schedule_deferred_call_this(JSContext *ctx, JSValue func, JSValue th
     int id = g_timer_next_id++;
     g_timers[slot].id = id;
     g_timers[slot].func = JS_DupValue(ctx, func);
+    /* Store this_val for creating event object later */
     g_timers[slot].this_val = JS_IsUndefined(this_val) ? JS_UNDEFINED : JS_DupValue(ctx, this_val);
     g_timers[slot].interval_ms = 0;
     g_timers[slot].next_fire = 0; /* fire ASAP */
     g_timers[slot].repeat = 0;
     g_timers[slot].active = 1;
+    g_timers[slot].is_event = 1;  /* Mark as event callback */
 }
 static void schedule_deferred_call(JSContext *ctx, JSValue func) {
     schedule_deferred_call_this(ctx, func, JS_UNDEFINED);
@@ -2776,9 +2782,6 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
     }
 
     if (!img_handle) {
-#ifdef EXTRA_DEBUG
-        fprintf(stderr, "[drawImage] No image handle (img_id=%d, canvas_id=%d)\n", img_id, canvas_id);
-#endif
         return JS_UNDEFINED;
     }
 
@@ -3493,8 +3496,26 @@ static JSValue js_canvas_getContext(JSContext *ctx, JSValueConst this_val,
     if (argc < 1) return JS_NULL;
 
     const char *type = JS_ToCString(ctx, argv[0]);
-    if (!type || strcmp(type, "2d") != 0) {
-        if (type) JS_FreeCString(ctx, type);
+    if (!type) {
+        return JS_NULL;
+    }
+    
+    /* Check for WebGL context request */
+    if (strcmp(type, "webgl") == 0 || strcmp(type, "experimental-webgl") == 0 ||
+        strcmp(type, "moz-webgl") == 0 || strcmp(type, "webkit-3d") == 0) {
+        JS_FreeCString(ctx, type);
+        /* WebGL is disabled by default - return NULL to force fallback to 2D */
+        if (!g_broken_webgl) {
+            return JS_NULL;
+        }
+        /* If --broken-webgl is enabled, fall through to return a stub WebGL context */
+        /* TODO: Implement stub WebGL context */
+        return JS_NULL;
+    }
+    
+    /* Only 2d context is fully supported */
+    if (strcmp(type, "2d") != 0) {
+        JS_FreeCString(ctx, type);
         return JS_NULL;
     }
     JS_FreeCString(ctx, type);
@@ -4679,7 +4700,8 @@ static JSValue js_setInterval(JSContext *ctx, JSValueConst this_val,
                                           g_renderer->get_time_ms() : 0) + ms;
     g_timers[slot].repeat = 1;
     g_timers[slot].active = 1;
-    
+    g_timers[slot].is_event = 0;
+
     return JS_NewInt32(ctx, id);
 }
 
@@ -4707,7 +4729,8 @@ static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val,
                                           g_renderer->get_time_ms() : 0) + ms;
     g_timers[slot].repeat = 0;
     g_timers[slot].active = 1;
-    
+    g_timers[slot].is_event = 0;
+
     return JS_NewInt32(ctx, id);
 }
 
@@ -7080,9 +7103,13 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
 
 static JSValue js_xhr_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if (argc >= 1) JS_SetPropertyStr(ctx, this_val, "_method", JS_DupValue(ctx, argv[0]));
-    if (argc >= 2) JS_SetPropertyStr(ctx, this_val, "_url",    JS_DupValue(ctx, argv[1]));
+    if (argc >= 2) {
+        JS_SetPropertyStr(ctx, this_val, "_url",    JS_DupValue(ctx, argv[1]));
+        /* Also set 'src' property for GameMaker compatibility (it accesses this.src in onload) */
+        JS_SetPropertyStr(ctx, this_val, "src",     JS_DupValue(ctx, argv[1]));
+    }
     if (argc >= 3) JS_SetPropertyStr(ctx, this_val, "_async",  JS_DupValue(ctx, argv[2]));
-    JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 1));
     return JS_UNDEFINED;
 }
 
@@ -7112,7 +7139,7 @@ static size_t xhr_url_decode(const char *in, size_t in_len, char *out, size_t ou
 static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
                                   const char *body, size_t body_len,
                                   int is_arraybuffer, const char *content_type) {
-    JS_SetPropertyStr(ctx, xhr, "readyState", JS_NewInt32(ctx, 4));
+    JS_SetPropertyStr(ctx, xhr, "_readyState", JS_NewInt32(ctx, 4));
     JS_SetPropertyStr(ctx, xhr, "status",     JS_NewInt32(ctx, 200));
     JS_SetPropertyStr(ctx, xhr, "statusText", JS_NewString(ctx, "OK"));
     JS_SetPropertyStr(ctx, xhr, "complete",   JS_NewBool(ctx, 1));
@@ -7155,13 +7182,17 @@ static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
 static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)argc; (void)argv;
 
-    /* Throw if not opened yet */
+    /* Check if opened - throw InvalidStateError if not */
     JSValue rs_v = JS_GetPropertyStr(ctx, this_val, "readyState");
     int32_t rs = 0;
-    JS_ToInt32(ctx, &rs, rs_v);
+    if (!JS_IsUndefined(rs_v)) {
+        JS_ToInt32(ctx, &rs, rs_v);
+    }
     JS_FreeValue(ctx, rs_v);
-    if (rs == 0) {
-        JS_ThrowDOMException(ctx, "InvalidStateError", "send() called before open()");
+    
+    if (rs != 1) {
+        /* Not in OPENED state - throw InvalidStateError */
+        JS_ThrowDOMException(ctx, "InvalidStateError", "send() called in invalid state (readyState=%d)", rs);
         return JS_EXCEPTION;
     }
 
@@ -7182,7 +7213,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
         const char *comma = strchr(p, ',');
         if (!comma) {
             JS_FreeCString(ctx, url);
-            JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 4));
+            JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
             JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 400));
             xhr_fire_callbacks(ctx, this_val, 0);
             return JS_UNDEFINED;
@@ -7251,7 +7282,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     if (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0 ||
         strncmp(url, "//", 2) == 0) {
         JS_FreeCString(ctx, url);
-        JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 4));
+        JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
         JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 0));
         xhr_fire_callbacks(ctx, this_val, 0);
         return JS_UNDEFINED;
@@ -7281,7 +7312,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     if (!fp) {
         fprintf(stderr, "[xhr] file not found: %s (tried from base_dir=%s)\n", url, g_jscore_base_dir);
         JS_FreeCString(ctx, url);
-        JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 4));
+        JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
         JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 404));
         JS_SetPropertyStr(ctx, this_val, "statusText", JS_NewString(ctx, "Not Found"));
         xhr_fire_callbacks(ctx, this_val, 0);
@@ -7304,13 +7335,17 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
 
 static JSValue js_xhr_setHeader(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)argc; (void)argv;
-    /* Throw if called before open() (readyState == 0) */
+    /* Check if opened - throw InvalidStateError if not */
     JSValue rs_v = JS_GetPropertyStr(ctx, this_val, "readyState");
     int32_t rs = 0;
-    JS_ToInt32(ctx, &rs, rs_v);
+    if (!JS_IsUndefined(rs_v)) {
+        JS_ToInt32(ctx, &rs, rs_v);
+    }
     JS_FreeValue(ctx, rs_v);
-    if (rs == 0) {
-        JS_ThrowDOMException(ctx, "InvalidStateError", "setRequestHeader() called before open()");
+    
+    if (rs != 1) {
+        /* Not in OPENED state - throw InvalidStateError */
+        JS_ThrowDOMException(ctx, "InvalidStateError", "setRequestHeader() called in invalid state (readyState=%d)", rs);
         return JS_EXCEPTION;
     }
     return JS_UNDEFINED;
@@ -7365,10 +7400,42 @@ static JSValue js_xhr_getResponseHeader(JSContext *ctx, JSValueConst this_val, i
     return val;
 }
 
+/* Stub overrideMimeType - throws if state is LOADING (3) or DONE (4) */
+static JSValue js_xhr_overrideMimeType(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    /* Check readyState - throw if LOADING (3) or DONE (4) */
+    JSValue rs_v = JS_GetPropertyStr(ctx, this_val, "readyState");
+    int32_t rs = 0;
+    if (!JS_IsUndefined(rs_v)) {
+        JS_ToInt32(ctx, &rs, rs_v);
+    }
+    JS_FreeValue(ctx, rs_v);
+    
+    if (rs == 3 || rs == 4) {
+        JS_ThrowDOMException(ctx, "InvalidStateError", "overrideMimeType() called at invalid readyState (%d)", rs);
+        return JS_EXCEPTION;
+    }
+    /* Otherwise just return undefined (stub) */
+    return JS_UNDEFINED;
+}
+
 static JSValue js_xhr_abort(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)argc; (void)argv;
+    /* Per XHR spec: abort() is a no-op if state is UNSENT or OPENED with send() flag unset */
+    JSValue rs_v = JS_GetPropertyStr(ctx, this_val, "readyState");
+    int32_t rs = 0;
+    if (!JS_IsUndefined(rs_v)) {
+        JS_ToInt32(ctx, &rs, rs_v);
+    }
+    JS_FreeValue(ctx, rs_v);
+    
+    /* If state is 0 (UNSENT) or 1 (OPENED before send), abort() is a no-op */
+    if (rs == 0 || rs == 1) {
+        return JS_UNDEFINED;
+    }
+    
     /* Reset state */
-    JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, this_val, "statusText", JS_NewString(ctx, ""));
     /* Fire onabort */
@@ -7386,32 +7453,58 @@ static JSValue js_xhr_abort(JSContext *ctx, JSValueConst this_val, int argc, JSV
     return JS_UNDEFINED;
 }
 
+static JSValue js_xhr_get_readyState(JSContext *ctx, JSValueConst this_val) {
+    JSValue rs = JS_GetPropertyStr(ctx, this_val, "_readyState");
+    if (JS_IsUndefined(rs)) {
+        return JS_NewInt32(ctx, 0);
+    }
+    return rs;
+}
+
+static JSValue js_xhr_set_readyState(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    /* Read-only property - silently ignore assignment */
+    (void)ctx; (void)this_val; (void)val;
+    return JS_UNDEFINED;
+}
+
 static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
     (void)new_target; (void)argc; (void)argv;
     JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "readyState",          JS_NewInt32(ctx, 0));
-    JS_SetPropertyStr(ctx, obj, "status",              JS_NewInt32(ctx, 0));
-    JS_SetPropertyStr(ctx, obj, "statusText",          JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, obj, "responseType",        JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, obj, "responseText",        JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, obj, "responseXML",         JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "response",            JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "onload",              JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "onerror",             JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "onabort",             JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "onreadystatechange",  JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "ontimeout",           JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "timeout",             JS_NewInt32(ctx, 0));
-    JS_SetPropertyStr(ctx, obj, "_url",                JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, obj, "_method",             JS_NewString(ctx, "GET"));
-    JS_SetPropertyStr(ctx, obj, "_async",              JS_NewBool(ctx, 1));
-    JS_SetPropertyStr(ctx, obj, "_responseHeaders",    JS_NewObject(ctx));
-    JS_SetPropertyStr(ctx, obj, "open",                  JS_NewCFunction(ctx, js_xhr_open,              "open",                  3));
-    JS_SetPropertyStr(ctx, obj, "send",                  JS_NewCFunction(ctx, js_xhr_send,              "send",                  1));
-    JS_SetPropertyStr(ctx, obj, "setRequestHeader",      JS_NewCFunction(ctx, js_xhr_setHeader,         "setRequestHeader",      2));
-    JS_SetPropertyStr(ctx, obj, "getAllResponseHeaders",  JS_NewCFunction(ctx, js_xhr_getAllHeaders,     "getAllResponseHeaders",  0));
-    JS_SetPropertyStr(ctx, obj, "getResponseHeader",     JS_NewCFunction(ctx, js_xhr_getResponseHeader, "getResponseHeader",     1));
-    JS_SetPropertyStr(ctx, obj, "abort",                 JS_NewCFunction(ctx, js_xhr_abort,             "abort",                 0));
+    /* Store readyState internally as _readyState */
+    JS_SetPropertyStr(ctx, obj, "_readyState",       JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "status",            JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "statusText",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "responseType",      JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "responseText",      JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "responseXML",       JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "response",          JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "onload",            JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "onerror",           JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "onabort",           JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "onreadystatechange",JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "ontimeout",         JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "timeout",           JS_NewInt32(ctx, 0));
+    /* Stub properties for compatibility */
+    JS_SetPropertyStr(ctx, obj, "withCredentials",   JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, obj, "upload",            JS_NewObject(ctx));
+    /* Add readyState as getter/setter property (setter silently ignores) */
+    {
+        static const JSCFunctionListEntry xhr_getset[] = {
+            JS_CGETSET_DEF("readyState", js_xhr_get_readyState, js_xhr_set_readyState),
+        };
+        JS_SetPropertyFunctionList(ctx, obj, xhr_getset, 1);
+    }
+    JS_SetPropertyStr(ctx, obj, "_url",              JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "_method",           JS_NewString(ctx, "GET"));
+    JS_SetPropertyStr(ctx, obj, "_async",            JS_NewBool(ctx, 1));
+    JS_SetPropertyStr(ctx, obj, "_responseHeaders",  JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, obj, "open",                JS_NewCFunction(ctx, js_xhr_open,              "open",                  3));
+    JS_SetPropertyStr(ctx, obj, "send",                JS_NewCFunction(ctx, js_xhr_send,              "send",                  1));
+    JS_SetPropertyStr(ctx, obj, "setRequestHeader",    JS_NewCFunction(ctx, js_xhr_setHeader,         "setRequestHeader",      2));
+    JS_SetPropertyStr(ctx, obj, "getAllResponseHeaders",JS_NewCFunction(ctx, js_xhr_getAllHeaders,     "getAllResponseHeaders",  0));
+    JS_SetPropertyStr(ctx, obj, "getResponseHeader",   JS_NewCFunction(ctx, js_xhr_getResponseHeader, "getResponseHeader",     1));
+    JS_SetPropertyStr(ctx, obj, "abort",               JS_NewCFunction(ctx, js_xhr_abort,             "abort",                 0));
+    JS_SetPropertyStr(ctx, obj, "overrideMimeType",    JS_NewCFunction(ctx, js_xhr_overrideMimeType,  "overrideMimeType",      1));
     return obj;
 }
 
@@ -8763,7 +8856,21 @@ static void jscore_qjs_check_timers(void) {
             JSValue func = JS_DupValue(g_ctx, g_timers[i].func);
             JSValue call_this = JS_IsUndefined(g_timers[i].this_val) ? JS_DupValue(g_ctx, global)
                                                                       : JS_DupValue(g_ctx, g_timers[i].this_val);
-            JSValue result = JS_Call(g_ctx, func, call_this, 0, NULL);
+            /* For event callbacks (onload/onerror), pass an event object with target */
+            JSValue argv[1];
+            int argc = 0;
+            if (g_timers[i].is_event) {
+                JSValue ev = JS_NewObject(g_ctx);
+                JS_SetPropertyStr(g_ctx, ev, "target", JS_DupValue(g_ctx, call_this));
+                JS_SetPropertyStr(g_ctx, ev, "currentTarget", JS_DupValue(g_ctx, call_this));
+                JS_SetPropertyStr(g_ctx, ev, "type", JS_NewString(g_ctx, "load"));
+                argv[0] = ev;
+                argc = 1;
+            }
+            JSValue result = JS_Call(g_ctx, func, call_this, argc, argv);
+            if (g_timers[i].is_event && argc > 0) {
+                JS_FreeValue(g_ctx, argv[0]);
+            }
             JS_FreeValue(g_ctx, call_this);
 
             if (JS_IsException(result)) {
@@ -9003,9 +9110,13 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
  * Interface Implementation
  * ============================================================================ */
 
+static void jscore_qjs_set_broken_webgl(int enable) {
+    g_broken_webgl = enable ? 1 : 0;
+}
+
 void jscore_qjs_init_iface(JSCoreInterface *iface) {
     if (!iface) return;
-    
+
     iface->init = jscore_qjs_init;
     iface->quit = jscore_qjs_quit;
     iface->setup_globals = jscore_qjs_setup_globals;
@@ -9017,4 +9128,5 @@ void jscore_qjs_init_iface(JSCoreInterface *iface) {
     iface->check_timers = jscore_qjs_check_timers;
     iface->dispatch_key = jscore_qjs_dispatch_key;
     iface->dispatch_mouse = jscore_qjs_dispatch_mouse;
+    iface->set_broken_webgl = jscore_qjs_set_broken_webgl;
 }

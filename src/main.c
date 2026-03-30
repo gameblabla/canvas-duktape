@@ -333,25 +333,31 @@ static void get_exe_dir(const char* argv0, char* out, size_t out_size) {
 /* Global flag to disable WebAudio API (for debugging) */
 static int g_disable_webaudio = 0;
 
+/* Global flag to enable broken/incomplete WebGL support (for testing) */
+static int g_broken_webgl = 0;
+
 int main(int argc, char** argv) {
     /* Parse command-line arguments */
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s [--no-webaudio] <file.html>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] <file.html>\n", argv[0]);
         return 1;
     }
-    
+
     const char* html_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--no-webaudio") == 0) {
             g_disable_webaudio = 1;
             fprintf(stderr, "[main] WebAudio API disabled via command line\n");
+        } else if (strcmp(argv[i], "--broken-webgl") == 0) {
+            g_broken_webgl = 1;
+            fprintf(stderr, "[main] Broken WebGL support enabled via command line\n");
         } else {
             html_path = argv[i];
         }
     }
-    
+
     if (!html_path) {
-        fprintf(stderr, "Usage: %s [--no-webaudio] <file.html>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] <file.html>\n", argv[0]);
         return 1;
     }
 
@@ -418,6 +424,11 @@ int main(int argc, char** argv) {
         fprintf(stderr, "JS core init failed.\n");
         renderer.quit();
         return 1;
+    }
+
+    /* Enable broken WebGL if requested */
+    if (jscore.set_broken_webgl) {
+        jscore.set_broken_webgl(g_broken_webgl);
     }
 
     /* --- Set up JS globals (document, window, canvas elements, …) --- */
