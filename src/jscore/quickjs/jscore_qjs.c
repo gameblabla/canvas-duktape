@@ -7585,7 +7585,7 @@ static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
         JS_SetPropertyStr(ctx, xhr, "response", blob);
         JS_SetPropertyStr(ctx, xhr, "_responseText", JS_NewString(ctx, ""));
         JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
-    } else if (strcmp(content_type, "application/json") == 0) {
+    } else if (content_type && strcmp(content_type, "application/json") == 0) {
         /* Auto-parse JSON */
         JSValue txt = JS_NewStringLen(ctx, body, body_len);
         JS_SetPropertyStr(ctx, xhr, "_responseText", txt);
@@ -7603,13 +7603,17 @@ static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
         JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
     }
 
-    /* Fire onload (with event object) then onreadystatechange */
+    /* Fire onload (with event object) then onreadystatechange.
+     * Use JS_UNDEFINED as 'this' so that callbacks that call ClearEventListeners(this)
+     * get globalThis (window), which has a removeEventListener no-op stub.
+     * Passing xhr as 'this' would cause xhr.removeEventListener() → TypeError since
+     * XHR objects do not natively carry removeEventListener. */
     JSValue onload = JS_GetPropertyStr(ctx, xhr, "onload");
     if (JS_IsFunction(ctx, onload)) {
         JSValue ev = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, ev, "target",        JS_DupValue(ctx, xhr));
         JS_SetPropertyStr(ctx, ev, "currentTarget", JS_DupValue(ctx, xhr));
-        JSValue ret = JS_Call(ctx, onload, xhr, 1, &ev);
+        JSValue ret = JS_Call(ctx, onload, JS_UNDEFINED, 1, &ev);
         if (JS_IsException(ret)) JS_GetException(ctx);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, ev);
