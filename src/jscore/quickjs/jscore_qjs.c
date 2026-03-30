@@ -365,6 +365,10 @@ static JSValue js_element_getAttribute(JSContext *ctx, JSValueConst this_val, in
 static JSValue js_element_setAttribute(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_element_compareDocumentPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_textNode_get_textContent(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_getBoundingClientRect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_addEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_removeEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_click(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 
 /* Web Audio API stub forward declarations */
 static JSValue js_audiocontext_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv);
@@ -5170,10 +5174,14 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     JS_SetPropertyStr(ctx, obj, "contains",                 JS_NewCFunction(ctx, js_noop, "contains", 1));
     JS_SetPropertyStr(ctx, obj, "hasChildNodes",            JS_NewCFunction(ctx, js_noop, "hasChildNodes", 0));
     JS_SetPropertyStr(ctx, obj, "compareDocumentPosition",  JS_NewCFunction(ctx, js_noop, "compareDocumentPosition", 1));
-    JS_SetPropertyStr(ctx, obj, "getBoundingClientRect",    JS_NewCFunction(ctx, js_noop, "getBoundingClientRect", 0));
+    JS_SetPropertyStr(ctx, obj, "getBoundingClientRect",    JS_NewCFunction(ctx, js_element_getBoundingClientRect, "getBoundingClientRect", 0));
     JS_SetPropertyStr(ctx, obj, "focus",                    JS_NewCFunction(ctx, js_noop, "focus", 0));
     JS_SetPropertyStr(ctx, obj, "blur",                     JS_NewCFunction(ctx, js_noop, "blur", 0));
-    JS_SetPropertyStr(ctx, obj, "click",                    JS_NewCFunction(ctx, js_noop, "click", 0));
+    JS_SetPropertyStr(ctx, obj, "click",                    JS_NewCFunction(ctx, js_element_click, "click", 0));
+    /* Per-element event listener map: _listeners[type] = [fn, ...] */
+    JS_SetPropertyStr(ctx, obj, "_listeners", JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, obj, "addEventListener",    JS_NewCFunction(ctx, js_element_addEventListener,    "addEventListener",    3));
+    JS_SetPropertyStr(ctx, obj, "removeEventListener", JS_NewCFunction(ctx, js_element_removeEventListener, "removeEventListener", 3));
     return obj;
 }
 
@@ -5442,18 +5450,232 @@ static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_element_insertBefore(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv) {
-    /* Simplified - just return the newChild */
-    if (argc >= 1) {
-        return JS_DupValue(ctx, argv[0]);
+    if (argc < 1) return JS_UNDEFINED;
+    JSValue newChild = argv[0];
+    /* refChild is argv[1]; if absent/null, behave like appendChild */
+
+    JSValue childNodes = JS_GetPropertyStr(ctx, this_val, "childNodes");
+    if (!JS_IsUndefined(childNodes) && !JS_IsNull(childNodes)) {
+        JSValue len_val = JS_GetPropertyStr(ctx, childNodes, "length");
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, len_val);
+        JS_FreeValue(ctx, len_val);
+
+        int insert_pos = len; /* default: append */
+        if (argc >= 2 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
+            /* Find refChild index */
+            for (int i = 0; i < len; i++) {
+                char idx_str[16];
+                snprintf(idx_str, sizeof(idx_str), "%d", i);
+                JSValue item = JS_GetPropertyStr(ctx, childNodes, idx_str);
+                int same = (JS_VALUE_GET_PTR(item) == JS_VALUE_GET_PTR(argv[1]));
+                JS_FreeValue(ctx, item);
+                if (same) { insert_pos = i; break; }
+            }
+        }
+
+        /* Shift existing entries right from insert_pos */
+        for (int i = len; i > insert_pos; i--) {
+            char from[16], to[16];
+            snprintf(from, sizeof(from), "%d", i - 1);
+            snprintf(to,   sizeof(to),   "%d", i);
+            JSValue item = JS_GetPropertyStr(ctx, childNodes, from);
+            JS_SetPropertyStr(ctx, childNodes, to, item);
+        }
+        char idx_str[16];
+        snprintf(idx_str, sizeof(idx_str), "%d", insert_pos);
+        JS_SetPropertyStr(ctx, childNodes, idx_str, JS_DupValue(ctx, newChild));
+        JS_SetPropertyStr(ctx, childNodes, "length", JS_NewInt32(ctx, len + 1));
+
+        /* Sync firstChild */
+        if (insert_pos == 0) {
+            JS_SetPropertyStr(ctx, this_val, "firstChild", JS_DupValue(ctx, newChild));
+        }
     }
-    return JS_UNDEFINED;
+    JS_FreeValue(ctx, childNodes);
+    return JS_DupValue(ctx, newChild);
 }
 
 static JSValue js_element_removeChild(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv) {
-    /* Simplified - just return the child */
-    if (argc >= 1) {
-        return JS_DupValue(ctx, argv[0]);
+    if (argc < 1) return JS_UNDEFINED;
+    JSValue child = argv[0];
+
+    JSValue childNodes = JS_GetPropertyStr(ctx, this_val, "childNodes");
+    if (!JS_IsUndefined(childNodes) && !JS_IsNull(childNodes)) {
+        JSValue len_val = JS_GetPropertyStr(ctx, childNodes, "length");
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, len_val);
+        JS_FreeValue(ctx, len_val);
+
+        int found = -1;
+        for (int i = 0; i < len; i++) {
+            char idx_str[16];
+            snprintf(idx_str, sizeof(idx_str), "%d", i);
+            JSValue item = JS_GetPropertyStr(ctx, childNodes, idx_str);
+            if (JS_VALUE_GET_PTR(item) == JS_VALUE_GET_PTR(child)) found = i;
+            JS_FreeValue(ctx, item);
+            if (found >= 0) break;
+        }
+
+        if (found >= 0) {
+            /* Compact: shift entries left */
+            for (int i = found; i < len - 1; i++) {
+                char from[16], to[16];
+                snprintf(from, sizeof(from), "%d", i + 1);
+                snprintf(to,   sizeof(to),   "%d", i);
+                JSValue item = JS_GetPropertyStr(ctx, childNodes, from);
+                JS_SetPropertyStr(ctx, childNodes, to, item);
+            }
+            /* Delete last slot */
+            char last[16];
+            snprintf(last, sizeof(last), "%d", len - 1);
+            JS_SetPropertyStr(ctx, childNodes, last, JS_UNDEFINED);
+            JS_SetPropertyStr(ctx, childNodes, "length", JS_NewInt32(ctx, len - 1));
+
+            /* Update firstChild */
+            if (len - 1 == 0) {
+                JS_SetPropertyStr(ctx, this_val, "firstChild", JS_NULL);
+            } else if (found == 0) {
+                JSValue first = JS_GetPropertyStr(ctx, childNodes, "0");
+                JS_SetPropertyStr(ctx, this_val, "firstChild", first);
+            }
+        }
+    }
+    JS_FreeValue(ctx, childNodes);
+    return JS_DupValue(ctx, child);
+}
+
+static JSValue js_element_getBoundingClientRect(JSContext *ctx, JSValueConst this_val,
+                                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue rect = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, rect, "top",    JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "left",   JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "right",  JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "bottom", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "width",  JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "height", JS_NewInt32(ctx, 0));
+    return rect;
+}
+
+static JSValue js_element_addEventListener(JSContext *ctx, JSValueConst this_val,
+                                            int argc, JSValueConst *argv) {
+    if (argc < 2 || !JS_IsFunction(ctx, argv[1])) return JS_UNDEFINED;
+    const char *evtype = JS_ToCString(ctx, argv[0]);
+    if (!evtype) return JS_UNDEFINED;
+
+    JSValue listeners = JS_GetPropertyStr(ctx, this_val, "_listeners");
+    if (JS_IsUndefined(listeners) || JS_IsNull(listeners)) {
+        JS_FreeValue(ctx, listeners);
+        listeners = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, this_val, "_listeners", JS_DupValue(ctx, listeners));
+    }
+
+    JSValue arr = JS_GetPropertyStr(ctx, listeners, evtype);
+    if (JS_IsUndefined(arr) || JS_IsNull(arr)) {
+        JS_FreeValue(ctx, arr);
+        arr = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, listeners, evtype, JS_DupValue(ctx, arr));
+    }
+    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    int32_t len = 0;
+    JS_ToInt32(ctx, &len, len_val);
+    JS_FreeValue(ctx, len_val);
+    char idx_str[16];
+    snprintf(idx_str, sizeof(idx_str), "%d", len);
+    JS_SetPropertyStr(ctx, arr, idx_str, JS_DupValue(ctx, argv[1]));
+    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, len + 1));
+
+    JS_FreeValue(ctx, arr);
+    JS_FreeValue(ctx, listeners);
+    JS_FreeCString(ctx, evtype);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_element_removeEventListener(JSContext *ctx, JSValueConst this_val,
+                                               int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    const char *evtype = JS_ToCString(ctx, argv[0]);
+    if (!evtype) return JS_UNDEFINED;
+
+    JSValue listeners = JS_GetPropertyStr(ctx, this_val, "_listeners");
+    if (!JS_IsUndefined(listeners) && !JS_IsNull(listeners)) {
+        JSValue arr = JS_GetPropertyStr(ctx, listeners, evtype);
+        if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+            JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+            int32_t len = 0;
+            JS_ToInt32(ctx, &len, len_val);
+            JS_FreeValue(ctx, len_val);
+
+            /* Find and remove by identity */
+            int found = -1;
+            for (int i = 0; i < len; i++) {
+                char idx_str[16];
+                snprintf(idx_str, sizeof(idx_str), "%d", i);
+                JSValue fn = JS_GetPropertyStr(ctx, arr, idx_str);
+                if (JS_VALUE_GET_PTR(fn) == JS_VALUE_GET_PTR(argv[1])) found = i;
+                JS_FreeValue(ctx, fn);
+                if (found >= 0) break;
+            }
+            if (found >= 0) {
+                for (int i = found; i < len - 1; i++) {
+                    char from[16], to[16];
+                    snprintf(from, sizeof(from), "%d", i + 1);
+                    snprintf(to,   sizeof(to),   "%d", i);
+                    JSValue fn = JS_GetPropertyStr(ctx, arr, from);
+                    JS_SetPropertyStr(ctx, arr, to, fn);
+                }
+                char last[16];
+                snprintf(last, sizeof(last), "%d", len - 1);
+                JS_SetPropertyStr(ctx, arr, last, JS_UNDEFINED);
+                JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, len - 1));
+            }
+            JS_FreeValue(ctx, arr);
+        }
+        JS_FreeValue(ctx, listeners);
+    } else {
+        JS_FreeValue(ctx, listeners);
+    }
+    JS_FreeCString(ctx, evtype);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_element_click(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    JSValue listeners = JS_GetPropertyStr(ctx, this_val, "_listeners");
+    if (!JS_IsUndefined(listeners) && !JS_IsNull(listeners)) {
+        JSValue arr = JS_GetPropertyStr(ctx, listeners, "click");
+        if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+            JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+            int32_t len = 0;
+            JS_ToInt32(ctx, &len, len_val);
+            JS_FreeValue(ctx, len_val);
+            /* Build a minimal event object */
+            JSValue ev = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, ev, "type",   JS_NewString(ctx, "click"));
+            JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
+            JS_SetPropertyStr(ctx, ev, "preventDefault",  JS_NewCFunction(ctx, js_noop, "preventDefault",  0));
+            JS_SetPropertyStr(ctx, ev, "stopPropagation", JS_NewCFunction(ctx, js_noop, "stopPropagation", 0));
+            for (int i = 0; i < len; i++) {
+                char idx_str[16];
+                snprintf(idx_str, sizeof(idx_str), "%d", i);
+                JSValue fn = JS_GetPropertyStr(ctx, arr, idx_str);
+                if (JS_IsFunction(ctx, fn)) {
+                    JSValue ret = JS_Call(ctx, fn, this_val, 1, &ev);
+                    if (JS_IsException(ret)) JS_GetException(ctx);
+                    JS_FreeValue(ctx, ret);
+                }
+                JS_FreeValue(ctx, fn);
+            }
+            JS_FreeValue(ctx, ev);
+            JS_FreeValue(ctx, arr);
+        }
+        JS_FreeValue(ctx, listeners);
+    } else {
+        JS_FreeValue(ctx, listeners);
     }
     return JS_UNDEFINED;
 }
@@ -8223,6 +8445,9 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, xhr_ctor, "DONE",             JS_NewInt32(ctx, 4));
     JS_SetPropertyStr(ctx, xhr_ctor, "_hs2",             JS_NewInt32(ctx, 4)); /* GMS2-obfuscated DONE */
     JS_SetPropertyStr(ctx, global, "XMLHttpRequest", xhr_ctor);
+
+    /* fetch stub — just needs to exist for feature detection */
+    JS_SetPropertyStr(ctx, global, "fetch", JS_NewCFunction(ctx, js_noop, "fetch", 1));
 
     /* Web Audio API - Enable AudioContext constructor */
     /* Create AudioContext constructor function */
