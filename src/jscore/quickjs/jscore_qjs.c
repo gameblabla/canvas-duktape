@@ -305,6 +305,7 @@ typedef struct {
     double duration;
     int paused;
     int ended;
+    int looping;
     /* Simulated playback tracking for when audio isn't actually playing */
     double simulated_position;  /* Simulated playback position in seconds */
     int64_t simulated_start_time;  /* When playback started (for simulation) */
@@ -3844,13 +3845,24 @@ static JSValue js_audio_get_ended(JSContext *ctx, JSValueConst this_val) {
 }
 
 static JSValue js_audio_get_loop(JSContext *ctx, JSValueConst this_val) {
-    (void)this_val;
+    (void)ctx;
+    AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
+    if (audio && audio->elem_index >= 0 && audio->elem_index < MAX_HTML5_AUDIO_ELEMENTS)
+        return JS_NewBool(ctx, g_audio_elements[audio->elem_index].looping);
     return JS_NewBool(ctx, 0);
 }
 
 static JSValue js_audio_set_loop(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
-    (void)ctx; (void)this_val; (void)val;
-    /* Return this for method chaining */
+    (void)ctx;
+    AudioObject *audio = (AudioObject *)JS_GetOpaque(this_val, js_audio_class_id);
+    if (!audio) return JS_DupValue(ctx, this_val);
+    int looping = JS_ToBool(ctx, val);
+    if (audio->elem_index >= 0 && audio->elem_index < MAX_HTML5_AUDIO_ELEMENTS) {
+        Html5AudioElement *elem = &g_audio_elements[audio->elem_index];
+        elem->looping = looping;
+        if (elem->native_index >= 0)
+            sound_set_loop(elem->native_index, looping);
+    }
     return JS_DupValue(ctx, this_val);
 }
 
@@ -3921,6 +3933,7 @@ static JSValue js_audio_play(JSContext *ctx, JSValueConst this_val,
     if (elem_idx >= 0 && elem_idx < MAX_HTML5_AUDIO_ELEMENTS) {
         Html5AudioElement *elem = &g_audio_elements[elem_idx];
         if (elem->native_index >= 0) {
+            sound_set_loop(elem->native_index, elem->looping);
             sound_play(elem->native_index);
             elem->paused = 0;
         }
@@ -4190,12 +4203,14 @@ static JSValue js_audio_canPlayType(JSContext *ctx, JSValueConst this_val,
     const char *type = JS_ToCString(ctx, argv[0]);
     if (!type) return JS_NewString(ctx, "");
 
-    /* Simple implementation - return "maybe" for ogg and mp3 */
+    /* Return "probably" for formats we fully support */
     JSValue result = JS_NewString(ctx, "");
     if (strstr(type, "ogg") || strstr(type, "vorbis")) {
-        result = JS_NewString(ctx, "maybe");
+        result = JS_NewString(ctx, "probably");
     } else if (strstr(type, "mp3") || strstr(type, "mpeg")) {
-        result = JS_NewString(ctx, "maybe");
+        result = JS_NewString(ctx, "probably");
+    } else if (strstr(type, "wav") || strstr(type, "wave")) {
+        result = JS_NewString(ctx, "probably");
     }
 
     JS_FreeCString(ctx, type);

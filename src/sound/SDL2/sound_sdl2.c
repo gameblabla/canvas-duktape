@@ -240,9 +240,283 @@ static int decode_ogg(const char* filepath, AudioBuffer* out_buffer) {
 }
 
 /* ============================================================================
+ * Decode WAV from memory using SDL2
+ * ============================================================================ */
+static int decode_wav_from_memory(const uint8_t *data, size_t size, AudioBuffer *out_buffer) {
+    SDL_RWops *rw = SDL_RWFromConstMem(data, (int)size);
+    if (!rw) {
+        fprintf(stderr, "[sound] SDL_RWFromConstMem failed: %s\n", SDL_GetError());
+        return 0;
+    }
+
+    SDL_AudioSpec wav_spec;
+    uint8_t *wav_buf = NULL;
+    uint32_t wav_len = 0;
+
+    if (!SDL_LoadWAV_RW(rw, 1 /* close rw */, &wav_spec, &wav_buf, &wav_len)) {
+        fprintf(stderr, "[sound] SDL_LoadWAV_RW failed: %s\n", SDL_GetError());
+        return 0;
+    }
+
+    /* Convert to S16SYS stereo at target rate */
+    SDL_AudioCVT cvt;
+    int ret = SDL_BuildAudioCVT(&cvt,
+        wav_spec.format, wav_spec.channels, wav_spec.freq,
+        AUDIO_S16SYS, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE);
+    if (ret < 0) {
+        fprintf(stderr, "[sound] SDL_BuildAudioCVT (wav) failed: %s\n", SDL_GetError());
+        SDL_FreeWAV(wav_buf);
+        return 0;
+    }
+
+    uint8_t *converted = NULL;
+    size_t converted_len = 0;
+
+    if (ret == 0) {
+        /* No conversion needed */
+        converted = (uint8_t *)SDL_malloc(wav_len);
+        if (!converted) { SDL_FreeWAV(wav_buf); return 0; }
+        SDL_memcpy(converted, wav_buf, wav_len);
+        converted_len = wav_len;
+    } else {
+        cvt.buf = (uint8_t *)SDL_malloc((size_t)wav_len * (size_t)cvt.len_mult);
+        if (!cvt.buf) { SDL_FreeWAV(wav_buf); return 0; }
+        SDL_memcpy(cvt.buf, wav_buf, wav_len);
+        cvt.len = (int)wav_len;
+        if (SDL_ConvertAudio(&cvt) < 0) {
+            fprintf(stderr, "[sound] SDL_ConvertAudio (wav) failed: %s\n", SDL_GetError());
+            SDL_free(cvt.buf);
+            SDL_FreeWAV(wav_buf);
+            return 0;
+        }
+        converted = cvt.buf;
+        converted_len = (size_t)cvt.len_cvt;
+    }
+
+    SDL_FreeWAV(wav_buf);
+
+    out_buffer->samples = (int16_t *)SDL_malloc(converted_len);
+    if (!out_buffer->samples) { SDL_free(converted); return 0; }
+    SDL_memcpy(out_buffer->samples, converted, converted_len);
+    SDL_free(converted);
+
+    out_buffer->channels     = AUDIO_CHANNELS;
+    out_buffer->sample_rate  = AUDIO_SAMPLE_RATE;
+    out_buffer->sample_count = converted_len / (sizeof(int16_t) * AUDIO_CHANNELS);
+
+    fprintf(stderr, "[sound] WAV decoded: %lu frames, %d Hz\n",
+            (unsigned long)out_buffer->sample_count, out_buffer->sample_rate);
+    return 1;
+}
+
+/* ============================================================================
+ * Decode MP3 from memory
+ * ============================================================================ */
+static int decode_mp3_from_memory(const uint8_t *data, size_t size, AudioBuffer *out_buffer) {
+    drmp3 mp3;
+    if (!drmp3_init_memory(&mp3, data, size, NULL)) {
+        fprintf(stderr, "[sound] drmp3_init_memory failed\n");
+        return 0;
+    }
+
+    drmp3_uint64 total_frames = drmp3_get_pcm_frame_count(&mp3);
+    drmp3_uint64 total_samples = total_frames * mp3.channels;
+
+    out_buffer->samples = (int16_t *)SDL_malloc((size_t)(total_samples * sizeof(int16_t)));
+    if (!out_buffer->samples) { drmp3_uninit(&mp3); return 0; }
+
+    drmp3_uint64 decoded = drmp3_read_pcm_frames_s16(&mp3, total_frames, out_buffer->samples);
+    out_buffer->sample_count = (size_t)decoded;
+    out_buffer->channels     = mp3.channels;
+    out_buffer->sample_rate  = mp3.sampleRate;
+    drmp3_uninit(&mp3);
+
+    if (!resample_audio_buffer(out_buffer, AUDIO_SAMPLE_RATE)) {
+        fprintf(stderr, "[sound] MP3 resampling failed\n");
+        return 0;
+    }
+
+    fprintf(stderr, "[sound] MP3(mem) decoded: %lu frames, %d ch, %d Hz\n",
+            (unsigned long)decoded, out_buffer->channels, AUDIO_SAMPLE_RATE);
+    return 1;
+}
+
+/* ============================================================================
+ * Decode OGG from memory via ov_open_callbacks
+ * ============================================================================ */
+typedef struct { const uint8_t *data; size_t size; size_t pos; } OggMem;
+
+static size_t ogg_mem_read(void *ptr, size_t sz, size_t n, void *src) {
+    OggMem *m = (OggMem *)src;
+    size_t bytes = sz * n;
+    size_t avail = m->size - m->pos;
+    if (bytes > avail) bytes = avail;
+    memcpy(ptr, m->data + m->pos, bytes);
+    m->pos += bytes;
+    return (sz > 0) ? bytes / sz : 0;
+}
+static int ogg_mem_seek(void *src, ogg_int64_t off, int whence) {
+    OggMem *m = (OggMem *)src;
+    size_t np;
+    if (whence == SEEK_SET)      np = (size_t)off;
+    else if (whence == SEEK_CUR) np = m->pos + (size_t)off;
+    else                         np = m->size + (size_t)off;
+    if (np > m->size) return -1;
+    m->pos = np;
+    return 0;
+}
+static long ogg_mem_tell(void *src) { return (long)((OggMem *)src)->pos; }
+
+static int decode_ogg_from_memory(const uint8_t *data, size_t size, AudioBuffer *out_buffer) {
+    OggMem mem = { data, size, 0 };
+    ov_callbacks cb = { ogg_mem_read, ogg_mem_seek, NULL /* no close */, ogg_mem_tell };
+
+    OggVorbis_File vf;
+    if (ov_open_callbacks(&mem, &vf, NULL, 0, cb) < 0) {
+        fprintf(stderr, "[sound] ov_open_callbacks failed\n");
+        return 0;
+    }
+
+    vorbis_info *vi = ov_info(&vf, -1);
+    int channels    = vi->channels;
+    int sample_rate = vi->rate;
+    ogg_int64_t total_frames  = ov_pcm_total(&vf, -1);
+    ogg_int64_t total_samples = total_frames * channels;
+
+    out_buffer->samples = (int16_t *)SDL_malloc((size_t)total_samples * sizeof(int16_t));
+    if (!out_buffer->samples) { ov_clear(&vf); return 0; }
+
+    int bytes_read = 0, total_bytes = (int)(total_samples * sizeof(int16_t)), section = 0;
+    char *buf = (char *)out_buffer->samples;
+    while (bytes_read < total_bytes) {
+        int r = ov_read(&vf, buf + bytes_read, total_bytes - bytes_read, 0, 2, 1, &section);
+        if (r <= 0) break;
+        bytes_read += r;
+    }
+    out_buffer->sample_count = (size_t)bytes_read / (sizeof(int16_t) * (size_t)channels);
+    out_buffer->channels     = channels;
+    out_buffer->sample_rate  = sample_rate;
+    ov_clear(&vf);
+
+    if (!resample_audio_buffer(out_buffer, AUDIO_SAMPLE_RATE)) {
+        fprintf(stderr, "[sound] OGG resampling failed\n");
+        return 0;
+    }
+
+    fprintf(stderr, "[sound] OGG(mem) decoded: %lu frames, %d ch, %d Hz\n",
+            (unsigned long)out_buffer->sample_count, channels, AUDIO_SAMPLE_RATE);
+    return 1;
+}
+
+/* ============================================================================
+ * Simple base64 decoder
+ * ============================================================================ */
+static int base64_decode(const char *in, size_t in_len, uint8_t **out, size_t *out_len) {
+    static const int8_t T[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1, 0,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    };
+    size_t max_out = (in_len / 4 + 1) * 3;
+    uint8_t *buf = (uint8_t *)malloc(max_out);
+    if (!buf) return 0;
+    size_t o = 0;
+    uint32_t acc = 0;
+    int bits = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        int8_t v = T[(unsigned char)in[i]];
+        if (v < 0) continue;
+        acc = (acc << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            buf[o++] = (uint8_t)(acc >> bits);
+        }
+    }
+    *out = buf;
+    *out_len = o;
+    return 1;
+}
+
+/* ============================================================================
+ * Decode a data: URL (data:audio/wav;base64,... etc.)
+ * ============================================================================ */
+static int load_audio_from_data_url(const char *url, AudioBuffer *out_buffer) {
+    /* Skip "data:" prefix */
+    const char *p = url + 5;
+
+    /* Find the comma separating header from data */
+    const char *comma = strchr(p, ',');
+    if (!comma) {
+        fprintf(stderr, "[sound] Malformed data URL\n");
+        return 0;
+    }
+
+    /* Parse MIME type from header (between "data:" and ";base64," or ",") */
+    char mime[64] = {0};
+    const char *semi = strchr(p, ';');
+    size_t mime_len = semi ? (size_t)(semi - p) : (size_t)(comma - p);
+    if (mime_len >= sizeof(mime)) mime_len = sizeof(mime) - 1;
+    memcpy(mime, p, mime_len);
+    mime[mime_len] = '\0';
+
+    /* Base64 decode the payload */
+    const char *b64 = comma + 1;
+    size_t b64_len = strlen(b64);
+    uint8_t *raw = NULL;
+    size_t raw_len = 0;
+    if (!base64_decode(b64, b64_len, &raw, &raw_len) || raw_len == 0) {
+        fprintf(stderr, "[sound] base64 decode failed for data URL\n");
+        free(raw);
+        return 0;
+    }
+
+    int result = 0;
+
+    /* Dispatch by MIME type or magic bytes */
+    if (strstr(mime, "wav") || strstr(mime, "wave") ||
+        (raw_len >= 4 && raw[0]=='R' && raw[1]=='I' && raw[2]=='F' && raw[3]=='F')) {
+        result = decode_wav_from_memory(raw, raw_len, out_buffer);
+    } else if (strstr(mime, "mp3") || strstr(mime, "mpeg") ||
+               (raw_len >= 3 && raw[0]==0x49 && raw[1]==0x44 && raw[2]==0x33) ||
+               (raw_len >= 2 && raw[0]==0xFF && (raw[1]&0xE0)==0xE0)) {
+        result = decode_mp3_from_memory(raw, raw_len, out_buffer);
+    } else if (strstr(mime, "ogg") ||
+               (raw_len >= 4 && raw[0]=='O' && raw[1]=='g' && raw[2]=='g' && raw[3]=='S')) {
+        result = decode_ogg_from_memory(raw, raw_len, out_buffer);
+    } else {
+        /* Try WAV as fallback for unknown MIME */
+        result = decode_wav_from_memory(raw, raw_len, out_buffer);
+        if (!result)
+            fprintf(stderr, "[sound] Unsupported data URL MIME: %s\n", mime);
+    }
+
+    free(raw);
+    return result;
+}
+
+/* ============================================================================
  * Load audio file (auto-detect format)
  * ============================================================================ */
 static int load_audio_file(const char* filepath, AudioBuffer* out_buffer) {
+    /* Handle data: URLs */
+    if (strncmp(filepath, "data:", 5) == 0) {
+        return load_audio_from_data_url(filepath, out_buffer);
+    }
+
     const char* ext = strrchr(filepath, '.');
     if (!ext) {
         fprintf(stderr, "[sound] Unknown audio format: %s\n", filepath);
@@ -254,6 +528,16 @@ static int load_audio_file(const char* filepath, AudioBuffer* out_buffer) {
         result = decode_mp3(filepath, out_buffer);
     } else if (SDL_strcasecmp(ext, ".ogg") == 0) {
         result = decode_ogg(filepath, out_buffer);
+    } else if (SDL_strcasecmp(ext, ".wav") == 0) {
+        /* Read file then decode via memory path */
+        FILE *f = fopen(filepath, "rb");
+        if (!f) { fprintf(stderr, "[sound] Cannot open WAV: %s\n", filepath); return 0; }
+        fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
+        uint8_t *data = (uint8_t *)SDL_malloc((size_t)fsz);
+        if (!data) { fclose(f); return 0; }
+        fread(data, 1, (size_t)fsz, f); fclose(f);
+        result = decode_wav_from_memory(data, (size_t)fsz, out_buffer);
+        SDL_free(data);
     } else {
         fprintf(stderr, "[sound] Unsupported audio format: %s\n", ext);
     }
