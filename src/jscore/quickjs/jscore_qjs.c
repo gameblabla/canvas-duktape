@@ -7646,7 +7646,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     JS_FreeValue(ctx, url_v);
     if (!url) return JS_UNDEFINED;
 
-    JSValue rt_v = JS_GetPropertyStr(ctx, this_val, "responseType");
+    JSValue rt_v = JS_GetPropertyStr(ctx, this_val, "_responseType");
     const char *resp_type = JS_ToCString(ctx, rt_v);
     JS_FreeValue(ctx, rt_v);
     int is_arraybuffer = resp_type && strcmp(resp_type, "arraybuffer") == 0;
@@ -7950,6 +7950,29 @@ static JSValue js_xhr_get_responseText(JSContext *ctx, JSValueConst this_val) {
     return JS_GetPropertyStr(ctx, this_val, "_responseText");
 }
 
+static JSValue js_xhr_get_responseType(JSContext *ctx, JSValueConst this_val) {
+    return JS_GetPropertyStr(ctx, this_val, "_responseType");
+}
+
+static JSValue js_xhr_set_responseType(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    /* Spec: setting responseType on sync XHR throws InvalidAccessError */
+    JSValue async_v = JS_GetPropertyStr(ctx, this_val, "_async");
+    int is_async = JS_ToBool(ctx, async_v);
+    JS_FreeValue(ctx, async_v);
+    if (!is_async) {
+        const char *rt = JS_ToCString(ctx, val);
+        int is_empty = rt && rt[0] == '\0';
+        JS_FreeCString(ctx, rt);
+        if (!is_empty) {
+            JS_ThrowDOMException(ctx, "InvalidAccessError",
+                "responseType cannot be set on synchronous XMLHttpRequest");
+            return JS_EXCEPTION;
+        }
+    }
+    JS_SetPropertyStr(ctx, this_val, "_responseType", JS_DupValue(ctx, val));
+    return JS_UNDEFINED;
+}
+
 static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
     (void)new_target; (void)argc; (void)argv;
     JSValue obj = JS_NewObject(ctx);
@@ -7957,7 +7980,8 @@ static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JS
     JS_SetPropertyStr(ctx, obj, "_readyState",       JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "status",            JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "statusText",        JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, obj, "responseType",      JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "_responseType",     JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "_responseText",     JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "responseXML",       JS_NULL);
     JS_SetPropertyStr(ctx, obj, "response",          JS_NULL);
     JS_SetPropertyStr(ctx, obj, "onload",            JS_NULL);
@@ -7972,10 +7996,11 @@ static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JS
     /* Add getters/setters */
     {
         static const JSCFunctionListEntry xhr_getset[] = {
-            JS_CGETSET_DEF("readyState", js_xhr_get_readyState, js_xhr_set_readyState),
+            JS_CGETSET_DEF("readyState",   js_xhr_get_readyState,   js_xhr_set_readyState),
             JS_CGETSET_DEF("responseText", js_xhr_get_responseText, NULL),
+            JS_CGETSET_DEF("responseType", js_xhr_get_responseType, js_xhr_set_responseType),
         };
-        JS_SetPropertyFunctionList(ctx, obj, xhr_getset, 2);
+        JS_SetPropertyFunctionList(ctx, obj, xhr_getset, 3);
     }
     JS_SetPropertyStr(ctx, obj, "_url",              JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "_method",           JS_NewString(ctx, "GET"));
