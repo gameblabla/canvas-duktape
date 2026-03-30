@@ -493,7 +493,7 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
                          uint8_t r, uint8_t g, uint8_t b, uint8_t a,
                          int blend_add, const double* m) {
     SDL_Texture* tex = (SDL_Texture*)target;
-    if (!tex) return;
+    if (!tex || !g_sdl_renderer) return;
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
     apply_clip_for_texture(tex);
     SDL_BlendMode bm;
@@ -551,8 +551,8 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, bm);
     SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
 
-    int is_identity = (m[0]==1 && m[1]==0 && m[2]==0 &&
-                       m[3]==1 && m[4]==0 && m[5]==0);
+    int is_identity = (!m || (m[0]==1 && m[1]==0 && m[2]==0 &&
+                       m[3]==1 && m[4]==0 && m[5]==0));
     if (!is_identity) {
         /* Scanline-fill the transformed quad */
         double x1=x,   y1=y;

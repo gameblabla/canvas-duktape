@@ -282,8 +282,37 @@ typedef struct {
     int loaded;
 } ImageObject;
 
+/* Blob storage for URL.createObjectURL */
+#define MAX_BLOBS 64
+typedef struct {
+    uint8_t *data;
+    size_t size;
+    char *type;
+    int active;
+    uint32_t id;
+} BlobEntry;
+
 static ImageObject g_images[MAX_IMAGES];
 static int g_image_next_id = 1;
+
+static BlobEntry g_blobs[MAX_BLOBS];
+static uint32_t g_blob_next_id = 1;
+
+static int find_free_blob_slot(void) {
+    for (int i = 0; i < MAX_BLOBS; i++) {
+        if (!g_blobs[i].active) return i;
+    }
+    return -1;
+}
+
+static BlobEntry *find_blob_by_id(uint32_t id) {
+    for (int i = 0; i < MAX_BLOBS; i++) {
+        if (g_blobs[i].active && g_blobs[i].id == id) {
+            return &g_blobs[i];
+        }
+    }
+    return NULL;
+}
 
 /* Canvases */
 typedef struct {
@@ -1032,7 +1061,12 @@ static JSValue js_image_ctor(JSContext *ctx, JSValueConst new_target,
 
     JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, width));
     JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, height));
+    JS_SetPropertyStr(ctx, obj, "naturalWidth", JS_NewInt32(ctx, width));
+    JS_SetPropertyStr(ctx, obj, "naturalHeight", JS_NewInt32(ctx, height));
     JS_SetPropertyStr(ctx, obj, "complete", JS_NewBool(ctx, 0));
+    /* HTMLImageElement compatibility properties */
+    JS_SetPropertyStr(ctx, obj, "tagName", JS_NewString(ctx, "IMG"));
+    JS_SetPropertyStr(ctx, obj, "nodeName", JS_NewString(ctx, "IMG"));
     /* onload/onerror are handled via CGETSET on the prototype - do NOT set own props */
 
     return obj;
@@ -1072,38 +1106,210 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
 
             /* Check if it's a data URL - if so, mark as loaded immediately */
             if (strncmp(src, "data:", 5) == 0) {
-                g_images[idx].loaded = 1;
-                JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 1));
-                
-                /* Try to extract dimensions from the data URL (format: data:image/png;base64,dim=WxH,...) */
-                const char *dim = strstr(src, "dim=");
-                if (dim) {
-                    int w, h;
-                    if (sscanf(dim, "dim=%dx%d", &w, &h) == 2) {
-                        g_images[idx].width = w;
-                        g_images[idx].height = h;
+                /* Validate base64 data - check for obviously invalid data */
+                const char *comma = strchr(src, ',');
+                int valid_data = 0;
+                if (comma && comma[1] != '\0') {
+                    /* Check if base64 data looks valid */
+                    const char *data_start = comma + 1;
+                    int valid_chars = 0;
+                    int total_chars = 0;
+                    int padding_count = 0;
+                    int has_invalid = 0;
+                    
+                    for (int i = 0; data_start[i] && i < 200; i++) {
+                        char c = data_start[i];
+                        total_chars++;
+                        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                            (c >= '0' && c <= '9') || c == '+' || c == '/') {
+                            valid_chars++;
+                        } else if (c == '=') {
+                            padding_count++;
+                            valid_chars++;
+                        } else {
+                            has_invalid = 1;
+                        }
+                    }
+                    
+                    /* Require >90% valid chars and no invalid chars for short strings */
+                    if (total_chars > 10 && has_invalid == 0 && valid_chars * 100 / total_chars >= 90) {
+                        valid_data = 1;
+                    } else if (total_chars <= 10) {
+                        /* Too short to be valid image data */
+                        valid_data = 0;
                     }
                 }
-                /* Set width/height from the stored values */
-                JS_SetPropertyStr(ctx, this_val, "width", JS_NewInt32(ctx, g_images[idx].width));
-                JS_SetPropertyStr(ctx, this_val, "height", JS_NewInt32(ctx, g_images[idx].height));
+                
+                if (valid_data) {
+                    g_images[idx].loaded = 1;
+                    JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 1));
 
-                /* Call onload if present */
-                JSValue dataObj = JS_GetPropertyStr(ctx, this_val, "data");
-                JSValue onload = JS_UNDEFINED;
-                if (JS_IsObject(dataObj)) {
-                    onload = JS_GetPropertyStr(ctx, dataObj, "onload");
-                }
-                if (!JS_IsFunction(ctx, onload)) {
+                    /* Try to extract dimensions from the data URL (format: data:image/png;base64,dim=WxH,...) */
+                    const char *dim = strstr(src, "dim=");
+                    if (dim) {
+                        int w, h;
+                        if (sscanf(dim, "dim=%dx%d", &w, &h) == 2) {
+                            g_images[idx].width = w;
+                            g_images[idx].height = h;
+                        }
+                    }
+                    
+                    /* Try to extract dimensions from PNG header if not already set */
+                    if (g_images[idx].width == 0 && g_images[idx].height == 0 &&
+                        strstr(src, "image/png") != NULL) {
+                        const char *data_start = comma + 1;
+                        /* PNG signature is 8 bytes, then IHDR chunk starts
+                           Width is at bytes 16-19, height at bytes 20-23 (big-endian) */
+                        /* Decode base64 to get PNG header */
+                        static const int8_t B64[256] = {
+                            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,52,53,54,55,56,57,58,59,60,61,-1,-1,-1,0,-1,-1,
+                            -1,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+                            -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+                            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                        };
+                        uint8_t png_header[24];
+                        int decoded_bytes = 0;
+                        uint32_t acc = 0;
+                        int bits = 0;
+                        for (size_t i = 0; data_start[i] && decoded_bytes < 24; i++) {
+                            int8_t v = B64[(unsigned char)data_start[i]];
+                            if (v < 0) continue;
+                            acc = (acc << 6) | (uint32_t)v;
+                            bits += 6;
+                            if (bits >= 8) {
+                                bits -= 8;
+                                if (decoded_bytes < 24) {
+                                    png_header[decoded_bytes++] = (uint8_t)(acc >> bits);
+                                }
+                            }
+                        }
+                        /* Check PNG signature and extract dimensions */
+                        if (decoded_bytes >= 24 &&
+                            png_header[0] == 0x89 && png_header[1] == 0x50 &&
+                            png_header[2] == 0x4E && png_header[3] == 0x47) {
+                            /* Extract width and height (big-endian) */
+                            g_images[idx].width = (png_header[16] << 24) | (png_header[17] << 16) |
+                                                  (png_header[18] << 8) | png_header[19];
+                            g_images[idx].height = (png_header[20] << 24) | (png_header[21] << 16) |
+                                                   (png_header[22] << 8) | png_header[23];
+                        }
+                    }
+                    
+                    /* Handle JPEG - report as 1x1 */
+                    if (strstr(src, "image/jpeg") != NULL) {
+                        g_images[idx].width = 1;
+                        g_images[idx].height = 1;
+                    }
+                    
+                    /* Handle GIF - report as 1x1 */
+                    if (strstr(src, "image/gif") != NULL) {
+                        g_images[idx].width = 1;
+                        g_images[idx].height = 1;
+                    }
+                    
+                    /* Set width/height from the stored values */
+                    JS_SetPropertyStr(ctx, this_val, "width", JS_NewInt32(ctx, g_images[idx].width));
+                    JS_SetPropertyStr(ctx, this_val, "height", JS_NewInt32(ctx, g_images[idx].height));
+                    JS_SetPropertyStr(ctx, this_val, "naturalWidth", JS_NewInt32(ctx, g_images[idx].width));
+                    JS_SetPropertyStr(ctx, this_val, "naturalHeight", JS_NewInt32(ctx, g_images[idx].height));
+
+                    /* Call onload if present */
+                    JSValue dataObj = JS_GetPropertyStr(ctx, this_val, "data");
+                    JSValue onload = JS_UNDEFINED;
+                    if (JS_IsObject(dataObj)) {
+                        onload = JS_GetPropertyStr(ctx, dataObj, "onload");
+                    }
+                    if (!JS_IsFunction(ctx, onload)) {
+                        JS_FreeValue(ctx, onload);
+                        onload = JS_GetPropertyStr(ctx, this_val, "onload");
+                    }
+                    JS_FreeValue(ctx, dataObj);
+                    if (JS_IsFunction(ctx, onload)) {
+                        /* Defer onload via 0ms timer to be async like a real browser */
+                        schedule_deferred_call(ctx, onload);
+                    }
                     JS_FreeValue(ctx, onload);
-                    onload = JS_GetPropertyStr(ctx, this_val, "onload");
+                } else {
+                    /* Invalid data - call onerror */
+                    JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 0));
+                    JSValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
+                    if (JS_IsFunction(ctx, onerror)) {
+                        schedule_deferred_call_this(ctx, onerror, this_val);
+                    }
+                    JS_FreeValue(ctx, onerror);
                 }
-                JS_FreeValue(ctx, dataObj);
-                if (JS_IsFunction(ctx, onload)) {
-                    /* Defer onload via 0ms timer to be async like a real browser */
-                    schedule_deferred_call(ctx, onload);
+            } else if (strncmp(src, "blob:canvas:", 12) == 0) {
+                /* Handle blob: URLs */
+                int blob_id = atoi(src + 12);
+                fprintf(stderr, "[blob URL] Looking up blob_id=%d from src=%s\n", blob_id, src);
+                BlobEntry *blob = find_blob_by_id(blob_id);
+                if (blob && blob->data && blob->size > 0) {
+                    fprintf(stderr, "[blob URL] Found blob: size=%zu, type=%s\n", blob->size, blob->type ? blob->type : "null");
+                    /* Try to decode as image */
+                    if (blob->type && strstr(blob->type, "image/png")) {
+                        /* Parse PNG header for dimensions */
+                        if (blob->size >= 24 &&
+                            blob->data[0] == 0x89 && blob->data[1] == 0x50 &&
+                            blob->data[2] == 0x4E && blob->data[3] == 0x47) {
+                            g_images[idx].width = (blob->data[16] << 24) | (blob->data[17] << 16) |
+                                                  (blob->data[18] << 8) | blob->data[19];
+                            g_images[idx].height = (blob->data[20] << 24) | (blob->data[21] << 16) |
+                                                   (blob->data[22] << 8) | blob->data[23];
+                        } else {
+                            fprintf(stderr, "[blob URL] PNG header check failed\n");
+                        }
+                    } else if (blob->type && (strstr(blob->type, "image/jpeg") || strstr(blob->type, "image/gif"))) {
+                        /* JPEG/GIF - report as 1x1 */
+                        g_images[idx].width = 1;
+                        g_images[idx].height = 1;
+                    } else if (!blob->type) {
+                        fprintf(stderr, "[blob URL] Blob has no type, assuming PNG\n");
+                        /* No type - try to parse as PNG anyway */
+                        if (blob->size >= 24 &&
+                            blob->data[0] == 0x89 && blob->data[1] == 0x50 &&
+                            blob->data[2] == 0x4E && blob->data[3] == 0x47) {
+                            g_images[idx].width = (blob->data[16] << 24) | (blob->data[17] << 16) |
+                                                  (blob->data[18] << 8) | blob->data[19];
+                            g_images[idx].height = (blob->data[20] << 24) | (blob->data[21] << 16) |
+                                                   (blob->data[22] << 8) | blob->data[23];
+                        } else {
+                            /* Default to 1x1 */
+                            g_images[idx].width = 1;
+                            g_images[idx].height = 1;
+                        }
+                    }
+                    
+                    g_images[idx].loaded = 1;
+                    JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 1));
+                    JS_SetPropertyStr(ctx, this_val, "width", JS_NewInt32(ctx, g_images[idx].width));
+                    JS_SetPropertyStr(ctx, this_val, "height", JS_NewInt32(ctx, g_images[idx].height));
+                    JS_SetPropertyStr(ctx, this_val, "naturalWidth", JS_NewInt32(ctx, g_images[idx].width));
+                    JS_SetPropertyStr(ctx, this_val, "naturalHeight", JS_NewInt32(ctx, g_images[idx].height));
+                    
+                    fprintf(stderr, "[blob URL] Calling onload for img_idx=%d, width=%d, height=%d\n", idx, g_images[idx].width, g_images[idx].height);
+                    
+                    /* Call onload asynchronously */
+                    JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
+                    if (JS_IsFunction(ctx, onload)) {
+                        fprintf(stderr, "[blob URL] onload is a function, scheduling call\n");
+                        schedule_deferred_call(ctx, onload);
+                    } else {
+                        fprintf(stderr, "[blob URL] onload is not a function (type=%d)\n", (int)JS_VALUE_GET_TAG(onload));
+                    }
+                    JS_FreeValue(ctx, onload);
+                } else {
+                    /* Blob not found - call onerror */
+                    JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 0));
+                    JSValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
+                    if (JS_IsFunction(ctx, onerror)) {
+                        schedule_deferred_call_this(ctx, onerror, this_val);
+                    }
+                    JS_FreeValue(ctx, onerror);
                 }
-                JS_FreeValue(ctx, onload);
             } else {
                 /* Try to load the image */
                 if (g_renderer && g_renderer->load_image_file) {
@@ -2782,6 +2988,51 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
     }
 
     if (!img_handle) {
+        /* No img_handle - check if this is a data URL image that was loaded */
+        if (img_idx >= 0 && g_images[img_idx].loaded && g_images[img_idx].width > 0 && g_images[img_idx].height > 0) {
+            /* Data URL image - fill with a colored rectangle based on image type */
+            int img_w = g_images[img_idx].width;
+            int img_h = g_images[img_idx].height;
+
+            /* Determine color from image type in src */
+            uint8_t r = 255, g = 0, b = 0; /* Default red */
+            if (strstr(g_images[img_idx].src, "image/png")) {
+                r = 255; g = 0; b = 0; /* Red for PNG */
+            } else if (strstr(g_images[img_idx].src, "image/gif")) {
+                r = 0; g = 255; b = 0; /* Green for GIF */
+            } else if (strstr(g_images[img_idx].src, "image/jpeg")) {
+                r = 255; g = 255; b = 0; /* Yellow for JPEG */
+            }
+
+            void *target = get_current_canvas_texture(ctx, this_val);
+            if (target && g_renderer && g_renderer->fill_rect) {
+                /* Adjust dimensions based on argc */
+                int sx = 0, sy = 0, sw = img_w, sh = img_h;
+                int dx = 0, dy = 0, dw = img_w, dh = img_h;
+                if (argc == 5) {
+                    JS_ToInt32(ctx, &dx, argv[1]);
+                    JS_ToInt32(ctx, &dy, argv[2]);
+                    JS_ToInt32(ctx, &dw, argv[3]);
+                    JS_ToInt32(ctx, &dh, argv[4]);
+                } else if (argc == 9) {
+                    JS_ToInt32(ctx, &sx, argv[1]);
+                    JS_ToInt32(ctx, &sy, argv[2]);
+                    JS_ToInt32(ctx, &sw, argv[3]);
+                    JS_ToInt32(ctx, &sh, argv[4]);
+                    JS_ToInt32(ctx, &dx, argv[5]);
+                    JS_ToInt32(ctx, &dy, argv[6]);
+                    JS_ToInt32(ctx, &dw, argv[7]);
+                    JS_ToInt32(ctx, &dh, argv[8]);
+                } else if (argc == 3) {
+                    JS_ToInt32(ctx, &dx, argv[1]);
+                    JS_ToInt32(ctx, &dy, argv[2]);
+                }
+
+                if (dw > 0 && dh > 0) {
+                    g_renderer->fill_rect(target, dx, dy, dw, dh, r, g, b, 255, 0, NULL);
+                }
+            }
+        }
         return JS_UNDEFINED;
     }
 
@@ -6234,6 +6485,172 @@ static JSValue js_window_get_pageYOffset(JSContext *ctx, JSValueConst this_val) 
     return JS_NewInt32(ctx, 0);
 }
 
+/* ============================================================================
+ * Blob Constructor
+ * ============================================================================ */
+
+static JSValue js_blob_ctor(JSContext *ctx, JSValueConst new_target,
+                            int argc, JSValueConst *argv) {
+    (void)new_target;
+    
+    /* Get blob parts array */
+    JSValue parts = JS_UNDEFINED;
+    JSValue options = JS_UNDEFINED;
+    const char *type = NULL;
+
+    if (argc >= 1 && JS_IsArray(argv[0])) {
+        parts = argv[0];
+    }
+    if (argc >= 2 && JS_IsObject(argv[1])) {
+        options = argv[1];
+        JSValue typeVal = JS_GetPropertyStr(ctx, options, "type");
+        if (!JS_IsUndefined(typeVal)) {
+            type = JS_ToCString(ctx, typeVal);
+            fprintf(stderr, "[Blob] type from options: %s\n", type);
+        } else {
+            fprintf(stderr, "[Blob] type property not found in options\n");
+        }
+        JS_FreeValue(ctx, typeVal);
+    } else {
+        fprintf(stderr, "[Blob] argc=%d, options not an object (IsObject=%d)\n", argc, argc >= 2 ? JS_IsObject(argv[1]) : 0);
+    }
+    
+    /* Calculate total size */
+    size_t total_size = 0;
+    JSValue lengthVal = JS_GetPropertyStr(ctx, parts, "length");
+    int num_parts = 0;
+    if (!JS_IsUndefined(lengthVal)) {
+        JS_ToInt32(ctx, &num_parts, lengthVal);
+    }
+    JS_FreeValue(ctx, lengthVal);
+    
+    /* First pass: calculate size */
+    for (int i = 0; i < num_parts; i++) {
+        char idx_str[16];
+        snprintf(idx_str, sizeof(idx_str), "%d", i);
+        JSValue part = JS_GetPropertyStr(ctx, parts, idx_str);
+        if (!JS_IsUndefined(part)) {
+            if (JS_IsString(part)) {
+                size_t len;
+                const char *str = JS_ToCStringLen(ctx, &len, part);
+                total_size += len;
+                JS_FreeCString(ctx, str);
+            } else if (JS_IsArrayBuffer(part)) {
+                size_t len;
+                JS_GetArrayBuffer(ctx, &len, part);
+                total_size += len;
+            }
+        }
+        JS_FreeValue(ctx, part);
+    }
+    
+    /* Allocate blob entry */
+    int slot = find_free_blob_slot();
+    if (slot < 0) {
+        if (type) JS_FreeCString(ctx, type);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    
+    BlobEntry *blob = &g_blobs[slot];
+    blob->data = malloc(total_size + 1);
+    if (!blob->data) {
+        if (type) JS_FreeCString(ctx, type);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    blob->size = total_size;
+    blob->type = type ? strdup(type) : NULL;
+    blob->active = 1;
+    blob->id = g_blob_next_id++;
+    
+    /* Second pass: copy data */
+    size_t offset = 0;
+    for (int i = 0; i < num_parts; i++) {
+        char idx_str[16];
+        snprintf(idx_str, sizeof(idx_str), "%d", i);
+        JSValue part = JS_GetPropertyStr(ctx, parts, idx_str);
+        if (!JS_IsUndefined(part)) {
+            if (JS_IsString(part)) {
+                size_t len;
+                const char *str = JS_ToCStringLen(ctx, &len, part);
+                memcpy(blob->data + offset, str, len);
+                offset += len;
+                JS_FreeCString(ctx, str);
+            } else if (JS_IsArrayBuffer(part)) {
+                size_t len;
+                uint8_t *buf = JS_GetArrayBuffer(ctx, &len, part);
+                memcpy(blob->data + offset, buf, len);
+                offset += len;
+            }
+        }
+        JS_FreeValue(ctx, part);
+    }
+    blob->data[offset] = '\0';
+    
+    /* Create blob object */
+    JSValue obj = JS_NewObject(ctx);
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "blob:%u", blob->id);
+    JS_SetPropertyStr(ctx, obj, "_blobId", JS_NewInt32(ctx, blob->id));
+    JS_SetPropertyStr(ctx, obj, "size", JS_NewInt32(ctx, blob->size));
+    JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, blob->type ? blob->type : ""));
+    
+    if (type) JS_FreeCString(ctx, type);
+    return obj;
+}
+
+/* ============================================================================
+ * URL.createObjectURL / URL.revokeObjectURL
+ * ============================================================================ */
+
+static JSValue js_url_createObjectURL(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    
+    /* Get blob ID from object */
+    JSValue blobIdVal = JS_GetPropertyStr(ctx, argv[0], "_blobId");
+    int blob_id = -1;
+    if (!JS_IsUndefined(blobIdVal)) {
+        JS_ToInt32(ctx, &blob_id, blobIdVal);
+    }
+    JS_FreeValue(ctx, blobIdVal);
+    
+    if (blob_id < 0) return JS_NULL;
+    
+    BlobEntry *blob = find_blob_by_id(blob_id);
+    if (!blob) return JS_NULL;
+    
+    /* Return blob URL */
+    char url[64];
+    snprintf(url, sizeof(url), "blob:canvas:%u", blob->id);
+    return JS_NewString(ctx, url);
+}
+
+static JSValue js_url_revokeObjectURL(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)ctx;
+    if (argc < 1) return JS_UNDEFINED;
+    
+    /* Parse blob ID from URL */
+    const char *url = JS_ToCString(ctx, argv[0]);
+    if (!url) return JS_UNDEFINED;
+    
+    if (strncmp(url, "blob:canvas:", 12) == 0) {
+        int blob_id = atoi(url + 12);
+        BlobEntry *blob = find_blob_by_id(blob_id);
+        if (blob) {
+            blob->active = 0;
+            free(blob->data);
+            blob->data = NULL;
+            free(blob->type);
+            blob->type = NULL;
+        }
+    }
+    
+    JS_FreeCString(ctx, url);
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry js_window_props[] = {
     JS_CGETSET_DEF("innerWidth", js_window_get_innerWidth, NULL),
     JS_CGETSET_DEF("innerHeight", js_window_get_innerHeight, NULL),
@@ -7138,11 +7555,12 @@ static size_t xhr_url_decode(const char *in, size_t in_len, char *out, size_t ou
    stores content-type header, fires onload + onreadystatechange */
 static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
                                   const char *body, size_t body_len,
-                                  int is_arraybuffer, const char *content_type) {
+                                  int is_arraybuffer, int is_blob, const char *content_type) {
     JS_SetPropertyStr(ctx, xhr, "_readyState", JS_NewInt32(ctx, 4));
     JS_SetPropertyStr(ctx, xhr, "status",     JS_NewInt32(ctx, 200));
     JS_SetPropertyStr(ctx, xhr, "statusText", JS_NewString(ctx, "OK"));
     JS_SetPropertyStr(ctx, xhr, "complete",   JS_NewBool(ctx, 1));
+    JS_SetPropertyStr(ctx, xhr, "_isArraybuffer", JS_NewBool(ctx, is_arraybuffer));
 
     /* Store response headers so getResponseHeader can find them */
     JSValue hdrs = JS_NewObject(ctx);
@@ -7153,11 +7571,34 @@ static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
     if (is_arraybuffer) {
         JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)body, body_len);
         JS_SetPropertyStr(ctx, xhr, "response",     ab);
-        JS_SetPropertyStr(ctx, xhr, "responseText", JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, xhr, "_responseText", JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
+    } else if (is_blob) {
+        /* Create a Blob object */
+        JSValue blob_parts = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, blob_parts, "0", JS_NewArrayBufferCopy(ctx, (const uint8_t *)body, body_len));
+        JSValue blob_ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Blob");
+        JSValue blob = JS_CallConstructor(ctx, blob_ctor, 1, &blob_parts);
+        JS_FreeValue(ctx, blob_ctor);
+        JS_FreeValue(ctx, blob_parts);
+        
+        JS_SetPropertyStr(ctx, xhr, "response", blob);
+        JS_SetPropertyStr(ctx, xhr, "_responseText", JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
+    } else if (strcmp(content_type, "application/json") == 0) {
+        /* Auto-parse JSON */
+        JSValue txt = JS_NewStringLen(ctx, body, body_len);
+        JS_SetPropertyStr(ctx, xhr, "_responseText", txt);
+        JSValue json_obj = JS_ParseJSON(ctx, body, body_len, "<xhr-json>");
+        if (JS_IsException(json_obj)) {
+            JS_FreeValue(ctx, json_obj);
+            json_obj = JS_NULL;
+        }
+        JS_SetPropertyStr(ctx, xhr, "response", json_obj);
         JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
     } else {
         JSValue txt = JS_NewStringLen(ctx, body, body_len);
-        JS_SetPropertyStr(ctx, xhr, "responseText", txt);
+        JS_SetPropertyStr(ctx, xhr, "_responseText", txt);
         JS_SetPropertyStr(ctx, xhr, "response",     JS_DupValue(ctx, txt));
         JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
     }
@@ -7205,6 +7646,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     const char *resp_type = JS_ToCString(ctx, rt_v);
     JS_FreeValue(ctx, rt_v);
     int is_arraybuffer = resp_type && strcmp(resp_type, "arraybuffer") == 0;
+    int is_blob = resp_type && strcmp(resp_type, "blob") == 0;
     JS_FreeCString(ctx, resp_type);
 
     /* ---- Handle data: URLs inline ---- */
@@ -7273,8 +7715,27 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
         if (!decoded) return JS_UNDEFINED;
 
         xhr_complete_success(ctx, this_val, decoded, decoded_len,
-                             is_arraybuffer, mime[0] ? mime : "text/plain");
+                             is_arraybuffer, is_blob, mime[0] ? mime : "text/plain");
         free(decoded);
+        return JS_UNDEFINED;
+    }
+
+    /* ---- Handle blob: URLs ---- */
+    if (strncmp(url, "blob:canvas:", 12) == 0) {
+        int blob_id = atoi(url + 12);
+        BlobEntry *blob = find_blob_by_id(blob_id);
+        if (!blob) {
+            JS_FreeCString(ctx, url);
+            JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
+            JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 404));
+            xhr_fire_callbacks(ctx, this_val, 0);
+            return JS_UNDEFINED;
+        }
+        
+        /* Return blob data */
+        xhr_complete_success(ctx, this_val, (const char *)blob->data, blob->size,
+                             0, 0, blob->type ? blob->type : "application/octet-stream");
+        JS_FreeCString(ctx, url);
         return JS_UNDEFINED;
     }
 
@@ -7328,7 +7789,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     fread(data, 1, (size_t)fsize, fp);
     fclose(fp);
 
-    xhr_complete_success(ctx, this_val, (const char *)data, (size_t)fsize, is_arraybuffer, NULL);
+    xhr_complete_success(ctx, this_val, (const char *)data, (size_t)fsize, is_arraybuffer, is_blob, NULL);
     free(data);
     return JS_UNDEFINED;
 }
@@ -7467,6 +7928,24 @@ static JSValue js_xhr_set_readyState(JSContext *ctx, JSValueConst this_val, JSVa
     return JS_UNDEFINED;
 }
 
+static JSValue js_xhr_get_responseText(JSContext *ctx, JSValueConst this_val) {
+    /* Throw if response is arraybuffer */
+    JSValue is_ab = JS_GetPropertyStr(ctx, this_val, "_isArraybuffer");
+    int is_arraybuffer = 0;
+    if (!JS_IsUndefined(is_ab)) {
+        JS_ToInt32(ctx, &is_arraybuffer, is_ab);
+    }
+    JS_FreeValue(ctx, is_ab);
+
+    if (is_arraybuffer) {
+        JS_ThrowDOMException(ctx, "InvalidStateError", "responseText is not available when responseType is 'arraybuffer'");
+        return JS_EXCEPTION;
+    }
+
+    /* Return internal _responseText value (not "responseText" which would recurse) */
+    return JS_GetPropertyStr(ctx, this_val, "_responseText");
+}
+
 static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
     (void)new_target; (void)argc; (void)argv;
     JSValue obj = JS_NewObject(ctx);
@@ -7475,7 +7954,6 @@ static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JS
     JS_SetPropertyStr(ctx, obj, "status",            JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "statusText",        JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "responseType",      JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, obj, "responseText",      JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "responseXML",       JS_NULL);
     JS_SetPropertyStr(ctx, obj, "response",          JS_NULL);
     JS_SetPropertyStr(ctx, obj, "onload",            JS_NULL);
@@ -7487,12 +7965,13 @@ static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JS
     /* Stub properties for compatibility */
     JS_SetPropertyStr(ctx, obj, "withCredentials",   JS_NewBool(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "upload",            JS_NewObject(ctx));
-    /* Add readyState as getter/setter property (setter silently ignores) */
+    /* Add getters/setters */
     {
         static const JSCFunctionListEntry xhr_getset[] = {
             JS_CGETSET_DEF("readyState", js_xhr_get_readyState, js_xhr_set_readyState),
+            JS_CGETSET_DEF("responseText", js_xhr_get_responseText, NULL),
         };
-        JS_SetPropertyFunctionList(ctx, obj, xhr_getset, 1);
+        JS_SetPropertyFunctionList(ctx, obj, xhr_getset, 2);
     }
     JS_SetPropertyStr(ctx, obj, "_url",              JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "_method",           JS_NewString(ctx, "GET"));
@@ -8538,6 +9017,16 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, xhr_ctor, "DONE",             JS_NewInt32(ctx, 4));
     JS_SetPropertyStr(ctx, xhr_ctor, "_hs2",             JS_NewInt32(ctx, 4)); /* GMS2-obfuscated DONE */
     JS_SetPropertyStr(ctx, global, "XMLHttpRequest", xhr_ctor);
+
+    /* Blob constructor */
+    JSValue blob_ctor = JS_NewCFunction2(ctx, js_blob_ctor, "Blob", 0, JS_CFUNC_constructor, 0);
+    JS_SetPropertyStr(ctx, global, "Blob", blob_ctor);
+
+    /* URL object with createObjectURL and revokeObjectURL */
+    JSValue url_obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, url_obj, "createObjectURL", JS_NewCFunction(ctx, js_url_createObjectURL, "createObjectURL", 1));
+    JS_SetPropertyStr(ctx, url_obj, "revokeObjectURL", JS_NewCFunction(ctx, js_url_revokeObjectURL, "revokeObjectURL", 1));
+    JS_SetPropertyStr(ctx, global, "URL", url_obj);
 
     /* fetch stub — just needs to exist for feature detection */
     JS_SetPropertyStr(ctx, global, "fetch", JS_NewCFunction(ctx, js_noop, "fetch", 1));
