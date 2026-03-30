@@ -585,6 +585,11 @@ void sound_mix_callback(void* userdata, uint8_t* stream, int len) {
                     src->position = 0;
                 } else {
                     src->active = 0;
+                    /* Release borrowed slot so find_free_source can reclaim it */
+                    if (src->borrowed) {
+                        src->buffer.samples = NULL;
+                        src->borrowed = 0;
+                    }
                     break;
                 }
             }
@@ -675,11 +680,12 @@ static void s_quit(void) {
 
     /* Free all audio sources */
     for (int i = 0; i < MAX_AUDIO_SOURCES; i++) {
-        if (g_audio_sources[i].buffer.samples) {
+        if (g_audio_sources[i].buffer.samples && !g_audio_sources[i].borrowed) {
             SDL_free(g_audio_sources[i].buffer.samples);
-            g_audio_sources[i].buffer.samples = NULL;
         }
+        g_audio_sources[i].buffer.samples = NULL;
         g_audio_sources[i].active = 0;
+        g_audio_sources[i].borrowed = 0;
     }
 
     SDL_UnlockMutex(g_audio_mutex);
@@ -875,10 +881,76 @@ void sound_unload(int index) {
 
     SDL_LockMutex(g_audio_mutex);
     AudioSource* src = &g_audio_sources[index];
-    free_audio_buffer(&src->buffer);
+    if (src->borrowed) {
+        src->buffer.samples = NULL; /* not owned */
+        src->borrowed = 0;
+    } else {
+        free_audio_buffer(&src->buffer);
+    }
     src->active = 0;
     src->src[0] = '\0';
     SDL_UnlockMutex(g_audio_mutex);
+}
+
+/* ============================================================================
+ * Decode audio to caller-owned PCM — no slot allocated
+ * ============================================================================ */
+int sound_decode_to_memory(const char* path, int16_t** out_samples,
+                            size_t* out_count, int* out_channels, int* out_rate) {
+    char resolved_path[1024];
+    if (path[0] != '/' && strncmp(path, "data:", 5) != 0) {
+        if (g_base_dir[0] != '\0')
+            snprintf(resolved_path, sizeof(resolved_path), "%s/%s", g_base_dir, path);
+        else
+            strncpy(resolved_path, path, sizeof(resolved_path) - 1);
+    } else {
+        strncpy(resolved_path, path, sizeof(resolved_path) - 1);
+    }
+    resolved_path[sizeof(resolved_path) - 1] = '\0';
+
+    AudioBuffer buf = {0};
+    if (!load_audio_file(resolved_path, &buf))
+        return 0;
+
+    *out_samples  = buf.samples;
+    *out_count    = buf.sample_count;
+    *out_channels = buf.channels;
+    *out_rate     = buf.sample_rate;
+    return 1;
+}
+
+/* ============================================================================
+ * Play a borrowed buffer — slot is auto-reclaimed when playback ends
+ * ============================================================================ */
+int sound_play_buffer_borrowed(const int16_t* samples, size_t sample_count,
+                                int channels, int sample_rate,
+                                float volume, int looping) {
+    if (!g_audio_mutex) return -1;
+    SDL_LockMutex(g_audio_mutex);
+
+    int slot = find_free_source();
+    if (slot < 0) {
+        SDL_UnlockMutex(g_audio_mutex);
+        fprintf(stderr, "[sound] No free slot for borrowed playback\n");
+        return -1;
+    }
+
+    AudioSource* src = &g_audio_sources[slot];
+    src->buffer.samples      = (int16_t*)samples; /* borrowed — not owned */
+    src->buffer.sample_count = sample_count;
+    src->buffer.channels     = channels;
+    src->buffer.sample_rate  = sample_rate;
+    src->borrowed   = 1;
+    src->active     = 1;
+    src->position   = 0;
+    src->volume     = (volume > 0.0f) ? volume : 1.0f;
+    src->looping    = looping;
+    src->paused     = 0;
+    src->format     = AUDIO_FORMAT_NONE;
+    src->src[0]     = '\0';
+
+    SDL_UnlockMutex(g_audio_mutex);
+    return slot;
 }
 
 /* ============================================================================

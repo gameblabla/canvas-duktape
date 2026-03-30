@@ -7021,6 +7021,31 @@ static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JS
 }
 
 /* ============================================================================
+ * WebAudio buffer pool — holds decoded PCM independently of playback slots
+ * ============================================================================ */
+#define MAX_WA_BUFFERS 512
+typedef struct {
+    int16_t *samples;
+    size_t   sample_count;
+    int      channels;
+    int      sample_rate;
+    int      in_use;
+} WA_Buffer;
+static WA_Buffer g_wa_buffers[MAX_WA_BUFFERS];
+
+static int wa_alloc_buffer(void) {
+    for (int i = 0; i < MAX_WA_BUFFERS; i++)
+        if (!g_wa_buffers[i].in_use) return i;
+    return -1;
+}
+
+static void wa_free_buffer(int idx) {
+    if (idx < 0 || idx >= MAX_WA_BUFFERS) return;
+    if (g_wa_buffers[idx].samples) { free(g_wa_buffers[idx].samples); }
+    g_wa_buffers[idx] = (WA_Buffer){0};
+}
+
+/* ============================================================================
  * Web Audio API Stub Implementation
  * ============================================================================ */
 
@@ -7242,7 +7267,11 @@ static JSValue js_audiocontext_panner_setPosition(JSContext *ctx, JSValueConst t
 }
 
 static JSValue js_audiocontext_node_connect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    if (argc >= 1 && JS_IsObject(argv[0]) &&
+        JS_VALUE_GET_PTR(this_val) == JS_VALUE_GET_PTR(argv[0])) {
+        JS_ThrowTypeError(ctx, "AudioNode cannot connect to itself");
+        return JS_EXCEPTION;
+    }
     return JS_UNDEFINED;
 }
 
@@ -7404,17 +7433,24 @@ static JSValue js_audiocontext_source_start(JSContext *ctx, JSValueConst this_va
     (void)argc; (void)argv;
     JSValue buffer = JS_GetPropertyStr(ctx, this_val, "buffer");
     if (!JS_IsNull(buffer) && !JS_IsUndefined(buffer)) {
-        JSValue slot_val = JS_GetPropertyStr(ctx, buffer, "_nativeSlot");
-        if (!JS_IsUndefined(slot_val)) {
-            int32_t slot = 0;
-            JS_ToInt32(ctx, &slot, slot_val);
-            JS_FreeValue(ctx, slot_val);
-            JSValue loop_val = JS_GetPropertyStr(ctx, this_val, "loop");
-            sound_set_loop(slot, JS_ToBool(ctx, loop_val));
-            JS_FreeValue(ctx, loop_val);
-            sound_play(slot);
+        JSValue idx_val = JS_GetPropertyStr(ctx, buffer, "_waIdx");
+        if (!JS_IsUndefined(idx_val)) {
+            int32_t wa_idx = 0;
+            JS_ToInt32(ctx, &wa_idx, idx_val);
+            JS_FreeValue(ctx, idx_val);
+            if (wa_idx >= 0 && wa_idx < MAX_WA_BUFFERS && g_wa_buffers[wa_idx].in_use) {
+                WA_Buffer *wb = &g_wa_buffers[wa_idx];
+                JSValue loop_val = JS_GetPropertyStr(ctx, this_val, "loop");
+                int looping = JS_ToBool(ctx, loop_val);
+                JS_FreeValue(ctx, loop_val);
+                int play_slot = sound_play_buffer_borrowed(
+                    wb->samples, wb->sample_count, wb->channels, wb->sample_rate,
+                    1.0f, looping);
+                /* Store play slot on source so stop() can find it */
+                JS_SetPropertyStr(ctx, this_val, "_playSlot", JS_NewInt32(ctx, play_slot));
+            }
         } else {
-            JS_FreeValue(ctx, slot_val);
+            JS_FreeValue(ctx, idx_val);
         }
     }
     JS_FreeValue(ctx, buffer);
@@ -7423,19 +7459,15 @@ static JSValue js_audiocontext_source_start(JSContext *ctx, JSValueConst this_va
 
 static JSValue js_audiocontext_source_stop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)argc; (void)argv;
-    JSValue buffer = JS_GetPropertyStr(ctx, this_val, "buffer");
-    if (!JS_IsNull(buffer) && !JS_IsUndefined(buffer)) {
-        JSValue slot_val = JS_GetPropertyStr(ctx, buffer, "_nativeSlot");
-        if (!JS_IsUndefined(slot_val)) {
-            int32_t slot = 0;
-            JS_ToInt32(ctx, &slot, slot_val);
-            JS_FreeValue(ctx, slot_val);
-            sound_stop(slot);
-        } else {
-            JS_FreeValue(ctx, slot_val);
-        }
+    JSValue slot_val = JS_GetPropertyStr(ctx, this_val, "_playSlot");
+    if (!JS_IsUndefined(slot_val)) {
+        int32_t slot = -1;
+        JS_ToInt32(ctx, &slot, slot_val);
+        JS_FreeValue(ctx, slot_val);
+        if (slot >= 0) sound_stop(slot);
+    } else {
+        JS_FreeValue(ctx, slot_val);
     }
-    JS_FreeValue(ctx, buffer);
     return JS_UNDEFINED;
 }
 
@@ -7448,9 +7480,8 @@ static JSValue js_audiocontext_decodeAudioData(JSContext *ctx, JSValueConst this
     /* Extract raw bytes from the ArrayBuffer */
     size_t byte_len = 0;
     uint8_t *bytes = NULL;
-    if (argc >= 1) {
+    if (argc >= 1)
         bytes = JS_GetArrayBuffer(ctx, &byte_len, argv[0]);
-    }
 
     if (!bytes || byte_len == 0) {
         fprintf(stderr, "[webaudio] decodeAudioData: no data\n");
@@ -7458,86 +7489,93 @@ static JSValue js_audiocontext_decodeAudioData(JSContext *ctx, JSValueConst this
             JSValue err = JS_NewString(ctx, "No audio data");
             JSValue ret = JS_Call(ctx, error_cb, JS_UNDEFINED, 1, &err);
             if (JS_IsException(ret)) JS_GetException(ctx);
-            JS_FreeValue(ctx, ret);
-            JS_FreeValue(ctx, err);
+            JS_FreeValue(ctx, ret); JS_FreeValue(ctx, err);
         }
         return JS_UNDEFINED;
     }
 
     /* Detect format from magic bytes */
-    const char *ext = ".ogg"; /* default */
-    if (byte_len >= 4 &&
-        bytes[0] == 0x4F && bytes[1] == 0x67 && bytes[2] == 0x67 && bytes[3] == 0x53) {
-        ext = ".ogg"; /* OggS */
-    } else if (byte_len >= 3 &&
-               bytes[0] == 0x49 && bytes[1] == 0x44 && bytes[2] == 0x33) {
-        ext = ".mp3"; /* ID3 tag */
-    } else if (byte_len >= 2 &&
-               bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0) {
-        ext = ".mp3"; /* MPEG frame sync */
-    }
+    const char *ext = ".ogg";
+    if (byte_len >= 4 && bytes[0]=='O' && bytes[1]=='g' && bytes[2]=='g' && bytes[3]=='S')
+        ext = ".ogg";
+    else if (byte_len >= 3 && bytes[0]==0x49 && bytes[1]==0x44 && bytes[2]==0x33)
+        ext = ".mp3";
+    else if (byte_len >= 2 && bytes[0]==0xFF && (bytes[1]&0xE0)==0xE0)
+        ext = ".mp3";
+    else if (byte_len >= 4 && bytes[0]=='R' && bytes[1]=='I' && bytes[2]=='F' && bytes[3]=='F')
+        ext = ".wav";
 
-    /* Compute a simple hash for a unique temp filename */
+    /* Write to a temp file for the decoder */
     unsigned int hash = (unsigned int)byte_len;
-    for (size_t i = 0; i < byte_len && i < 32; i++) {
-        hash = hash * 31u + bytes[i];
-    }
-
-    /* Write bytes to a temp file so the sound backend can decode it */
+    for (size_t i = 0; i < byte_len && i < 32; i++) hash = hash * 31u + bytes[i];
     char tmppath[256];
     snprintf(tmppath, sizeof(tmppath), "/tmp/canvas_audio_%08x%s", hash, ext);
 
     FILE *f = fopen(tmppath, "wb");
     if (!f) {
-        fprintf(stderr, "[webaudio] decodeAudioData: cannot write temp file %s\n", tmppath);
+        fprintf(stderr, "[webaudio] decodeAudioData: cannot write temp file\n");
         if (JS_IsFunction(ctx, error_cb)) {
             JSValue err = JS_NewString(ctx, "Cannot write temp file");
             JSValue ret = JS_Call(ctx, error_cb, JS_UNDEFINED, 1, &err);
             if (JS_IsException(ret)) JS_GetException(ctx);
-            JS_FreeValue(ctx, ret);
-            JS_FreeValue(ctx, err);
+            JS_FreeValue(ctx, ret); JS_FreeValue(ctx, err);
         }
         return JS_UNDEFINED;
     }
     fwrite(bytes, 1, byte_len, f);
     fclose(f);
 
-    /* Decode via the SDL2 sound backend */
-    int native_slot = -1;
-    int loaded = sound_load_audio(tmppath, &native_slot);
-    remove(tmppath); /* clean up temp file regardless */
+    /* Decode to caller-owned PCM — no native playback slot consumed */
+    int16_t *samples = NULL;
+    size_t sample_count = 0;
+    int channels = 0, rate = 0;
+    int ok = sound_decode_to_memory(tmppath, &samples, &sample_count, &channels, &rate);
+    remove(tmppath);
 
-    if (loaded < 0 || native_slot < 0) {
-        fprintf(stderr, "[webaudio] decodeAudioData: decode failed for %s\n", tmppath);
+    if (!ok || !samples) {
+        fprintf(stderr, "[webaudio] decodeAudioData: decode failed\n");
         if (JS_IsFunction(ctx, error_cb)) {
             JSValue err = JS_NewString(ctx, "Decode failed");
             JSValue ret = JS_Call(ctx, error_cb, JS_UNDEFINED, 1, &err);
             if (JS_IsException(ret)) JS_GetException(ctx);
-            JS_FreeValue(ctx, ret);
-            JS_FreeValue(ctx, err);
+            JS_FreeValue(ctx, ret); JS_FreeValue(ctx, err);
         }
         return JS_UNDEFINED;
     }
 
-    /* Build the AudioBuffer JS object */
-    float duration   = sound_get_duration(native_slot);
-    int sample_rate  = 44100;
-    int num_channels = 2;
-    int length       = (int)(duration * (float)sample_rate);
+    /* Store PCM in the WA buffer pool */
+    int wa_idx = wa_alloc_buffer();
+    if (wa_idx < 0) {
+        fprintf(stderr, "[webaudio] decodeAudioData: WA buffer pool full\n");
+        free(samples);
+        if (JS_IsFunction(ctx, error_cb)) {
+            JSValue err = JS_NewString(ctx, "WA buffer pool full");
+            JSValue ret = JS_Call(ctx, error_cb, JS_UNDEFINED, 1, &err);
+            if (JS_IsException(ret)) JS_GetException(ctx);
+            JS_FreeValue(ctx, ret); JS_FreeValue(ctx, err);
+        }
+        return JS_UNDEFINED;
+    }
+    g_wa_buffers[wa_idx].samples      = samples;
+    g_wa_buffers[wa_idx].sample_count = sample_count;
+    g_wa_buffers[wa_idx].channels     = channels;
+    g_wa_buffers[wa_idx].sample_rate  = rate;
+    g_wa_buffers[wa_idx].in_use       = 1;
+
+    float duration = (rate > 0) ? (float)sample_count / (float)rate : 0.0f;
+    int length     = (int)(duration * 44100.0f);
 
     JSValue audio_buffer = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, audio_buffer, "sampleRate",       JS_NewInt32(ctx, sample_rate));
+    JS_SetPropertyStr(ctx, audio_buffer, "sampleRate",       JS_NewInt32(ctx, rate > 0 ? rate : 44100));
     JS_SetPropertyStr(ctx, audio_buffer, "length",           JS_NewInt32(ctx, length));
-    JS_SetPropertyStr(ctx, audio_buffer, "numberOfChannels", JS_NewInt32(ctx, num_channels));
+    JS_SetPropertyStr(ctx, audio_buffer, "numberOfChannels", JS_NewInt32(ctx, channels > 0 ? channels : 1));
     JS_SetPropertyStr(ctx, audio_buffer, "duration",         JS_NewFloat64(ctx, (double)duration));
-    /* Store native slot so source.start() can play it */
-    JS_SetPropertyStr(ctx, audio_buffer, "_nativeSlot",      JS_NewInt32(ctx, native_slot));
+    JS_SetPropertyStr(ctx, audio_buffer, "_waIdx",           JS_NewInt32(ctx, wa_idx));
     JS_SetPropertyStr(ctx, audio_buffer, "getChannelData",
         JS_NewCFunction(ctx, js_audiocontext_buffer_getChannelData, "getChannelData", 1));
 
-    fprintf(stderr, "[webaudio] decodeAudioData: slot=%d duration=%.2fs\n", native_slot, duration);
+    fprintf(stderr, "[webaudio] decodeAudioData: wa=%d duration=%.2fs\n", wa_idx, duration);
 
-    /* Call success callback */
     if (JS_IsFunction(ctx, success_cb)) {
         JSValue ret = JS_Call(ctx, success_cb, JS_UNDEFINED, 1, &audio_buffer);
         if (JS_IsException(ret)) JS_GetException(ctx);
@@ -7635,6 +7673,11 @@ static JSValue js_audiocontext_createBuffer(JSContext *ctx, JSValueConst this_va
         JS_ToInt32(ctx, &num_channels, argv[0]);
         JS_ToInt32(ctx, &length, argv[1]);
         JS_ToInt32(ctx, &sample_rate, argv[2]);
+    }
+
+    if (num_channels <= 0) {
+        JS_ThrowRangeError(ctx, "createBuffer: numberOfChannels must be > 0");
+        return JS_EXCEPTION;
     }
     
     JSValue buffer = JS_NewObject(ctx);

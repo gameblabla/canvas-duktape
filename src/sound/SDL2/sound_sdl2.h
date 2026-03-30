@@ -32,6 +32,7 @@ typedef struct {
     float      volume;      /* 0.0 - 1.0 */
     int        looping;
     int        paused;
+    int        borrowed;    /* if 1, buffer.samples is not owned — do not free */
     AudioFormat format;
     char       src[512];    /* source file path */
 } AudioSource;
@@ -55,6 +56,15 @@ float sound_get_duration(int index);
 float sound_get_current_time(int index);
 void sound_set_current_time(int index, float time);
 void sound_unload(int index);
+
+/* Decode audio to caller-owned PCM (no slot allocated) */
+int  sound_decode_to_memory(const char* path, int16_t** out_samples,
+                             size_t* out_count, int* out_channels, int* out_rate);
+
+/* Play a borrowed buffer (samples not owned by the slot; slot auto-reclaimed when done) */
+int  sound_play_buffer_borrowed(const int16_t* samples, size_t sample_count,
+                                int channels, int sample_rate,
+                                float volume, int looping);
 
 /* Internal: called by SDL audio callback */
 void sound_mix_callback(void* userdata, uint8_t* stream, int len);
