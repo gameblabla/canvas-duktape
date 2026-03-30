@@ -6495,6 +6495,9 @@ static int jscore_qjs_init(RendererInterface *renderer,
     /* Initialize standard library handlers (needed for module loading, etc.) */
     js_std_init_handlers(g_rt);
 
+    /* Enable DOMException for XHR InvalidStateError throws */
+    JS_AddIntrinsicDOMException(g_ctx);
+
     /* Register class IDs */
     JS_NewClassID(g_rt, &js_image_class_id);
     JS_NewClassID(g_rt, &js_canvas_class_id);
@@ -6861,21 +6864,89 @@ static JSValue js_xhr_open(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     return JS_UNDEFINED;
 }
 
+/* Simple URL percent-decoder (writes into caller buffer, returns byte count) */
+static size_t xhr_url_decode(const char *in, size_t in_len, char *out, size_t out_max) {
+    size_t o = 0;
+    for (size_t i = 0; i < in_len && o + 1 < out_max; i++) {
+        if (in[i] == '%' && i + 2 < in_len) {
+            unsigned char hi = (unsigned char)in[i+1];
+            unsigned char lo = (unsigned char)in[i+2];
+            hi = (hi>='0'&&hi<='9') ? hi-'0' : (hi>='A'&&hi<='F') ? hi-'A'+10 : (hi>='a'&&hi<='f') ? hi-'a'+10 : 0;
+            lo = (lo>='0'&&lo<='9') ? lo-'0' : (lo>='A'&&lo<='F') ? lo-'A'+10 : (lo>='a'&&lo<='f') ? lo-'a'+10 : 0;
+            out[o++] = (char)((hi << 4) | lo);
+            i += 2;
+        } else if (in[i] == '+') {
+            out[o++] = ' ';
+        } else {
+            out[o++] = in[i];
+        }
+    }
+    if (o < out_max) out[o] = '\0';
+    return o;
+}
+
+/* Shared completion helper: sets readyState/status, responseText, responseXML,
+   stores content-type header, fires onload + onreadystatechange */
+static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
+                                  const char *body, size_t body_len,
+                                  int is_arraybuffer, const char *content_type) {
+    JS_SetPropertyStr(ctx, xhr, "readyState", JS_NewInt32(ctx, 4));
+    JS_SetPropertyStr(ctx, xhr, "status",     JS_NewInt32(ctx, 200));
+    JS_SetPropertyStr(ctx, xhr, "statusText", JS_NewString(ctx, "OK"));
+    JS_SetPropertyStr(ctx, xhr, "complete",   JS_NewBool(ctx, 1));
+
+    /* Store response headers so getResponseHeader can find them */
+    JSValue hdrs = JS_NewObject(ctx);
+    if (content_type)
+        JS_SetPropertyStr(ctx, hdrs, "content-type", JS_NewString(ctx, content_type));
+    JS_SetPropertyStr(ctx, xhr, "_responseHeaders", hdrs);
+
+    if (is_arraybuffer) {
+        JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)body, body_len);
+        JS_SetPropertyStr(ctx, xhr, "response",     ab);
+        JS_SetPropertyStr(ctx, xhr, "responseText", JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
+    } else {
+        JSValue txt = JS_NewStringLen(ctx, body, body_len);
+        JS_SetPropertyStr(ctx, xhr, "responseText", txt);
+        JS_SetPropertyStr(ctx, xhr, "response",     JS_DupValue(ctx, txt));
+        JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
+    }
+
+    /* Fire onload (with event object) then onreadystatechange */
+    JSValue onload = JS_GetPropertyStr(ctx, xhr, "onload");
+    if (JS_IsFunction(ctx, onload)) {
+        JSValue ev = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, ev, "target",        JS_DupValue(ctx, xhr));
+        JS_SetPropertyStr(ctx, ev, "currentTarget", JS_DupValue(ctx, xhr));
+        JSValue ret = JS_Call(ctx, onload, xhr, 1, &ev);
+        if (JS_IsException(ret)) JS_GetException(ctx);
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, ev);
+    }
+    JS_FreeValue(ctx, onload);
+
+    xhr_fire_callbacks(ctx, xhr, 1);
+    JS_RunGC(g_rt);
+}
+
 static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+
+    /* Throw if not opened yet */
+    JSValue rs_v = JS_GetPropertyStr(ctx, this_val, "readyState");
+    int32_t rs = 0;
+    JS_ToInt32(ctx, &rs, rs_v);
+    JS_FreeValue(ctx, rs_v);
+    if (rs == 0) {
+        JS_ThrowDOMException(ctx, "InvalidStateError", "send() called before open()");
+        return JS_EXCEPTION;
+    }
+
     JSValue url_v = JS_GetPropertyStr(ctx, this_val, "_url");
     const char *url = JS_ToCString(ctx, url_v);
     JS_FreeValue(ctx, url_v);
     if (!url) return JS_UNDEFINED;
-
-    /* Skip network URLs — only local files supported */
-    if (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0 ||
-        strncmp(url, "//", 2) == 0) {
-        JS_FreeCString(ctx, url);
-        JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 4));
-        JS_SetPropertyStr(ctx, this_val, "status", JS_NewInt32(ctx, 0));
-        xhr_fire_callbacks(ctx, this_val, 0);
-        return JS_UNDEFINED;
-    }
 
     JSValue rt_v = JS_GetPropertyStr(ctx, this_val, "responseType");
     const char *resp_type = JS_ToCString(ctx, rt_v);
@@ -6883,115 +6954,213 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     int is_arraybuffer = resp_type && strcmp(resp_type, "arraybuffer") == 0;
     JS_FreeCString(ctx, resp_type);
 
-    /* Try multiple paths to find the file */
-    char *paths_to_try[4];
-    int num_paths = 0;
-    
-    /* Path 1: Relative to base directory */
+    /* ---- Handle data: URLs inline ---- */
+    if (strncmp(url, "data:", 5) == 0) {
+        const char *p = url + 5;
+        const char *comma = strchr(p, ',');
+        if (!comma) {
+            JS_FreeCString(ctx, url);
+            JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 4));
+            JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 400));
+            xhr_fire_callbacks(ctx, this_val, 0);
+            return JS_UNDEFINED;
+        }
+        /* Parse header for MIME and base64 flag */
+        char mime[128] = {0};
+        int is_base64 = 0;
+        const char *semi = strchr(p, ';');
+        if (semi && semi < comma) {
+            size_t ml = (size_t)(semi - p);
+            if (ml >= sizeof(mime)) ml = sizeof(mime) - 1;
+            memcpy(mime, p, ml);
+            if (strncmp(semi + 1, "base64", 6) == 0) is_base64 = 1;
+        } else {
+            size_t ml = (size_t)(comma - p);
+            if (ml >= sizeof(mime)) ml = sizeof(mime) - 1;
+            memcpy(mime, p, ml);
+        }
+
+        const char *data_str = comma + 1;
+        size_t data_str_len  = strlen(data_str);
+        char   *decoded = NULL;
+        size_t  decoded_len = 0;
+
+        if (is_base64) {
+            /* reuse our existing base64 decoder from sound_sdl2.c via inline copy */
+            static const int8_t B64[256] = {
+                -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,52,53,54,55,56,57,58,59,60,61,-1,-1,-1,0,-1,-1,
+                -1,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+                -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+                -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+                -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+            };
+            size_t max_out = (data_str_len / 4 + 1) * 3;
+            decoded = (char *)malloc(max_out + 1);
+            if (decoded) {
+                uint32_t acc = 0; int bits = 0;
+                for (size_t i = 0; i < data_str_len; i++) {
+                    int8_t v = B64[(unsigned char)data_str[i]];
+                    if (v < 0) continue;
+                    acc = (acc << 6) | (uint32_t)v;
+                    bits += 6;
+                    if (bits >= 8) { bits -= 8; decoded[decoded_len++] = (char)(acc >> bits); }
+                }
+                decoded[decoded_len] = '\0';
+            }
+        } else {
+            decoded = (char *)malloc(data_str_len + 1);
+            if (decoded)
+                decoded_len = xhr_url_decode(data_str, data_str_len, decoded, data_str_len + 1);
+        }
+
+        JS_FreeCString(ctx, url);
+        if (!decoded) return JS_UNDEFINED;
+
+        xhr_complete_success(ctx, this_val, decoded, decoded_len,
+                             is_arraybuffer, mime[0] ? mime : "text/plain");
+        free(decoded);
+        return JS_UNDEFINED;
+    }
+
+    /* ---- Skip network URLs ---- */
+    if (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0 ||
+        strncmp(url, "//", 2) == 0) {
+        JS_FreeCString(ctx, url);
+        JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 4));
+        JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 0));
+        xhr_fire_callbacks(ctx, this_val, 0);
+        return JS_UNDEFINED;
+    }
+
+    /* ---- Local file ---- */
+    char *paths_to_try[4]; int num_paths = 0;
     if (g_jscore_base_dir[0] && url[0] != '/') {
-        char *path1 = malloc(2048);
-        snprintf(path1, 2048, "%s/%s", g_jscore_base_dir, url);
-        paths_to_try[num_paths++] = path1;
+        char *p1 = malloc(2048);
+        snprintf(p1, 2048, "%s/%s", g_jscore_base_dir, url);
+        paths_to_try[num_paths++] = p1;
     }
-    
-    /* Path 2: Relative to current working directory */
-    char *path2 = malloc(2048);
-    snprintf(path2, 2048, "%s", url);
-    paths_to_try[num_paths++] = path2;
-    
-    /* Path 3: Absolute path if URL starts with / */
+    char *p2 = malloc(2048); snprintf(p2, 2048, "%s", url);
+    paths_to_try[num_paths++] = p2;
     if (url[0] == '/') {
-        char *path3 = malloc(2048);
-        strncpy(path3, url, 2047);
-        path3[2047] = '\0';
-        paths_to_try[num_paths++] = path3;
+        char *p3 = malloc(2048); strncpy(p3, url, 2047); p3[2047] = '\0';
+        paths_to_try[num_paths++] = p3;
     }
-    
-    FILE *fp = NULL;
-    char filepath[2048] = {0};
-    
+
+    FILE *fp = NULL; char filepath[2048] = {0};
     for (int i = 0; i < num_paths; i++) {
         fp = fopen(paths_to_try[i], "rb");
-        if (fp) {
-            strncpy(filepath, paths_to_try[i], sizeof(filepath) - 1);
-            filepath[sizeof(filepath) - 1] = '\0';
-            break;
-        }
+        if (fp) { strncpy(filepath, paths_to_try[i], sizeof(filepath)-1); break; }
     }
-    
-    /* Free allocated paths */
-    for (int i = 0; i < num_paths; i++) {
-        free(paths_to_try[i]);
-    }
+    for (int i = 0; i < num_paths; i++) free(paths_to_try[i]);
 
     if (!fp) {
         fprintf(stderr, "[xhr] file not found: %s (tried from base_dir=%s)\n", url, g_jscore_base_dir);
         JS_FreeCString(ctx, url);
-        JS_SetPropertyStr(ctx, this_val, "readyState",  JS_NewInt32(ctx, 4));
-        JS_SetPropertyStr(ctx, this_val, "status",      JS_NewInt32(ctx, 404));
-        JS_SetPropertyStr(ctx, this_val, "statusText",  JS_NewString(ctx, "Not Found"));
+        JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 4));
+        JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 404));
+        JS_SetPropertyStr(ctx, this_val, "statusText", JS_NewString(ctx, "Not Found"));
         xhr_fire_callbacks(ctx, this_val, 0);
         return JS_UNDEFINED;
     }
-    
+
     fprintf(stderr, "[xhr] loaded: %s\n", filepath);
     JS_FreeCString(ctx, url);
 
-    fseek(fp, 0, SEEK_END);
-    long fsize = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    fseek(fp, 0, SEEK_END); long fsize = ftell(fp); fseek(fp, 0, SEEK_SET);
     uint8_t *data = (uint8_t *)malloc(fsize > 0 ? (size_t)fsize : 1);
     if (!data) { fclose(fp); return JS_UNDEFINED; }
     fread(data, 1, (size_t)fsize, fp);
     fclose(fp);
 
-    JS_SetPropertyStr(ctx, this_val, "readyState",  JS_NewInt32(ctx, 4));
-    JS_SetPropertyStr(ctx, this_val, "status",      JS_NewInt32(ctx, 200));
-    JS_SetPropertyStr(ctx, this_val, "statusText",  JS_NewString(ctx, "OK"));
-
-    if (is_arraybuffer) {
-        JSValue ab = JS_NewArrayBufferCopy(ctx, data, (size_t)fsize);
-        JS_SetPropertyStr(ctx, this_val, "response",     ab);
-        JS_SetPropertyStr(ctx, this_val, "responseText", JS_NewString(ctx, ""));
-    } else {
-        JSValue txt = JS_NewStringLen(ctx, (const char *)data, (size_t)fsize);
-        JS_SetPropertyStr(ctx, this_val, "responseText", txt);
-        JS_SetPropertyStr(ctx, this_val, "response",     JS_DupValue(ctx, txt));
-    }
+    xhr_complete_success(ctx, this_val, (const char *)data, (size_t)fsize, is_arraybuffer, NULL);
     free(data);
-
-    /* Set complete property for GameMaker sound loading */
-    JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 1));
-
-    /* Fire onload callback for GameMaker async tracking */
-    JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
-    if (!JS_IsNull(onload) && !JS_IsUndefined(onload)) {
-        JSValue event = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, event, "currentTarget", JS_DupValue(ctx, this_val));
-        JS_SetPropertyStr(ctx, event, "target", JS_DupValue(ctx, this_val));
-        JS_Call(ctx, onload, JS_UNDEFINED, 1, (JSValueConst[]){event});
-        JS_FreeValue(ctx, event);
-    }
-    JS_FreeValue(ctx, onload);
-
-    xhr_fire_callbacks(ctx, this_val, 1);
-    /* Run GC after each XHR response to free jQuery Deferred objects and parsed JSON intermediates */
-    JS_RunGC(g_rt);
     return JS_UNDEFINED;
 }
 
 static JSValue js_xhr_setHeader(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    (void)argc; (void)argv;
+    /* Throw if called before open() (readyState == 0) */
+    JSValue rs_v = JS_GetPropertyStr(ctx, this_val, "readyState");
+    int32_t rs = 0;
+    JS_ToInt32(ctx, &rs, rs_v);
+    JS_FreeValue(ctx, rs_v);
+    if (rs == 0) {
+        JS_ThrowDOMException(ctx, "InvalidStateError", "setRequestHeader() called before open()");
+        return JS_EXCEPTION;
+    }
     return JS_UNDEFINED;
 }
 
 static JSValue js_xhr_getAllHeaders(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    return JS_NewString(ctx, "");
+    (void)argc; (void)argv;
+    /* Build "key: value\r\n" string from _responseHeaders */
+    JSValue hdrs = JS_GetPropertyStr(ctx, this_val, "_responseHeaders");
+    if (!JS_IsObject(hdrs)) {
+        JS_FreeValue(ctx, hdrs);
+        return JS_NewString(ctx, "");
+    }
+    /* Enumerate properties */
+    JSPropertyEnum *tab; uint32_t tab_len;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &tab_len, hdrs, JS_GPN_STRING_MASK) < 0) {
+        JS_FreeValue(ctx, hdrs);
+        return JS_NewString(ctx, "");
+    }
+    char buf[4096] = {0}; size_t pos = 0;
+    for (uint32_t i = 0; i < tab_len && pos < sizeof(buf) - 64; i++) {
+        const char *key = JS_AtomToCString(ctx, tab[i].atom);
+        JSValue val = JS_GetProperty(ctx, hdrs, tab[i].atom);
+        const char *vstr = JS_ToCString(ctx, val);
+        if (key && vstr)
+            pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "%s: %s\r\n", key, vstr);
+        JS_FreeCString(ctx, key); JS_FreeCString(ctx, vstr); JS_FreeValue(ctx, val);
+        JS_FreeAtom(ctx, tab[i].atom);
+    }
+    js_free(ctx, tab);
+    JS_FreeValue(ctx, hdrs);
+    return JS_NewString(ctx, buf);
+}
+
+static JSValue js_xhr_getResponseHeader(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NULL;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_NULL;
+
+    /* Lower-case the lookup key */
+    char lower[128] = {0};
+    for (int i = 0; name[i] && i < 127; i++)
+        lower[i] = (char)tolower((unsigned char)name[i]);
+    JS_FreeCString(ctx, name);
+
+    JSValue hdrs = JS_GetPropertyStr(ctx, this_val, "_responseHeaders");
+    if (!JS_IsObject(hdrs)) { JS_FreeValue(ctx, hdrs); return JS_NULL; }
+
+    JSValue val = JS_GetPropertyStr(ctx, hdrs, lower);
+    JS_FreeValue(ctx, hdrs);
+    if (JS_IsUndefined(val)) { JS_FreeValue(ctx, val); return JS_NULL; }
+    return val;
 }
 
 static JSValue js_xhr_abort(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    (void)argc; (void)argv;
+    /* Reset state */
+    JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, this_val, "statusText", JS_NewString(ctx, ""));
+    /* Fire onabort */
+    JSValue cb = JS_GetPropertyStr(ctx, this_val, "onabort");
+    if (JS_IsFunction(ctx, cb)) {
+        JSValue ev = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
+        JS_SetPropertyStr(ctx, ev, "type",   JS_NewString(ctx, "abort"));
+        JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
+        if (JS_IsException(ret)) JS_GetException(ctx);
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, ev);
+    }
+    JS_FreeValue(ctx, cb);
     return JS_UNDEFINED;
 }
 
@@ -7003,20 +7172,24 @@ static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JS
     JS_SetPropertyStr(ctx, obj, "statusText",          JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "responseType",        JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "responseText",        JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "responseXML",         JS_NULL);
     JS_SetPropertyStr(ctx, obj, "response",            JS_NULL);
     JS_SetPropertyStr(ctx, obj, "onload",              JS_NULL);
     JS_SetPropertyStr(ctx, obj, "onerror",             JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "onabort",             JS_NULL);
     JS_SetPropertyStr(ctx, obj, "onreadystatechange",  JS_NULL);
     JS_SetPropertyStr(ctx, obj, "ontimeout",           JS_NULL);
     JS_SetPropertyStr(ctx, obj, "timeout",             JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "_url",                JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "_method",             JS_NewString(ctx, "GET"));
     JS_SetPropertyStr(ctx, obj, "_async",              JS_NewBool(ctx, 1));
-    JS_SetPropertyStr(ctx, obj, "open",                JS_NewCFunction(ctx, js_xhr_open,       "open",                3));
-    JS_SetPropertyStr(ctx, obj, "send",                JS_NewCFunction(ctx, js_xhr_send,       "send",                1));
-    JS_SetPropertyStr(ctx, obj, "setRequestHeader",    JS_NewCFunction(ctx, js_xhr_setHeader,  "setRequestHeader",    2));
-    JS_SetPropertyStr(ctx, obj, "getAllResponseHeaders", JS_NewCFunction(ctx, js_xhr_getAllHeaders, "getAllResponseHeaders", 0));
-    JS_SetPropertyStr(ctx, obj, "abort",               JS_NewCFunction(ctx, js_xhr_abort,      "abort",               0));
+    JS_SetPropertyStr(ctx, obj, "_responseHeaders",    JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, obj, "open",                  JS_NewCFunction(ctx, js_xhr_open,              "open",                  3));
+    JS_SetPropertyStr(ctx, obj, "send",                  JS_NewCFunction(ctx, js_xhr_send,              "send",                  1));
+    JS_SetPropertyStr(ctx, obj, "setRequestHeader",      JS_NewCFunction(ctx, js_xhr_setHeader,         "setRequestHeader",      2));
+    JS_SetPropertyStr(ctx, obj, "getAllResponseHeaders",  JS_NewCFunction(ctx, js_xhr_getAllHeaders,     "getAllResponseHeaders",  0));
+    JS_SetPropertyStr(ctx, obj, "getResponseHeader",     JS_NewCFunction(ctx, js_xhr_getResponseHeader, "getResponseHeader",     1));
+    JS_SetPropertyStr(ctx, obj, "abort",                 JS_NewCFunction(ctx, js_xhr_abort,             "abort",                 0));
     return obj;
 }
 
