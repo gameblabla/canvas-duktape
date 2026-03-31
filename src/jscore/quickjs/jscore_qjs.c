@@ -2796,19 +2796,22 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
 
     /* Soft clip (evenodd path clip): render with per-pixel mask */
     if (g_ctx2d.has_soft_clip && g_renderer->put_pixels && g_ctx2d.global_composite == 0) {
-        /* Transform rect to screen coords */
-        double ox, oy;
-        transform_point(&ox, &oy, g_ctx2d.transform, x, y);
-        int sx = (int)ox, sy = (int)oy;
-        int sw = (int)(w * g_ctx2d.transform[0]);
-        int sh = (int)(h * g_ctx2d.transform[3]);
-        if (sw <= 0) sw = w;
-        if (sh <= 0) sh = h;
+        /* Compute screen-space bounding box by transforming all 4 corners of the rect.
+         * This handles rotated/skewed transforms correctly (not just scale+translate). */
+        double c0x, c0y, c1x, c1y, c2x, c2y, c3x, c3y;
+        transform_point(&c0x, &c0y, g_ctx2d.transform, x,   y);
+        transform_point(&c1x, &c1y, g_ctx2d.transform, x+w, y);
+        transform_point(&c2x, &c2y, g_ctx2d.transform, x+w, y+h);
+        transform_point(&c3x, &c3y, g_ctx2d.transform, x,   y+h);
+        double mn_x = c0x, mx_x = c0x, mn_y = c0y, mx_y = c0y;
+#define UPD_BB(cx,cy) do { if(cx<mn_x)mn_x=cx; if(cx>mx_x)mx_x=cx; if(cy<mn_y)mn_y=cy; if(cy>mx_y)mx_y=cy; } while(0)
+        UPD_BB(c1x,c1y); UPD_BB(c2x,c2y); UPD_BB(c3x,c3y);
+#undef UPD_BB
         /* Clamp to clip bbox */
-        int x0 = sx < g_ctx2d.clip_x ? g_ctx2d.clip_x : sx;
-        int y0 = sy < g_ctx2d.clip_y ? g_ctx2d.clip_y : sy;
-        int x1 = (sx+sw) > (g_ctx2d.clip_x+g_ctx2d.clip_w) ? (g_ctx2d.clip_x+g_ctx2d.clip_w) : (sx+sw);
-        int y1 = (sy+sh) > (g_ctx2d.clip_y+g_ctx2d.clip_h) ? (g_ctx2d.clip_y+g_ctx2d.clip_h) : (sy+sh);
+        int x0 = (int)mn_x < g_ctx2d.clip_x ? g_ctx2d.clip_x : (int)mn_x;
+        int y0 = (int)mn_y < g_ctx2d.clip_y ? g_ctx2d.clip_y : (int)mn_y;
+        int x1 = (int)ceil(mx_x) > (g_ctx2d.clip_x+g_ctx2d.clip_w) ? (g_ctx2d.clip_x+g_ctx2d.clip_w) : (int)ceil(mx_x);
+        int y1 = (int)ceil(mx_y) > (g_ctx2d.clip_y+g_ctx2d.clip_h) ? (g_ctx2d.clip_y+g_ctx2d.clip_h) : (int)ceil(mx_y);
         int pw = x1 - x0, ph = y1 - y0;
         if (pw > 0 && ph > 0) {
             uint8_t *pixels = calloc(pw * ph, 4);
