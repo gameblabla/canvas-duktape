@@ -414,6 +414,7 @@ static JSValue js_audiocontext_listener_setOrientation(JSContext *ctx, JSValueCo
 static JSValue js_audiocontext_createGain(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_createBufferSource(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_createPanner(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_createMediaElementSource(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_panner_setPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_node_connect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_node_disconnect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
@@ -8197,11 +8198,13 @@ static void setup_audiocontext_prototype(JSContext *ctx) {
         JS_NewCFunction(ctx, js_audiocontext_createBuffer, "createBuffer", 3));
     JS_SetPropertyStr(ctx, g_audiocontext_proto, "createAnalyser", 
         JS_NewCFunction(ctx, js_audiocontext_createAnalyser, "createAnalyser", 0));
-    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createPanner", 
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createPanner",
         JS_NewCFunction(ctx, js_audiocontext_createPanner, "createPanner", 0));
-    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createBiquadFilter", 
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createBiquadFilter",
         JS_NewCFunction(ctx, js_audiocontext_createBiquadFilter, "createBiquadFilter", 0));
-    JS_SetPropertyStr(ctx, g_audiocontext_proto, "decodeAudioData", 
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createMediaElementSource",
+        JS_NewCFunction(ctx, js_audiocontext_createMediaElementSource, "createMediaElementSource", 1));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "decodeAudioData",
         JS_NewCFunction(ctx, js_audiocontext_decodeAudioData, "decodeAudioData", 1));
     JS_SetPropertyStr(ctx, g_audiocontext_proto, "close", 
         JS_NewCFunction(ctx, js_audiocontext_close, "close", 0));
@@ -8298,6 +8301,18 @@ static JSValue js_audiocontext_createPanner(JSContext *ctx, JSValueConst this_va
 static JSValue js_audiocontext_panner_setPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
     return JS_UNDEFINED;
+}
+
+/* Stub for createMediaElementSource - returns a mock MediaElementAudioSourceNode */
+static JSValue js_audiocontext_createMediaElementSource(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    /* Return a mock node with connect/disconnect methods */
+    JSValue node = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, node, "connect",
+        JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
+    JS_SetPropertyStr(ctx, node, "disconnect",
+        JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
+    return node;
 }
 
 static JSValue js_audiocontext_node_connect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
