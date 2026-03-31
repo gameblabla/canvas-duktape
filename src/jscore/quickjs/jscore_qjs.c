@@ -7496,7 +7496,10 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
             JSValue ev = JS_NewObject(ctx);
             JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
             JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "load"));
-            JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
+            /* Use JS_UNDEFINED as 'this' so ClearEventListeners(this) gets globalThis
+             * (window), which has a removeEventListener no-op stub. Passing xhr would
+             * cause TypeError since XHR objects don't carry removeEventListener. */
+            JSValue ret = JS_Call(ctx, cb, JS_UNDEFINED, 1, &ev);
             if (JS_IsException(ret)) JS_GetException(ctx);
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, ev);
@@ -7551,6 +7554,17 @@ static size_t xhr_url_decode(const char *in, size_t in_len, char *out, size_t ou
     return o;
 }
 
+/* Deferred wrapper: fires xhr_fire_callbacks(ctx, data[0], 1) asynchronously.
+ * Used so that async XHR completions don't fire callbacks before send() returns,
+ * matching browser behaviour where onreadystatechange fires on the next tick. */
+static JSValue xhr_deferred_success_cb(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv,
+                                        int magic, JSValue *data) {
+    (void)this_val; (void)argc; (void)argv; (void)magic;
+    xhr_fire_callbacks(ctx, data[0], 1);
+    return JS_UNDEFINED;
+}
+
 /* Shared completion helper: sets readyState/status, responseText, responseXML,
    stores content-type header, fires onload + onreadystatechange */
 static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
@@ -7603,24 +7617,23 @@ static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
         JS_SetPropertyStr(ctx, xhr, "responseXML",  JS_NULL);
     }
 
-    /* Fire onload (with event object) then onreadystatechange.
-     * Use JS_UNDEFINED as 'this' so that callbacks that call ClearEventListeners(this)
-     * get globalThis (window), which has a removeEventListener no-op stub.
-     * Passing xhr as 'this' would cause xhr.removeEventListener() → TypeError since
-     * XHR objects do not natively carry removeEventListener. */
-    JSValue onload = JS_GetPropertyStr(ctx, xhr, "onload");
-    if (JS_IsFunction(ctx, onload)) {
-        JSValue ev = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, ev, "target",        JS_DupValue(ctx, xhr));
-        JS_SetPropertyStr(ctx, ev, "currentTarget", JS_DupValue(ctx, xhr));
-        JSValue ret = JS_Call(ctx, onload, JS_UNDEFINED, 1, &ev);
-        if (JS_IsException(ret)) JS_GetException(ctx);
-        JS_FreeValue(ctx, ret);
-        JS_FreeValue(ctx, ev);
-    }
-    JS_FreeValue(ctx, onload);
+    /* For async XHR: defer callbacks to the next event-loop tick so that multiple
+     * concurrent send() calls (e.g. ResourceManager loading two files) complete their
+     * setup before any onreadystatechange/onload fires. This matches browser semantics.
+     * For synchronous XHR: fire immediately (spec requires blocking). */
+    JSValue async_v = JS_GetPropertyStr(ctx, xhr, "_async");
+    int is_async = JS_ToBool(ctx, async_v);
+    JS_FreeValue(ctx, async_v);
 
-    xhr_fire_callbacks(ctx, xhr, 1);
+    if (is_async) {
+        JSValue xhr_ref = JS_DupValue(ctx, xhr);
+        JSValue cb = JS_NewCFunctionData(ctx, xhr_deferred_success_cb, 0, 0, 1, &xhr_ref);
+        JS_FreeValue(ctx, xhr_ref);
+        schedule_deferred_call(ctx, cb);
+        JS_FreeValue(ctx, cb);
+    } else {
+        xhr_fire_callbacks(ctx, xhr, 1);
+    }
     JS_RunGC(g_rt);
 }
 
