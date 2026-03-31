@@ -4739,7 +4739,10 @@ static JSValue js_element_canPlayType(JSContext *ctx, JSValueConst this_val,
     const char *type = JS_ToCString(ctx, argv[0]);
     if (!type) return JS_NewString(ctx, "");
     JSValue result = JS_NewString(ctx, "");
-    if (strstr(type, "ogg") || strstr(type, "vorbis") ||
+    /* Explicitly reject WebM/Opus - we don't support it */
+    if (strstr(type, "webm") || strstr(type, "opus")) {
+        /* return empty string = not supported */
+    } else if (strstr(type, "ogg") || strstr(type, "vorbis") ||
         strstr(type, "mp3") || strstr(type, "mpeg") ||
         strstr(type, "wav") || strstr(type, "aac")) {
         result = JS_NewString(ctx, "maybe");
@@ -4757,7 +4760,10 @@ static JSValue js_audio_canPlayType(JSContext *ctx, JSValueConst this_val,
 
     /* Return "probably" for formats we fully support */
     JSValue result = JS_NewString(ctx, "");
-    if (strstr(type, "ogg") || strstr(type, "vorbis")) {
+    /* Explicitly reject WebM/Opus - we don't support it */
+    if (strstr(type, "webm") || strstr(type, "opus")) {
+        /* return empty string = not supported */
+    } else if (strstr(type, "ogg") || strstr(type, "vorbis")) {
         result = JS_NewString(ctx, "probably");
     } else if (strstr(type, "mp3") || strstr(type, "mpeg")) {
         result = JS_NewString(ctx, "probably");
@@ -9055,15 +9061,23 @@ static JSValue js_audiocontext_decodeAudioData(JSContext *ctx, JSValueConst this
     }
 
     /* Detect format from magic bytes */
-    const char *ext = ".ogg";
-    if (byte_len >= 4 && bytes[0]=='O' && bytes[1]=='g' && bytes[2]=='g' && bytes[3]=='S')
+    const char *ext = NULL;
+    /* WebM: EBML header (0x1A45DFA3) - not supported, will fail decode */
+    if (byte_len >= 4 && bytes[0]==0x1A && bytes[1]==0x45 && bytes[2]==0xDF && bytes[3]==0xA3)
+        ext = ".webm";
+    /* OGG: "OggS" signature */
+    else if (byte_len >= 4 && bytes[0]=='O' && bytes[1]=='g' && bytes[2]=='g' && bytes[3]=='S')
         ext = ".ogg";
+    /* MP3: ID3 tag or frame sync */
     else if (byte_len >= 3 && bytes[0]==0x49 && bytes[1]==0x44 && bytes[2]==0x33)
         ext = ".mp3";
     else if (byte_len >= 2 && bytes[0]==0xFF && (bytes[1]&0xE0)==0xE0)
         ext = ".mp3";
+    /* WAV: "RIFF" header */
     else if (byte_len >= 4 && bytes[0]=='R' && bytes[1]=='I' && bytes[2]=='F' && bytes[3]=='F')
         ext = ".wav";
+    else
+        ext = ".unknown";
 
     /* Write to a temp file for the decoder */
     unsigned int hash = (unsigned int)byte_len;
