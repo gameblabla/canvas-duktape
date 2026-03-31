@@ -612,9 +612,9 @@ int main(int argc, char** argv) {
             snprintf(fps_text, sizeof(fps_text), "FPS: %d", fps);
             /* Draw FPS in top-left corner with white text, black outline */
             renderer.fill_text(renderer.get_main_texture(), fps_text, 2, 14,
-                              0, 0, 0, 255, 12, "left", "top", "monospace");
+                              0, 0, 0, 255, 12, TEXT_ALIGN_LEFT, TEXT_BASELINE_TOP, "monospace");
             renderer.fill_text(renderer.get_main_texture(), fps_text, 1, 13,
-                              255, 255, 255, 255, 12, "left", "top", "monospace");
+                              255, 255, 255, 255, 12, TEXT_ALIGN_LEFT, TEXT_BASELINE_TOP, "monospace");
         }
         
         /* Auto-screenshot for testing - verify rendering is working */

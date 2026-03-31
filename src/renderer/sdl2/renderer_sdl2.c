@@ -737,8 +737,8 @@ static void r_draw_canvas(void* target, void* src_tex,
 
 static void r_fill_text(void* target, const char* text, double x, double y,
                          uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                         int font_size, const char* align,
-                         const char* baseline, const char* font_family) {
+                         int font_size, TextAlign align,
+                         TextBaseline baseline, const char* font_family) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || !text || !text[0]) return;
     TTF_Font* font = get_font(font_family, font_size);
@@ -751,32 +751,50 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     if (!tt) return;
     int tw, th;
     SDL_QueryTexture(tt, NULL, NULL, &tw, &th);
+    
     int rx = (int)x;
-    if (align && (strcmp(align, "center") == 0)) rx -= tw / 2;
-    else if (align && (strcmp(align, "right")==0 || strcmp(align,"end")==0)) rx -= tw;
-    /* "left" and "start" (for LTR) use rx = x, no adjustment needed */
+    switch (align) {
+        case TEXT_ALIGN_CENTER:
+            rx -= tw / 2;
+            break;
+        case TEXT_ALIGN_RIGHT:
+        case TEXT_ALIGN_END:
+            rx -= tw;
+            break;
+        case TEXT_ALIGN_LEFT:
+        case TEXT_ALIGN_START:
+        default:
+            break;
+    }
+    
     /* SDL_TTF: ascent is positive, descent is negative.
      * Surface top pixel = baseline - ascent.
      * Baseline calculations to match HTML5 Canvas spec: */
     int ascent  = TTF_FontAscent(font);
     int descent = TTF_FontDescent(font); /* negative in SDL_TTF */
     int ry;
-    if (baseline && strcmp(baseline, "hanging") == 0) {
-        ry = (int)y;
-    } else if (baseline && strcmp(baseline, "top") == 0) {
-        /* For 'top', position text so the top of the em box is at y.
-         * We add a small offset to account for font metrics differences. */
-        ry = (int)y - 2;
-    } else if (baseline && strcmp(baseline, "middle") == 0) {
-        ry = (int)y - (ascent - descent) / 2; /* descent negative → ascent - descent = total height */
-    } else if (baseline && (strcmp(baseline, "bottom") == 0 || strcmp(baseline, "ideographic") == 0)) {
-        ry = (int)y + descent - ascent; /* descent negative: y - |descent| - ascent */
-    } else {
-        /* "alphabetic" (default) and anything else */
-        ry = (int)y - ascent;
+    
+    switch (baseline) {
+        case TEXT_BASELINE_HANGING:
+            ry = (int)y;
+            break;
+        case TEXT_BASELINE_TOP:
+            ry = (int)y - 2;
+            break;
+        case TEXT_BASELINE_MIDDLE:
+            ry = (int)y - (ascent - descent) / 2;
+            break;
+        case TEXT_BASELINE_BOTTOM:
+        case TEXT_BASELINE_IDEOGRAPHIC:
+            ry = (int)y + descent - ascent;
+            break;
+        case TEXT_BASELINE_ALPHABETIC:
+        default:
+            ry = (int)y - ascent;
+            break;
     }
+    
     SDL_SetRenderTarget(g_sdl_renderer, tex);
-    /* Apply clip rect for this texture */
     apply_clip_for_texture(tex);
     SDL_Rect dst = {rx, ry, tw, th};
     SDL_RenderCopy(g_sdl_renderer, tt, NULL, &dst);
@@ -787,8 +805,8 @@ static void r_fill_text(void* target, const char* text, double x, double y,
 
 static void r_stroke_text(void* target, const char* text, double x, double y,
                            uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                           int font_size, int lw, const char* align,
-                           const char* baseline, const char* font_family) {
+                           int font_size, int lw, TextAlign align,
+                           TextBaseline baseline, const char* font_family) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || !text || !text[0]) return;
     TTF_Font* font = get_font(font_family, font_size);
@@ -801,28 +819,48 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
     if (!tt) return;
     int tw, th;
     SDL_QueryTexture(tt, NULL, NULL, &tw, &th);
+    
     int rx = (int)x;
-    if (align && (strcmp(align, "center") == 0)) rx -= tw / 2;
-    else if (align && (strcmp(align, "right")==0 || strcmp(align,"end")==0)) rx -= tw;
-    /* Apply same baseline calculations as r_fill_text */
-    int ascent  = TTF_FontAscent(font);
-    int descent = TTF_FontDescent(font); /* negative in SDL_TTF */
-    int ry;
-    if (baseline && strcmp(baseline, "hanging") == 0) {
-        ry = (int)y;
-    } else if (baseline && strcmp(baseline, "top") == 0) {
-        ry = (int)y - 2;
-    } else if (baseline && strcmp(baseline, "middle") == 0) {
-        ry = (int)y - (ascent - descent) / 2;
-    } else if (baseline && (strcmp(baseline, "bottom") == 0 || strcmp(baseline, "ideographic") == 0)) {
-        ry = (int)y + descent - ascent;
-    } else {
-        /* "alphabetic" (default) */
-        ry = (int)y - ascent;
+    switch (align) {
+        case TEXT_ALIGN_CENTER:
+            rx -= tw / 2;
+            break;
+        case TEXT_ALIGN_RIGHT:
+        case TEXT_ALIGN_END:
+            rx -= tw;
+            break;
+        case TEXT_ALIGN_LEFT:
+        case TEXT_ALIGN_START:
+        default:
+            break;
     }
+    
+    int ascent  = TTF_FontAscent(font);
+    int descent = TTF_FontDescent(font);
+    int ry;
+    
+    switch (baseline) {
+        case TEXT_BASELINE_HANGING:
+            ry = (int)y;
+            break;
+        case TEXT_BASELINE_TOP:
+            ry = (int)y - 2;
+            break;
+        case TEXT_BASELINE_MIDDLE:
+            ry = (int)y - (ascent - descent) / 2;
+            break;
+        case TEXT_BASELINE_BOTTOM:
+        case TEXT_BASELINE_IDEOGRAPHIC:
+            ry = (int)y + descent - ascent;
+            break;
+        case TEXT_BASELINE_ALPHABETIC:
+        default:
+            ry = (int)y - ascent;
+            break;
+    }
+    
     if (lw < 1) lw = 1;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
-    /* Apply clip rect for this texture */
     apply_clip_for_texture(tex);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
     for (int ox = -lw; ox <= lw; ox++) {

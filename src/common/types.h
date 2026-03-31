@@ -37,6 +37,25 @@ typedef struct {
  * Implemented by: src/renderer/sdl2/renderer_sdl2.c
  * Used by:        src/jscore/duktape/jscore_duk.c  and  src/main.c
  * ============================================================================ */
+
+/* Text baseline/align enums - must match jscore_qjs.c */
+typedef enum {
+    TEXT_BASELINE_ALPHABETIC = 0,
+    TEXT_BASELINE_TOP,
+    TEXT_BASELINE_HANGING,
+    TEXT_BASELINE_MIDDLE,
+    TEXT_BASELINE_IDEOGRAPHIC,
+    TEXT_BASELINE_BOTTOM
+} TextBaseline;
+
+typedef enum {
+    TEXT_ALIGN_LEFT = 0,
+    TEXT_ALIGN_CENTER,
+    TEXT_ALIGN_RIGHT,
+    TEXT_ALIGN_START,
+    TEXT_ALIGN_END
+} TextAlign;
+
 typedef struct {
     /* Lifecycle */
     int    (*init)(int w, int h, const char* title);
@@ -81,12 +100,12 @@ typedef struct {
     /* Text */
     void   (*fill_text)(void* target, const char* text, double x, double y,
                         uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                        int font_size, const char* align, const char* baseline,
+                        int font_size, TextAlign align, TextBaseline baseline,
                         const char* font_family);
     void   (*stroke_text)(void* target, const char* text, double x, double y,
                           uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                          int font_size, int lw, const char* align,
-                          const char* baseline, const char* font_family);
+                          int font_size, int lw, TextAlign align,
+                          TextBaseline baseline, const char* font_family);
     int    (*measure_text)(const char* text, int font_size, const char* font_family);
     /* New: returns width, sets *ascent and *descent via out params */
     void   (*measure_text_ex)(const char* text, int font_size, const char* font_family,

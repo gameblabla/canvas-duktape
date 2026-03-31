@@ -84,8 +84,13 @@ typedef struct {
     char font[256];
     int font_size;
     char font_family[64];
-    char text_align[32];
-    char text_baseline[32];
+    
+    /* Text settings - stored as precomputed enum for fast lookup */
+    TextAlign text_align_enum;
+    TextBaseline text_baseline_enum;
+    char text_align[32];      /* keep string for JS getter */
+    char text_baseline[32];   /* keep string for JS getter */
+    
     int canvas_id;  /* ID of canvas we're drawing to (0 = main) */
 
     /* Shadow */
@@ -144,6 +149,8 @@ typedef struct {
         char font[256];
         int font_size;
         char font_family[64];
+        TextAlign text_align_enum;
+        TextBaseline text_baseline_enum;
         char text_align[32];
         char text_baseline[32];
         int canvas_id;
@@ -2054,6 +2061,19 @@ static JSValue js_ctx2d_set_textAlign(JSContext *ctx, JSValueConst this_val, JSV
     if (align) {
         strncpy(g_ctx2d.text_align, align, sizeof(g_ctx2d.text_align) - 1);
         g_ctx2d.text_align[sizeof(g_ctx2d.text_align) - 1] = '\0';
+        
+        /* Precompute enum for fast switch lookup during rendering */
+        if (strcmp(align, "center") == 0) {
+            g_ctx2d.text_align_enum = TEXT_ALIGN_CENTER;
+        } else if (strcmp(align, "right") == 0) {
+            g_ctx2d.text_align_enum = TEXT_ALIGN_RIGHT;
+        } else if (strcmp(align, "end") == 0) {
+            g_ctx2d.text_align_enum = TEXT_ALIGN_END;
+        } else if (strcmp(align, "start") == 0) {
+            g_ctx2d.text_align_enum = TEXT_ALIGN_START;
+        } else {
+            g_ctx2d.text_align_enum = TEXT_ALIGN_LEFT;  /* default */
+        }
         JS_FreeCString(ctx, align);
     }
     return JS_UNDEFINED;
@@ -2070,6 +2090,21 @@ static JSValue js_ctx2d_set_textBaseline(JSContext *ctx, JSValueConst this_val, 
     if (bl) {
         strncpy(g_ctx2d.text_baseline, bl, sizeof(g_ctx2d.text_baseline) - 1);
         g_ctx2d.text_baseline[sizeof(g_ctx2d.text_baseline) - 1] = '\0';
+        
+        /* Precompute enum for fast switch lookup during rendering */
+        if (strcmp(bl, "top") == 0) {
+            g_ctx2d.text_baseline_enum = TEXT_BASELINE_TOP;
+        } else if (strcmp(bl, "hanging") == 0) {
+            g_ctx2d.text_baseline_enum = TEXT_BASELINE_HANGING;
+        } else if (strcmp(bl, "middle") == 0) {
+            g_ctx2d.text_baseline_enum = TEXT_BASELINE_MIDDLE;
+        } else if (strcmp(bl, "ideographic") == 0) {
+            g_ctx2d.text_baseline_enum = TEXT_BASELINE_IDEOGRAPHIC;
+        } else if (strcmp(bl, "bottom") == 0) {
+            g_ctx2d.text_baseline_enum = TEXT_BASELINE_BOTTOM;
+        } else {
+            g_ctx2d.text_baseline_enum = TEXT_BASELINE_ALPHABETIC;  /* default */
+        }
         JS_FreeCString(ctx, bl);
     }
     return JS_UNDEFINED;
@@ -3315,17 +3350,14 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
     /* Apply transform */
     double tx, ty;
     transform_point(&tx, &ty, g_ctx2d.transform, x, y);
-    
-    /* Handle RTL direction */
-    const char *effective_align = g_ctx2d.text_align;
-    char rtl_align[32];
+
+    /* Handle RTL direction - adjust align enum accordingly */
+    TextAlign effective_align = g_ctx2d.text_align_enum;
     if (strcmp(g_ctx2d.direction, "rtl") == 0) {
-        if (strcmp(g_ctx2d.text_align, "start") == 0) {
-            strncpy(rtl_align, "right", sizeof(rtl_align)-1);
-            effective_align = rtl_align;
-        } else if (strcmp(g_ctx2d.text_align, "end") == 0) {
-            strncpy(rtl_align, "left", sizeof(rtl_align)-1);
-            effective_align = rtl_align;
+        if (g_ctx2d.text_align_enum == TEXT_ALIGN_START) {
+            effective_align = TEXT_ALIGN_RIGHT;
+        } else if (g_ctx2d.text_align_enum == TEXT_ALIGN_END) {
+            effective_align = TEXT_ALIGN_LEFT;
         }
     }
 
@@ -3340,13 +3372,13 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
                               tx + g_ctx2d.shadow_offset_x,
                               ty + g_ctx2d.shadow_offset_y,
                               sr, sg, sb, sa,
-                              g_ctx2d.font_size, effective_align, g_ctx2d.text_baseline,
+                              g_ctx2d.font_size, effective_align, g_ctx2d.text_baseline_enum,
                               g_ctx2d.font_family);
     }
 
     if (g_renderer->fill_text) {
         g_renderer->fill_text(target, text, tx, ty, r, g, b, a,
-                              g_ctx2d.font_size, effective_align, g_ctx2d.text_baseline,
+                              g_ctx2d.font_size, effective_align, g_ctx2d.text_baseline_enum,
                               g_ctx2d.font_family);
     }
 
@@ -3383,7 +3415,7 @@ static JSValue js_ctx2d_strokeText(JSContext *ctx, JSValueConst this_val,
     if (g_renderer->stroke_text) {
         g_renderer->stroke_text(target, text, tx, ty, r, g, b, a,
                                 g_ctx2d.font_size, g_ctx2d.line_width,
-                                g_ctx2d.text_align, g_ctx2d.text_baseline,
+                                g_ctx2d.text_align_enum, g_ctx2d.text_baseline_enum,
                                 g_ctx2d.font_family);
     }
 
