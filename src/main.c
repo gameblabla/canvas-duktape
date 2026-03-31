@@ -596,7 +596,6 @@ int main(int argc, char** argv) {
         }
 
         jscore.check_timers();
-        renderer.present();
 
         /* Calculate FPS every second */
         double current_time = renderer.get_time_ms();
@@ -648,7 +647,6 @@ int main(int argc, char** argv) {
         }
 
         renderer.present();
-        renderer.sleep_ms(10);
     }
 
     /* --- Cleanup --- */
