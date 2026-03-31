@@ -8759,8 +8759,20 @@ static JSValue js_audiocontext_createBufferSource(JSContext *ctx, JSValueConst t
     (void)this_val; (void)argc;
     JSValue source = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, source, "buffer", JS_NULL);
-    JS_SetPropertyStr(ctx, source, "playbackRate", JS_NewFloat64(ctx, 1.0));
+    /* playbackRate is an AudioParam (object with .value), not a plain number */
+    JSValue pb_param = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, pb_param, "value", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, pb_param, "defaultValue", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, pb_param, "setValueAtTime",
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, source, "playbackRate", pb_param);
+    /* detune is also an AudioParam */
+    JSValue dt_param = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, dt_param, "value", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, source, "detune", dt_param);
     JS_SetPropertyStr(ctx, source, "loop", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, source, "loopStart", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, source, "loopEnd", JS_NewFloat64(ctx, 0.0));
     JS_SetPropertyStr(ctx, source, "connect", JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
     JS_SetPropertyStr(ctx, source, "disconnect", JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
     JS_SetPropertyStr(ctx, source, "start", JS_NewCFunction(ctx, js_audiocontext_source_start, "start", 1));
