@@ -387,6 +387,7 @@ typedef struct {
 static JSValue js_noop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_make_canvas_object(JSContext *ctx, int id);
 static int point_in_path_evenodd(double x, double y, const double *pts, int count);
+static int point_in_path_nonzero(double x, double y, const double *pts, int count);
 static JSValue js_make_element_stub(JSContext *ctx);
 
 /* jQuery support forward declarations */
@@ -1756,7 +1757,7 @@ static JSValue js_ctx2d_get_shadowColor(JSContext *ctx, JSValueConst this_val) {
 static JSValue js_ctx2d_set_shadowBlur(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
     CTX_SWITCH(ctx, this_val);
     double v = 0; JS_ToFloat64(ctx, &v, val);
-    g_ctx2d.shadow_blur = (int)v;
+    if (v >= 0) g_ctx2d.shadow_blur = (int)v;  /* spec: negative values are ignored */
     return JS_UNDEFINED;
 }
 static JSValue js_ctx2d_get_shadowBlur(JSContext *ctx, JSValueConst this_val) {
@@ -2815,8 +2816,9 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
                 for (int row = 0; row < ph; row++) {
                     for (int col = 0; col < pw; col++) {
                         double fpx = x0 + col + 0.5, fpy = y0 + row + 0.5;
-                        int inside = point_in_path_evenodd(fpx, fpy,
-                                         g_ctx2d.soft_clip_pts, g_ctx2d.soft_clip_count);
+                        int inside = (g_ctx2d.soft_clip_rule == 1)
+                            ? point_in_path_evenodd(fpx, fpy, g_ctx2d.soft_clip_pts, g_ctx2d.soft_clip_count)
+                            : point_in_path_nonzero(fpx, fpy, g_ctx2d.soft_clip_pts, g_ctx2d.soft_clip_count);
                         if (inside) {
                             int idx = (row * pw + col) * 4;
                             pixels[idx+0] = r;
@@ -3426,10 +3428,15 @@ static JSValue js_ctx2d_clip(JSContext *ctx, JSValueConst this_val,
     if (g_renderer->set_clip_rect)
         g_renderer->set_clip_rect(target, cx, cy, cw, ch);
 
-    /* Store soft clip path for evenodd rule */
-    if (clip_rule == 1) {
-        free(g_ctx2d.soft_clip_pts);
-        int n = g_ctx2d.path_count;
+    /* Always store soft clip path for per-pixel masking.
+     * The hardware clip rect (set above) is only the bounding box; for non-rectangular
+     * paths (e.g. triangles) we need per-pixel testing to exclude corners of the bbox. */
+    free(g_ctx2d.soft_clip_pts);
+    g_ctx2d.soft_clip_pts = NULL;
+    g_ctx2d.soft_clip_count = 0;
+    g_ctx2d.has_soft_clip = 0;
+    int n = g_ctx2d.path_count;
+    if (n >= 3) {
         g_ctx2d.soft_clip_pts = malloc(n * 2 * sizeof(double));
         if (g_ctx2d.soft_clip_pts) {
             for (int i = 0; i < n; i++) {
@@ -3438,7 +3445,7 @@ static JSValue js_ctx2d_clip(JSContext *ctx, JSValueConst this_val,
             }
             g_ctx2d.soft_clip_count = n;
             g_ctx2d.has_soft_clip = 1;
-            g_ctx2d.soft_clip_rule = 1; /* evenodd */
+            g_ctx2d.soft_clip_rule = clip_rule; /* 0=nonzero, 1=evenodd */
         }
     }
     return JS_UNDEFINED;
@@ -3454,6 +3461,21 @@ static int point_in_path_evenodd(double x, double y, const double *pts, int coun
             inside = !inside;
     }
     return inside;
+}
+
+/* Test if point (x,y) is inside a polygon using nonzero winding rule */
+static int point_in_path_nonzero(double x, double y, const double *pts, int count) {
+    int winding = 0;
+    for (int i = 0, j = count-1; i < count; j = i++) {
+        double xi = pts[i*2], yi = pts[i*2+1];
+        double xj = pts[j*2], yj = pts[j*2+1];
+        if (yj <= y) {
+            if (yi > y && (xi-xj)*(y-yj) - (x-xj)*(yi-yj) > 0) winding++;
+        } else {
+            if (yi <= y && (xi-xj)*(y-yj) - (x-xj)*(yi-yj) < 0) winding--;
+        }
+    }
+    return winding != 0;
 }
 
 static JSValue js_ctx2d_isPointInPath(JSContext *ctx, JSValueConst this_val,
