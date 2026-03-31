@@ -1523,6 +1523,11 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                     src_clean[sizeof(src_clean) - 1] = '\0';
                     char *qs = strchr(src_clean, '?');
                     if (qs) *qs = '\0';
+                    /* Trim trailing whitespace (some game JSON has spaces in src paths) */
+                    { size_t slen = strlen(src_clean);
+                      while (slen > 0 && (src_clean[slen-1] == ' ' || src_clean[slen-1] == '\t' ||
+                                          src_clean[slen-1] == '\r' || src_clean[slen-1] == '\n'))
+                          src_clean[--slen] = '\0'; }
                     /* Resolve path relative to HTML file directory */
                     char full_path[1024];
                     if (src_clean[0] == '/' || g_jscore_base_dir[0] == '\0') {
