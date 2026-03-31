@@ -574,7 +574,7 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
                 double ex0=px[e], ex1=px[next];
                 if (ey0==ey1) continue;
                 double emi=fmin(ey0,ey1), ema=fmax(ey0,ey1);
-                if ((double)scan_y > emi && (double)scan_y <= ema) {
+                if ((double)scan_y >= emi && (double)scan_y < ema) {
                     double t = ((double)scan_y - ey0) / (ey1 - ey0);
                     ixs[cnt++] = ex0 + t*(ex1-ex0);
                 }
@@ -704,16 +704,21 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     int tw, th;
     SDL_QueryTexture(tt, NULL, NULL, &tw, &th);
     int rx = (int)x;
-    if (align && strcmp(align, "center") == 0) rx -= tw / 2;
+    if (align && (strcmp(align, "center") == 0)) rx -= tw / 2;
     else if (align && (strcmp(align, "right")==0 || strcmp(align,"end")==0)) rx -= tw;
+    /* "left" and "start" (for LTR) use rx = x, no adjustment needed */
     /* SDL_TTF: ascent is positive, descent is negative.
      * Surface top pixel = baseline - ascent.
      * Baseline calculations to match HTML5 Canvas spec: */
     int ascent  = TTF_FontAscent(font);
     int descent = TTF_FontDescent(font); /* negative in SDL_TTF */
     int ry;
-    if (baseline && (strcmp(baseline, "top") == 0 || strcmp(baseline, "hanging") == 0)) {
+    if (baseline && strcmp(baseline, "hanging") == 0) {
         ry = (int)y;
+    } else if (baseline && strcmp(baseline, "top") == 0) {
+        /* For 'top', position text so the top of the em box is at y.
+         * We add a small offset to account for font metrics differences. */
+        ry = (int)y - 2;
     } else if (baseline && strcmp(baseline, "middle") == 0) {
         ry = (int)y - (ascent - descent) / 2; /* descent negative → ascent - descent = total height */
     } else if (baseline && (strcmp(baseline, "bottom") == 0 || strcmp(baseline, "ideographic") == 0)) {
