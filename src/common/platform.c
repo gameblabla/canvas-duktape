@@ -44,36 +44,40 @@ const char* platform_getenv(const char *name) {
 void platform_init_storage_path(const char *window_title) {
     char safe_title[256] = {0};
     const char *base_dir = platform_getenv("CANVAS_STORAGE_DIR");
-    
+    char dir_path[1024];
+
     /* Create safe filename from window title */
     if (window_title && window_title[0]) {
         int j = 0;
         for (int i = 0; window_title[i] && j < (int)sizeof(safe_title) - 1; i++) {
             char c = window_title[i];
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || 
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                 (c >= '0' && c <= '9') || c == '_' || c == '-' || c == ' ') {
                 safe_title[j++] = (c == ' ') ? '_' : c;
             }
         }
         safe_title[j] = '\0';
     }
-    
+
     /* Fallback to filename if no title */
     if (safe_title[0] == '\0') {
         strncpy(safe_title, "default", sizeof(safe_title) - 1);
     }
-    
+
     /* Build path: $HOME/.local/html5web/<safe_title>/localStorage.json */
     if (base_dir && base_dir[0]) {
-        snprintf(g_storage_path, sizeof(g_storage_path), "%s/%s/localStorage.json", 
+        snprintf(g_storage_path, sizeof(g_storage_path), "%s/%s/localStorage.json",
                  base_dir, safe_title);
+        snprintf(dir_path, sizeof(dir_path), "%s/%s", base_dir, safe_title);
     } else {
         snprintf(g_storage_path, sizeof(g_storage_path), "%s/.local/html5web/%s/localStorage.json",
                  platform_get_home_dir(), safe_title);
+        snprintf(dir_path, sizeof(dir_path), "%s/.local/html5web/%s",
+                 platform_get_home_dir(), safe_title);
     }
-    
-    /* Create directory recursively */
-    platform_mkdir_recursive(g_storage_path);
+
+    /* Create directory recursively (NOT the file path!) */
+    platform_mkdir_recursive(dir_path);
 }
 
 const char* platform_get_storage_path(void) {

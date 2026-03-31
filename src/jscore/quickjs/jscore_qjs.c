@@ -10079,16 +10079,39 @@ static void jscore_qjs_dispatch_key(int keycode, int is_down) {
     JSValue target = JS_NewObject(g_ctx);
     JS_SetPropertyStr(g_ctx, target, "tagName", JS_NewString(g_ctx, "BODY"));
 
-    /* Build event object matching what ig.Input.keydown/keyup expects */
+    /* Map keycode to key string for GameMaker */
+    const char *key_str = "";
+    if (keycode >= 65 && keycode <= 90) {
+        /* A-Z */
+        static char key_buf[2];
+        key_buf[0] = is_down ? (char)keycode : 0;
+        key_buf[1] = '\0';
+        key_str = key_buf;
+    } else if (keycode >= 48 && keycode <= 57) {
+        /* 0-9 */
+        static char key_buf[2];
+        key_buf[0] = is_down ? (char)keycode : 0;
+        key_buf[1] = '\0';
+        key_str = key_buf;
+    } else if (keycode == 37) key_str = "ArrowLeft";
+    else if (keycode == 38) key_str = "ArrowUp";
+    else if (keycode == 39) key_str = "ArrowRight";
+    else if (keycode == 40) key_str = "ArrowDown";
+    else if (keycode == 13) key_str = "Enter";
+    else if (keycode == 8) key_str = "Backspace";
+    else if (keycode == 32) key_str = " ";
+
+    /* Build event object matching what GameMaker yyKeyDownCallback expects */
     JSValue event = JS_NewObject(g_ctx);
     JS_SetPropertyStr(g_ctx, event, "type",             JS_NewString(g_ctx, evtype));
     JS_SetPropertyStr(g_ctx, event, "keyCode",          JS_NewInt32(g_ctx, keycode));
     JS_SetPropertyStr(g_ctx, event, "which",            JS_NewInt32(g_ctx, keycode));
-    JS_SetPropertyStr(g_ctx, event, "charCode",         JS_NewInt32(g_ctx, keycode));
+    JS_SetPropertyStr(g_ctx, event, "charCode",         JS_NewInt32(g_ctx, 0));
     JS_SetPropertyStr(g_ctx, event, "shiftKey",         JS_NewBool(g_ctx, 0));
     JS_SetPropertyStr(g_ctx, event, "ctrlKey",          JS_NewBool(g_ctx, 0));
     JS_SetPropertyStr(g_ctx, event, "altKey",           JS_NewBool(g_ctx, 0));
     JS_SetPropertyStr(g_ctx, event, "repeat",           JS_NewBool(g_ctx, 0));
+    JS_SetPropertyStr(g_ctx, event, "key",              JS_NewString(g_ctx, key_str));
     JS_SetPropertyStr(g_ctx, event, "target",           target);
     JS_SetPropertyStr(g_ctx, event, "preventDefault",   JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
     JS_SetPropertyStr(g_ctx, event, "stopPropagation",  JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));

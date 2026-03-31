@@ -493,11 +493,16 @@ int main(int argc, char** argv) {
     int screenshot_taken = 0;
     int enter_pressed = 0;
     int mouse_clicked = 0;
+    int arrow_keys_sent = 0;
+    int arrow_key_state = 0;  /* State machine for arrow key sequence */
+    int arrow_key_hold_start = 0;
     const int SCREENSHOT_FRAME = 30;  /* Take screenshot after N frames */
     const int SCREENSHOT_FRAME2 = 100;  /* Take another screenshot later */
     const int SCREENSHOT_FRAME3 = 300;  /* Take a third screenshot for slow-loading games */
-    const int ENTER_FRAME = 5;  /* Simulate ENTER keypress after N frames */
-    const int CLICK_FRAME = 10;  /* Simulate mouse click after N frames */
+    const int ENTER_FRAME = 20;  /* Simulate ENTER keypress after N frames (delayed for game init) */
+    const int CLICK_FRAME = 40;  /* Simulate mouse click after N frames */
+    const int ARROW_KEY_FRAME = 60;  /* Simulate arrow keys for GameMaker games (after init) */
+    const int ARROW_KEY_HOLD_FRAMES = 3;  /* Hold each arrow key for N frames */
 
     /* FPS counter variables */
     int fps_frame_count = 0;
@@ -530,7 +535,7 @@ int main(int argc, char** argv) {
         fps_frame_count++;
 
         /* Simulate ENTER keypress to start tests/games that require user input */
-        if (frame_count == ENTER_FRAME && !enter_pressed) {
+        if (frame_count >= ENTER_FRAME && !enter_pressed) {
             jscore.dispatch_key(13, 1);  /* VK_RETURN = 13 */
             jscore.dispatch_key(13, 0);
             enter_pressed = 1;
@@ -538,16 +543,56 @@ int main(int argc, char** argv) {
         }
 
         /* Simulate mouse click for games that require click to start */
-        if (frame_count == CLICK_FRAME && !mouse_clicked) {
+        if (frame_count >= CLICK_FRAME && !mouse_clicked) {
             jscore.dispatch_mouse(INPUT_EVENT_MOUSEDOWN, 100, 100, 0);
             jscore.dispatch_mouse(INPUT_EVENT_MOUSEUP, 100, 100, 0);
             mouse_clicked = 1;
             fprintf(stderr, "[main] Simulated mouse click at (100, 100)\n");
         }
 
+        /* Simulate arrow keys for GameMaker games (speed/time adjustment) */
+        /* Hold keys for multiple frames so game registers them as pressed */
+        /* State machine: each state holds a key for ARROW_KEY_HOLD_FRAMES */
+        if (frame_count >= ARROW_KEY_FRAME && arrow_key_state < 10) {
+            if (arrow_key_state == 0) {
+                /* State 0: Press RIGHT */
+                jscore.dispatch_key(39, 1);
+                arrow_key_hold_start = frame_count;
+                arrow_key_state = 1;
+            } else if (arrow_key_state == 1 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
+                /* State 1: Release RIGHT, press RIGHT again */
+                jscore.dispatch_key(39, 0);
+                jscore.dispatch_key(39, 1);
+                arrow_key_hold_start = frame_count;
+                arrow_key_state = 2;
+            } else if (arrow_key_state == 2 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
+                /* State 2: Release RIGHT, press RIGHT again (3rd time) */
+                jscore.dispatch_key(39, 0);
+                jscore.dispatch_key(39, 1);
+                arrow_key_hold_start = frame_count;
+                arrow_key_state = 3;
+            } else if (arrow_key_state == 3 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
+                /* State 3: Release RIGHT, press DOWN */
+                jscore.dispatch_key(39, 0);
+                jscore.dispatch_key(40, 1);
+                arrow_key_hold_start = frame_count;
+                arrow_key_state = 4;
+            } else if (arrow_key_state == 4 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
+                /* State 4: Release DOWN, press DOWN again */
+                jscore.dispatch_key(40, 0);
+                jscore.dispatch_key(40, 1);
+                arrow_key_hold_start = frame_count;
+                arrow_key_state = 5;
+            } else if (arrow_key_state == 5 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
+                /* State 5: Release DOWN - done */
+                jscore.dispatch_key(40, 0);
+                arrow_key_state = 10;  /* Mark as complete */
+                fprintf(stderr, "[main] Arrow key sequence complete (RIGHT x3, DOWN x2)\n");
+            }
+        }
+
         jscore.check_timers();
         renderer.present();
-        frame_count++;
 
         /* Calculate FPS every second */
         double current_time = renderer.get_time_ms();
