@@ -5229,18 +5229,18 @@ static JSValue js_setInterval(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
-    if (argc < 2 || !JS_IsFunction(ctx, argv[0])) {
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
         return JS_NewInt32(ctx, 0);
     }
-    
+
     int slot = find_free_timer_slot();
     if (slot < 0) {
         return JS_NewInt32(ctx, 0);
     }
-    
-    int ms = 16;
+
+    int ms = 0;
     if (argc >= 2) JS_ToInt32(ctx, &ms, argv[1]);
-    if (ms < 1) ms = 16;
+    if (ms < 0) ms = 0;
     
     int id = g_timer_next_id++;
     g_timers[slot].id = id;
@@ -7946,11 +7946,25 @@ void jscore_qjs_register_element(const char *id, const char *innerHTML) {
     g_element_registry_count++;
 }
 
+static void xhr_log_exception(JSContext *ctx, const char *where) {
+    JSValue exc = JS_GetException(ctx);
+    const char *msg = JS_ToCString(ctx, exc);
+    JSValue stack = JS_GetPropertyStr(ctx, exc, "stack");
+    const char *stk = JS_IsUndefined(stack) ? NULL : JS_ToCString(ctx, stack);
+    fprintf(stderr, "[xhr] exception in %s: %s%s%s\n", where,
+            msg ? msg : "?",
+            stk ? "\n  " : "", stk ? stk : "");
+    if (msg) JS_FreeCString(ctx, msg);
+    if (stk) JS_FreeCString(ctx, stk);
+    JS_FreeValue(ctx, stack);
+    JS_FreeValue(ctx, exc);
+}
+
 static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int success) {
     JSValue cb = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
     if (JS_IsFunction(ctx, cb)) {
         JSValue ret = JS_Call(ctx, cb, this_val, 0, NULL);
-        if (JS_IsException(ret)) JS_GetException(ctx);
+        if (JS_IsException(ret)) xhr_log_exception(ctx, "onreadystatechange");
         JS_FreeValue(ctx, ret);
     }
     JS_FreeValue(ctx, cb);
@@ -7966,7 +7980,7 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
              * (window), which has a removeEventListener no-op stub. Passing xhr would
              * cause TypeError since XHR objects don't carry removeEventListener. */
             JSValue ret = JS_Call(ctx, cb, JS_UNDEFINED, 1, &ev);
-            if (JS_IsException(ret)) JS_GetException(ctx);
+            if (JS_IsException(ret)) xhr_log_exception(ctx, "onload");
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, ev);
         }
@@ -7979,7 +7993,7 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
             JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
             JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "error"));
             JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
-            if (JS_IsException(ret)) JS_GetException(ctx);
+            if (JS_IsException(ret)) xhr_log_exception(ctx, "onerror");
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, ev);
         }
