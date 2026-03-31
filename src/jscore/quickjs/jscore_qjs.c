@@ -8007,6 +8007,35 @@ static JSValue xhr_deferred_success_cb(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* Deferred wrapper: fires xhr_fire_callbacks(ctx, data[0], 0) asynchronously.
+ * Used so that async XHR error callbacks (onerror) fire on the next tick,
+ * matching browser behaviour where onerror is always asynchronous. */
+static JSValue xhr_deferred_error_cb(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv,
+                                      int magic, JSValue *data) {
+    (void)this_val; (void)argc; (void)argv; (void)magic;
+    xhr_fire_callbacks(ctx, data[0], 0);
+    return JS_UNDEFINED;
+}
+
+/* Fire or defer the error path depending on whether the XHR is async.
+ * Async XHR: onerror must fire on the next tick (browser spec).
+ * Sync XHR: fire immediately. */
+static void xhr_fire_or_defer_error(JSContext *ctx, JSValueConst xhr) {
+    JSValue async_v = JS_GetPropertyStr(ctx, xhr, "_async");
+    int is_async = JS_ToBool(ctx, async_v);
+    JS_FreeValue(ctx, async_v);
+    if (is_async) {
+        JSValue xhr_ref = JS_DupValue(ctx, xhr);
+        JSValue cb = JS_NewCFunctionData(ctx, xhr_deferred_error_cb, 0, 0, 1, &xhr_ref);
+        JS_FreeValue(ctx, xhr_ref);
+        schedule_deferred_call(ctx, cb);
+        JS_FreeValue(ctx, cb);
+    } else {
+        xhr_fire_callbacks(ctx, xhr, 0);
+    }
+}
+
 /* Shared completion helper: sets readyState/status, responseText, responseXML,
    stores content-type header, fires onload + onreadystatechange */
 static void xhr_complete_success(JSContext *ctx, JSValueConst xhr,
@@ -8116,7 +8145,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
             JS_FreeCString(ctx, url);
             JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
             JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 400));
-            xhr_fire_callbacks(ctx, this_val, 0);
+            xhr_fire_or_defer_error(ctx, this_val);
             return JS_UNDEFINED;
         }
         /* Parse header for MIME and base64 flag */
@@ -8187,10 +8216,10 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
             JS_FreeCString(ctx, url);
             JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
             JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 404));
-            xhr_fire_callbacks(ctx, this_val, 0);
+            xhr_fire_or_defer_error(ctx, this_val);
             return JS_UNDEFINED;
         }
-        
+
         /* Return blob data */
         xhr_complete_success(ctx, this_val, (const char *)blob->data, blob->size,
                              0, 0, blob->type ? blob->type : "application/octet-stream");
@@ -8204,7 +8233,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
         JS_FreeCString(ctx, url);
         JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
         JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 0));
-        xhr_fire_callbacks(ctx, this_val, 0);
+        xhr_fire_or_defer_error(ctx, this_val);
         return JS_UNDEFINED;
     }
 
@@ -8232,10 +8261,11 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     if (!fp) {
         fprintf(stderr, "[xhr] file not found: %s (tried from base_dir=%s)\n", url, g_jscore_base_dir);
         JS_FreeCString(ctx, url);
-        JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
+        /* Browsers treat HTTP 404 as a successful XHR completion (onload fires, not onerror).
+         * We match that: complete with empty body, then override status to 404. */
+        xhr_complete_success(ctx, this_val, "", 0, is_arraybuffer, is_blob, NULL);
         JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 404));
         JS_SetPropertyStr(ctx, this_val, "statusText", JS_NewString(ctx, "Not Found"));
-        xhr_fire_callbacks(ctx, this_val, 0);
         return JS_UNDEFINED;
     }
 

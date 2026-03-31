@@ -509,6 +509,8 @@ int main(int argc, char** argv) {
             }
         }
 
+        frame_count++;
+
         /* Simulate ENTER keypress to start tests/games that require user input */
         if (frame_count == ENTER_FRAME && !enter_pressed) {
             jscore.dispatch_key(13, 1);  /* VK_RETURN = 13 */
@@ -546,7 +548,7 @@ int main(int argc, char** argv) {
             char screenshot_path[512];
             snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_frame_%d.bmp", frame_count);
             if (renderer.screenshot(screenshot_path) == 0) {
-                fprintf(stderr, "[screenshot] Saved %s (after present)\n", screenshot_path);
+                fprintf(stderr, "[screenshot] Saved %s (frame %d)\n", screenshot_path, frame_count);
             }
             screenshot_taken = 2;
         }
@@ -554,11 +556,12 @@ int main(int argc, char** argv) {
             char screenshot_path[512];
             snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_frame_%d.bmp", frame_count);
             if (renderer.screenshot(screenshot_path) == 0) {
-                fprintf(stderr, "[screenshot] Saved %s (late)\n", screenshot_path);
+                fprintf(stderr, "[screenshot] Saved %s (late, frame %d)\n", screenshot_path, frame_count);
             }
             screenshot_taken = 3;
         }
-        
+
+        renderer.present();
         renderer.sleep_ms(10);
     }
 
