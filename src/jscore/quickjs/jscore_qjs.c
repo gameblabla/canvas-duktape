@@ -6846,6 +6846,14 @@ static int g_keyup_count = 0;
 static JSValue g_load_listeners[16];
 static int g_load_listener_count = 0;
 
+/* Window mouse listener storage for Hammer.js */
+static JSValue g_window_mousedown_listeners[16];
+static JSValue g_window_mousemove_listeners[16];
+static JSValue g_window_mouseup_listeners[16];
+static int g_window_mousedown_count = 0;
+static int g_window_mousemove_count = 0;
+static int g_window_mouseup_count = 0;
+
 /* Image prototype - used by constructor */
 JSValue g_image_proto = JS_UNDEFINED;
 
@@ -6871,6 +6879,18 @@ static JSValue js_window_addEventListener(JSContext *ctx, JSValueConst this_val,
         /* Store load listener in global array */
         if (g_load_listener_count < 16) {
             g_load_listeners[g_load_listener_count++] = JS_DupValue(ctx, listener);
+        }
+    } else if (strcmp(event, "mousedown") == 0) {
+        if (g_window_mousedown_count < 16) {
+            g_window_mousedown_listeners[g_window_mousedown_count++] = JS_DupValue(ctx, listener);
+        }
+    } else if (strcmp(event, "mousemove") == 0) {
+        if (g_window_mousemove_count < 16) {
+            g_window_mousemove_listeners[g_window_mousemove_count++] = JS_DupValue(ctx, listener);
+        }
+    } else if (strcmp(event, "mouseup") == 0) {
+        if (g_window_mouseup_count < 16) {
+            g_window_mouseup_listeners[g_window_mouseup_count++] = JS_DupValue(ctx, listener);
         }
     }
 
@@ -10224,6 +10244,8 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
     JS_SetPropertyStr(g_ctx, event, "screenY",  JS_NewInt32(g_ctx, y));
     JS_SetPropertyStr(g_ctx, event, "button",   JS_NewInt32(g_ctx, button));
     JS_SetPropertyStr(g_ctx, event, "buttons",  JS_NewInt32(g_ctx, event_type == 5 ? (1 << button) : 0));
+    /* which: 0=none, 1=left, 2=middle, 3=right - for Hammer.js MouseInput */
+    JS_SetPropertyStr(g_ctx, event, "which",    JS_NewInt32(g_ctx, button + 1));
     JS_SetPropertyStr(g_ctx, event, "preventDefault",  JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
     JS_SetPropertyStr(g_ctx, event, "stopPropagation", JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
 
@@ -10241,6 +10263,105 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
             JS_FreeValue(g_ctx, exc);
         }
         JS_FreeValue(g_ctx, ret);
+    }
+
+    /* Fire window mouse listeners (for Hammer.js which registers mousemove/mouseup on window) */
+    JSValue *win_listeners = NULL;
+    int win_count = 0;
+    if (event_type == 5) { win_listeners = g_window_mousedown_listeners; win_count = g_window_mousedown_count; }
+    else if (event_type == 4) { win_listeners = g_window_mousemove_listeners; win_count = g_window_mousemove_count; }
+    else if (event_type == 6) { win_listeners = g_window_mouseup_listeners; win_count = g_window_mouseup_count; }
+    if (win_listeners && win_count > 0) {
+        for (int i = 0; i < win_count; i++) {
+            if (!JS_IsUndefined(win_listeners[i])) {
+                JSValue ret = JS_Call(g_ctx, win_listeners[i], global, 1, &event);
+                if (JS_IsException(ret)) {
+                    JSValue exc = JS_GetException(g_ctx);
+                    const char *s = JS_ToCString(g_ctx, exc);
+                    if (s) { fprintf(stderr, "Window mouse event error: %s\n", s); JS_FreeCString(g_ctx, s); }
+                    JS_FreeValue(g_ctx, exc);
+                }
+                JS_FreeValue(g_ctx, ret);
+            }
+        }
+    }
+
+    /* Fire corresponding touch events for Hammer.js compatibility */
+    {
+        const char *touch_type = NULL;
+        if (event_type == 5) touch_type = "touchstart";
+        else if (event_type == 4) touch_type = "touchmove";
+        else if (event_type == 6) touch_type = "touchend";
+
+        if (touch_type) {
+            /* Build a touch event object with touches array */
+            JSValue touch_event = JS_NewObject(g_ctx);
+            JS_SetPropertyStr(g_ctx, touch_event, "type", JS_NewString(g_ctx, touch_type));
+
+            /* Get canvas element for target */
+            JSValue canvas = JS_GetPropertyStr(g_ctx, global, "canvas");
+
+            /* Create a touch point object with all properties Hammer.js expects */
+            JSValue touch = JS_NewObject(g_ctx);
+            JS_SetPropertyStr(g_ctx, touch, "identifier", JS_NewInt32(g_ctx, 0));
+            JS_SetPropertyStr(g_ctx, touch, "clientX",    JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch, "clientY",    JS_NewInt32(g_ctx, y));
+            JS_SetPropertyStr(g_ctx, touch, "pageX",      JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch, "pageY",      JS_NewInt32(g_ctx, y));
+            JS_SetPropertyStr(g_ctx, touch, "screenX",    JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch, "screenY",    JS_NewInt32(g_ctx, y));
+            JS_SetPropertyStr(g_ctx, touch, "target",     JS_DupValue(g_ctx, canvas));
+            /* layerX/layerY are relative to the target element */
+            JS_SetPropertyStr(g_ctx, touch, "layerX",     JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch, "layerY",     JS_NewInt32(g_ctx, y));
+            JS_SetPropertyStr(g_ctx, touch, "offsetX",    JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch, "offsetY",    JS_NewInt32(g_ctx, y));
+
+            /* Create touches array */
+            JSValue touches = JS_NewArray(g_ctx);
+            JS_SetPropertyUint32(g_ctx, touches, 0, touch);
+            JS_SetPropertyStr(g_ctx, touch_event, "touches", touches);
+
+            /* Create changedTouches array (same as touches for our purposes) */
+            JSValue changed_touches = JS_NewArray(g_ctx);
+            JSValue touch2 = JS_NewObject(g_ctx);
+            JS_SetPropertyStr(g_ctx, touch2, "identifier", JS_NewInt32(g_ctx, 0));
+            JS_SetPropertyStr(g_ctx, touch2, "clientX",    JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch2, "clientY",    JS_NewInt32(g_ctx, y));
+            JS_SetPropertyStr(g_ctx, touch2, "pageX",      JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch2, "pageY",      JS_NewInt32(g_ctx, y));
+            JS_SetPropertyStr(g_ctx, touch2, "screenX",    JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch2, "screenY",    JS_NewInt32(g_ctx, y));
+            JS_SetPropertyStr(g_ctx, touch2, "target",     JS_DupValue(g_ctx, canvas));
+            JS_SetPropertyStr(g_ctx, touch2, "layerX",     JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch2, "layerY",     JS_NewInt32(g_ctx, y));
+            JS_SetPropertyStr(g_ctx, touch2, "offsetX",    JS_NewInt32(g_ctx, x));
+            JS_SetPropertyStr(g_ctx, touch2, "offsetY",    JS_NewInt32(g_ctx, y));
+            JS_SetPropertyUint32(g_ctx, changed_touches, 0, touch2);
+            JS_SetPropertyStr(g_ctx, touch_event, "changedTouches", changed_touches);
+
+            /* srcEvent points to the touch event itself for Hammer.js */
+            JS_SetPropertyStr(g_ctx, touch_event, "srcEvent", touch_event);
+
+            JS_SetPropertyStr(g_ctx, touch_event, "preventDefault",  JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
+            JS_SetPropertyStr(g_ctx, touch_event, "stopPropagation", JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
+
+            /* Fire touch event listeners */
+            for (int i = 0; i < MAX_MOUSE_LISTENERS; i++) {
+                if (!g_mouse_listeners[i].active) continue;
+                if (strcmp(g_mouse_listeners[i].event_type, touch_type) != 0) continue;
+                JSValue ret = JS_Call(g_ctx, g_mouse_listeners[i].func, global, 1, &touch_event);
+                if (JS_IsException(ret)) {
+                    JSValue exc = JS_GetException(g_ctx);
+                    const char *s = JS_ToCString(g_ctx, exc);
+                    if (s) { fprintf(stderr, "Touch event error: %s\n", s); JS_FreeCString(g_ctx, s); }
+                    JS_FreeValue(g_ctx, exc);
+                }
+                JS_FreeValue(g_ctx, ret);
+            }
+            JS_FreeValue(g_ctx, touch_event);
+            JS_FreeValue(g_ctx, canvas);
+        }
     }
 
     /* Also fire "click" listeners on mouseup (left button) */
