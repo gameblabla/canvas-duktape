@@ -417,6 +417,11 @@ static void r_quit(void) {
 static int r_resize_window(int w, int h) {
     if (!g_window || !g_sdl_renderer) return 0;
 
+    /* Skip if size is already correct */
+    if (w == g_win_w && h == g_win_h) {
+        return 1;
+    }
+
     fprintf(stderr, "[renderer] Resizing window from %dx%d to %dx%d\n", g_win_w, g_win_h, w, h);
 
     /* Resize window */

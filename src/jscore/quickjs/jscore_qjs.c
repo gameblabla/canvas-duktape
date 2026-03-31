@@ -4098,7 +4098,7 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
     if (argc > 0) JS_ToInt32(ctx, &new_width, argv[0]);
     for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
-            /* Setting width always clears canvas content (even if same value) */
+            /* Setting width always clears canvas content AND resets context state (HTML5 spec) */
             if (id != 1) {
                 if (g_canvases[i].width != new_width) {
                     if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
@@ -4131,6 +4131,8 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                     g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
             }
+            /* HTML5 spec: setting width resets the context state stack */
+            reset_ctx2d_defaults(g_canvases[i].id);
             break;
         }
     }
@@ -4155,7 +4157,7 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
     if (argc > 0) JS_ToInt32(ctx, &new_height, argv[0]);
     for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == id) {
-            /* Setting height always clears canvas content (even if same value) */
+            /* Setting height always clears canvas content AND resets context state (HTML5 spec) */
             if (id != 1) {
                 if (g_canvases[i].height != new_height) {
                     if (g_canvases[i].tex_handle && g_renderer && g_renderer->destroy_texture) {
@@ -4188,6 +4190,8 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                     g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
             }
+            /* HTML5 spec: setting height resets the context state stack */
+            reset_ctx2d_defaults(g_canvases[i].id);
             break;
         }
     }
