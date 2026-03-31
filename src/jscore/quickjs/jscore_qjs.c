@@ -3379,13 +3379,14 @@ static JSValue js_ctx2d_strokeText(JSContext *ctx, JSValueConst this_val,
     
     double tx, ty;
     transform_point(&tx, &ty, g_ctx2d.transform, x, y);
-    
+
     if (g_renderer->stroke_text) {
         g_renderer->stroke_text(target, text, tx, ty, r, g, b, a,
                                 g_ctx2d.font_size, g_ctx2d.line_width,
+                                g_ctx2d.text_align, g_ctx2d.text_baseline,
                                 g_ctx2d.font_family);
     }
-    
+
     JS_FreeCString(ctx, text);
     return JS_UNDEFINED;
 }

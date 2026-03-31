@@ -85,7 +85,8 @@ typedef struct {
                         const char* font_family);
     void   (*stroke_text)(void* target, const char* text, double x, double y,
                           uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                          int font_size, int lw, const char* font_family);
+                          int font_size, int lw, const char* align,
+                          const char* baseline, const char* font_family);
     int    (*measure_text)(const char* text, int font_size, const char* font_family);
     /* New: returns width, sets *ascent and *descent via out params */
     void   (*measure_text_ex)(const char* text, int font_size, const char* font_family,

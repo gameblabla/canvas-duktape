@@ -787,7 +787,8 @@ static void r_fill_text(void* target, const char* text, double x, double y,
 
 static void r_stroke_text(void* target, const char* text, double x, double y,
                            uint8_t r, uint8_t g, uint8_t b, uint8_t a,
-                           int font_size, int lw, const char* font_family) {
+                           int font_size, int lw, const char* align,
+                           const char* baseline, const char* font_family) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || !text || !text[0]) return;
     TTF_Font* font = get_font(font_family, font_size);
@@ -800,8 +801,25 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
     if (!tt) return;
     int tw, th;
     SDL_QueryTexture(tt, NULL, NULL, &tw, &th);
-    int ascent = TTF_FontAscent(font);
-    int ry = (int)y - ascent; /* stroke_text uses alphabetic baseline */
+    int rx = (int)x;
+    if (align && (strcmp(align, "center") == 0)) rx -= tw / 2;
+    else if (align && (strcmp(align, "right")==0 || strcmp(align,"end")==0)) rx -= tw;
+    /* Apply same baseline calculations as r_fill_text */
+    int ascent  = TTF_FontAscent(font);
+    int descent = TTF_FontDescent(font); /* negative in SDL_TTF */
+    int ry;
+    if (baseline && strcmp(baseline, "hanging") == 0) {
+        ry = (int)y;
+    } else if (baseline && strcmp(baseline, "top") == 0) {
+        ry = (int)y - 2;
+    } else if (baseline && strcmp(baseline, "middle") == 0) {
+        ry = (int)y - (ascent - descent) / 2;
+    } else if (baseline && (strcmp(baseline, "bottom") == 0 || strcmp(baseline, "ideographic") == 0)) {
+        ry = (int)y + descent - ascent;
+    } else {
+        /* "alphabetic" (default) */
+        ry = (int)y - ascent;
+    }
     if (lw < 1) lw = 1;
     SDL_SetRenderTarget(g_sdl_renderer, tex);
     /* Apply clip rect for this texture */
@@ -811,7 +829,7 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
         for (int oy = -lw; oy <= lw; oy++) {
             if (ox*ox + oy*oy > lw*lw) continue;
             if (ox*ox + oy*oy < (lw-1)*(lw-1)) continue;
-            SDL_Rect dst = {(int)x + ox, ry + oy, tw, th};
+            SDL_Rect dst = {rx + ox, ry + oy, tw, th};
             SDL_RenderCopy(g_sdl_renderer, tt, NULL, &dst);
         }
     }
