@@ -528,6 +528,10 @@ int main(int argc, char** argv) {
                        ev.type == INPUT_EVENT_MOUSEDOWN ||
                        ev.type == INPUT_EVENT_MOUSEUP) {
                 jscore.dispatch_mouse(ev.type, ev.x, ev.y, ev.button);
+            } else if (ev.type == INPUT_EVENT_TOUCHMOVE ||
+                       ev.type == INPUT_EVENT_TOUCHDOWN ||
+                       ev.type == INPUT_EVENT_TOUCHUP) {
+                jscore.dispatch_touch(ev.type, ev.x, ev.y, ev.touch_id);
             }
         }
 

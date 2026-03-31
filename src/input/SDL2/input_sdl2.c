@@ -100,6 +100,34 @@ static int i_poll(InputEvent* out) {
                           (e.button.button == SDL_BUTTON_MIDDLE) ? 1 : 0;
             return 1;
         }
+        /* SDL2 Touch events */
+        if (e.type == SDL_FINGERDOWN) {
+            out->type = INPUT_EVENT_TOUCHDOWN;
+            out->touch_id = (int)e.tfinger.fingerId;
+            out->touch_x = e.tfinger.x;
+            out->touch_y = e.tfinger.y;
+            out->x = (int)(e.tfinger.x * 960); /* Assume 960x540 canvas */
+            out->y = (int)(e.tfinger.y * 540);
+            return 1;
+        }
+        if (e.type == SDL_FINGERUP) {
+            out->type = INPUT_EVENT_TOUCHUP;
+            out->touch_id = (int)e.tfinger.fingerId;
+            out->touch_x = e.tfinger.x;
+            out->touch_y = e.tfinger.y;
+            out->x = (int)(e.tfinger.x * 960);
+            out->y = (int)(e.tfinger.y * 540);
+            return 1;
+        }
+        if (e.type == SDL_FINGERMOTION) {
+            out->type = INPUT_EVENT_TOUCHMOVE;
+            out->touch_id = (int)e.tfinger.fingerId;
+            out->touch_x = e.tfinger.x;
+            out->touch_y = e.tfinger.y;
+            out->x = (int)(e.tfinger.x * 960);
+            out->y = (int)(e.tfinger.y * 540);
+            return 1;
+        }
     }
     out->type = INPUT_EVENT_NONE;
     out->keycode = 0;

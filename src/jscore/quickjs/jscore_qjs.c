@@ -10414,6 +10414,87 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
     JS_FreeValue(g_ctx, event);
 }
 
+static void jscore_qjs_dispatch_touch(int event_type, int x, int y, int touch_id) {
+    if (!g_ctx) return;
+
+    /* Map event_type int to string */
+    const char *evtype;
+    switch (event_type) {
+        case INPUT_EVENT_TOUCHMOVE:  evtype = "touchmove";  break;
+        case INPUT_EVENT_TOUCHDOWN:  evtype = "touchstart"; break;
+        case INPUT_EVENT_TOUCHUP:    evtype = "touchend";   break;
+        default: return;
+    }
+
+    JSValue global = JS_GetGlobalObject(g_ctx);
+    JSValue canvas = JS_GetPropertyStr(g_ctx, global, "canvas");
+
+    /* Build a touch event object with touches array */
+    JSValue touch_event = JS_NewObject(g_ctx);
+    JS_SetPropertyStr(g_ctx, touch_event, "type", JS_NewString(g_ctx, evtype));
+
+    /* Create a touch point object */
+    JSValue touch = JS_NewObject(g_ctx);
+    JS_SetPropertyStr(g_ctx, touch, "identifier", JS_NewInt32(g_ctx, touch_id));
+    JS_SetPropertyStr(g_ctx, touch, "clientX",    JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch, "clientY",    JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, touch, "pageX",      JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch, "pageY",      JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, touch, "screenX",    JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch, "screenY",    JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, touch, "target",     JS_DupValue(g_ctx, canvas));
+    JS_SetPropertyStr(g_ctx, touch, "layerX",     JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch, "layerY",     JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, touch, "offsetX",    JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch, "offsetY",    JS_NewInt32(g_ctx, y));
+
+    /* Create touches array */
+    JSValue touches = JS_NewArray(g_ctx);
+    JS_SetPropertyUint32(g_ctx, touches, 0, touch);
+    JS_SetPropertyStr(g_ctx, touch_event, "touches", touches);
+
+    /* Create changedTouches array */
+    JSValue changed_touches = JS_NewArray(g_ctx);
+    JSValue touch2 = JS_NewObject(g_ctx);
+    JS_SetPropertyStr(g_ctx, touch2, "identifier", JS_NewInt32(g_ctx, touch_id));
+    JS_SetPropertyStr(g_ctx, touch2, "clientX",    JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch2, "clientY",    JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, touch2, "pageX",      JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch2, "pageY",      JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, touch2, "screenX",    JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch2, "screenY",    JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, touch2, "target",     JS_DupValue(g_ctx, canvas));
+    JS_SetPropertyStr(g_ctx, touch2, "layerX",     JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch2, "layerY",     JS_NewInt32(g_ctx, y));
+    JS_SetPropertyStr(g_ctx, touch2, "offsetX",    JS_NewInt32(g_ctx, x));
+    JS_SetPropertyStr(g_ctx, touch2, "offsetY",    JS_NewInt32(g_ctx, y));
+    JS_SetPropertyUint32(g_ctx, changed_touches, 0, touch2);
+    JS_SetPropertyStr(g_ctx, touch_event, "changedTouches", changed_touches);
+
+    JS_SetPropertyStr(g_ctx, touch_event, "srcEvent", touch_event);
+    JS_SetPropertyStr(g_ctx, touch_event, "preventDefault",  JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
+    JS_SetPropertyStr(g_ctx, touch_event, "stopPropagation", JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
+
+    /* Fire touch event listeners */
+    for (int i = 0; i < MAX_MOUSE_LISTENERS; i++) {
+        if (!g_mouse_listeners[i].active) continue;
+        if (strcmp(g_mouse_listeners[i].event_type, evtype) != 0) continue;
+        JSValue ret = JS_Call(g_ctx, g_mouse_listeners[i].func, global, 1, &touch_event);
+        if (JS_IsException(ret)) {
+            JSValue exc = JS_GetException(g_ctx);
+            const char *s = JS_ToCString(g_ctx, exc);
+            if (s) { fprintf(stderr, "Touch event error: %s\n", s); JS_FreeCString(g_ctx, s); }
+            JS_FreeValue(g_ctx, exc);
+        }
+        JS_FreeValue(g_ctx, ret);
+    }
+
+    jscore_qjs_drain_jobs();
+    JS_FreeValue(g_ctx, touch_event);
+    JS_FreeValue(g_ctx, canvas);
+    JS_FreeValue(g_ctx, global);
+}
+
 /* ============================================================================
  * Interface Implementation
  * ============================================================================ */
@@ -10458,6 +10539,7 @@ void jscore_qjs_init_iface(JSCoreInterface *iface) {
     iface->check_timers = jscore_qjs_check_timers;
     iface->dispatch_key = jscore_qjs_dispatch_key;
     iface->dispatch_mouse = jscore_qjs_dispatch_mouse;
+    iface->dispatch_touch = jscore_qjs_dispatch_touch;
     iface->set_broken_webgl = jscore_qjs_set_broken_webgl;
     iface->update_canvas_size = jscore_qjs_update_canvas_size;
 }

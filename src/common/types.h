@@ -147,14 +147,19 @@ typedef enum {
     INPUT_EVENT_MOUSEMOVE = 4,
     INPUT_EVENT_MOUSEDOWN = 5,
     INPUT_EVENT_MOUSEUP   = 6,
-    INPUT_EVENT_WINDOW_RESIZE = 7
+    INPUT_EVENT_WINDOW_RESIZE = 7,
+    INPUT_EVENT_TOUCHDOWN = 8,
+    INPUT_EVENT_TOUCHUP   = 9,
+    INPUT_EVENT_TOUCHMOVE = 10
 } InputEventType;
 
 typedef struct {
     InputEventType type;
     int keycode;   /* browser-style keyCode */
-    int x, y;     /* mouse position in window pixels */
+    int x, y;     /* mouse/touch position in window pixels */
     int button;   /* mouse button: 0=left, 1=middle, 2=right */
+    int touch_id; /* touch finger ID for touch events */
+    float touch_x, touch_y; /* touch position relative to canvas (0-1) */
 } InputEvent;
 
 typedef struct {
@@ -197,6 +202,7 @@ typedef struct {
     void (*check_timers)(void);
     void (*dispatch_key)(int keycode, int is_down);
     void (*dispatch_mouse)(int event_type, int x, int y, int button);
+    void (*dispatch_touch)(int event_type, int x, int y, int touch_id);
 
     /* Optional: enable broken WebGL support */
     void (*set_broken_webgl)(int enable);
