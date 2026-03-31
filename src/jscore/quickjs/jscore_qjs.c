@@ -10228,6 +10228,28 @@ static void jscore_qjs_set_broken_webgl(int enable) {
     g_broken_webgl = enable ? 1 : 0;
 }
 
+/* Update main canvas size from C side (called when window is resized) */
+static void jscore_qjs_update_canvas_size(int width, int height) {
+    if (!g_renderer) return;
+    
+    /* Find the main canvas (id=1) and update its dimensions */
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == 1) {
+            fprintf(stderr, "[jscore] Updating main canvas size to %dx%d (was %dx%d)\n",
+                    width, height, g_canvases[i].width, g_canvases[i].height);
+            g_canvases[i].width = width;
+            g_canvases[i].height = height;
+            /* Update the main texture reference */
+            g_canvases[i].tex_handle = g_renderer->get_main_texture();
+            /* Clear the canvas at new size */
+            if (g_renderer->clear_rect) {
+                g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, width, height);
+            }
+            break;
+        }
+    }
+}
+
 void jscore_qjs_init_iface(JSCoreInterface *iface) {
     if (!iface) return;
 
@@ -10243,4 +10265,5 @@ void jscore_qjs_init_iface(JSCoreInterface *iface) {
     iface->dispatch_key = jscore_qjs_dispatch_key;
     iface->dispatch_mouse = jscore_qjs_dispatch_mouse;
     iface->set_broken_webgl = jscore_qjs_set_broken_webgl;
+    iface->update_canvas_size = jscore_qjs_update_canvas_size;
 }

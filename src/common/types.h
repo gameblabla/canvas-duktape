@@ -44,6 +44,7 @@ typedef struct {
 
     /* Window management */
     int    (*resize_window)(int w, int h);
+    int    (*handle_window_resize)(int new_w, int new_h);
 
     /* Texture (canvas) management — opaque void* handles */
     void*  (*create_texture)(int w, int h);
@@ -145,7 +146,8 @@ typedef enum {
     INPUT_EVENT_KEYUP     = 3,
     INPUT_EVENT_MOUSEMOVE = 4,
     INPUT_EVENT_MOUSEDOWN = 5,
-    INPUT_EVENT_MOUSEUP   = 6
+    INPUT_EVENT_MOUSEUP   = 6,
+    INPUT_EVENT_WINDOW_RESIZE = 7
 } InputEventType;
 
 typedef struct {
@@ -195,7 +197,10 @@ typedef struct {
     void (*check_timers)(void);
     void (*dispatch_key)(int keycode, int is_down);
     void (*dispatch_mouse)(int event_type, int x, int y, int button);
-    
+
     /* Optional: enable broken WebGL support */
     void (*set_broken_webgl)(int enable);
+
+    /* Update main canvas size (called when window is resized) */
+    void (*update_canvas_size)(int width, int height);
 } JSCoreInterface;
