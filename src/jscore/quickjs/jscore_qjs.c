@@ -7968,9 +7968,14 @@ static void xhr_log_exception(JSContext *ctx, const char *where) {
 static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int success) {
     JSValue cb = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
     if (JS_IsFunction(ctx, cb)) {
-        JSValue ret = JS_Call(ctx, cb, this_val, 0, NULL);
+        /* Build event object with target pointing to XHR (matches onload/onerror pattern) */
+        JSValue ev = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
+        JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "readystatechange"));
+        JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
         if (JS_IsException(ret)) xhr_log_exception(ctx, "onreadystatechange");
         JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, ev);
     }
     JS_FreeValue(ctx, cb);
 
