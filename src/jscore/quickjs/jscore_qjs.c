@@ -4076,7 +4076,19 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                     g_renderer->clear_rect(g_canvases[i].tex_handle, 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
             } else {
+                /* Main canvas (id=1) - resize window if size changed */
+                if (g_canvases[i].width != new_width) {
+                    fprintf(stderr, "[canvas] Main canvas width changed to %d (was %d)\n",
+                            new_width, g_canvases[i].width);
+                }
                 g_canvases[i].width = new_width;
+                /* Resize window and main texture */
+                if (g_renderer && g_renderer->resize_window) {
+                    g_renderer->resize_window(g_canvases[i].width, g_canvases[i].height);
+                    /* Update main texture reference after resize */
+                    g_canvases[i].tex_handle = g_renderer->get_main_texture();
+                }
+                /* Clear the resized canvas */
                 if (g_renderer && g_renderer->clear_rect) {
                     g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
@@ -4121,7 +4133,19 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                     g_renderer->clear_rect(g_canvases[i].tex_handle, 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
             } else {
+                /* Main canvas (id=1) - resize window if size changed */
+                if (g_canvases[i].height != new_height) {
+                    fprintf(stderr, "[canvas] Main canvas height changed to %d (was %d)\n",
+                            new_height, g_canvases[i].height);
+                }
                 g_canvases[i].height = new_height;
+                /* Resize window and main texture */
+                if (g_renderer && g_renderer->resize_window) {
+                    g_renderer->resize_window(g_canvases[i].width, g_canvases[i].height);
+                    /* Update main texture reference after resize */
+                    g_canvases[i].tex_handle = g_renderer->get_main_texture();
+                }
+                /* Clear the resized canvas */
                 if (g_renderer && g_renderer->clear_rect) {
                     g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }

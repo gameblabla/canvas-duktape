@@ -410,6 +410,39 @@ static void r_quit(void) {
     SDL_Quit();
 }
 
+/* Resize the window and offscreen texture - called when main canvas size changes */
+static int r_resize_window(int w, int h) {
+    if (!g_window || !g_sdl_renderer) return 0;
+    
+    fprintf(stderr, "[renderer] Resizing window from %dx%d to %dx%d\n", g_win_w, g_win_h, w, h);
+    
+    /* Resize window */
+    SDL_SetWindowSize(g_window, w, h);
+    
+    /* Update logical size for proper scaling */
+    SDL_RenderSetLogicalSize(g_sdl_renderer, w, h);
+    
+    /* Recreate offscreen texture at new size */
+    if (g_offscreen) {
+        SDL_DestroyTexture(g_offscreen);
+    }
+    
+    g_offscreen = SDL_CreateTexture(g_sdl_renderer,
+                                    SDL_PIXELFORMAT_RGBA8888,
+                                    SDL_TEXTUREACCESS_TARGET, w, h);
+    if (!g_offscreen) {
+        fprintf(stderr, "[renderer] Failed to recreate offscreen texture at %dx%d\n", w, h);
+        return 0;
+    }
+    
+    SDL_SetTextureBlendMode(g_offscreen, get_premult_blend_mode());
+    g_win_w = w;
+    g_win_h = h;
+    
+    fprintf(stderr, "[renderer] Window resized successfully to %dx%d\n", w, h);
+    return 1;
+}
+
 static void* r_create_texture(int w, int h) {
     SDL_Texture* t = SDL_CreateTexture(g_sdl_renderer,
                                        SDL_PIXELFORMAT_RGBA8888,
@@ -1227,6 +1260,7 @@ static int r_screenshot(const char* filename) {
 void renderer_sdl2_init_iface(RendererInterface* iface) {
     iface->init             = r_init;
     iface->quit             = r_quit;
+    iface->resize_window    = r_resize_window;
     iface->create_texture   = r_create_texture;
     iface->destroy_texture  = r_destroy_texture;
     iface->get_main_texture = r_get_main_texture;

@@ -42,6 +42,9 @@ typedef struct {
     int    (*init)(int w, int h, const char* title);
     void   (*quit)(void);
 
+    /* Window management */
+    int    (*resize_window)(int w, int h);
+
     /* Texture (canvas) management — opaque void* handles */
     void*  (*create_texture)(int w, int h);
     void   (*destroy_texture)(void* tex);
