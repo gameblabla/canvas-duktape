@@ -16,6 +16,7 @@
 #include "quickjs/quickjs-libc.h"
 #include "jscore/quickjs/jscore_qjs.h"
 #include "common/types.h"
+#include "common/platform.h"
 #include "sound/SDL2/sound_sdl2.h"
 
 /* Extra debug logging - define EXTRA_DEBUG to enable verbose debug messages */
@@ -264,13 +265,19 @@ static JSValue g_cached_documentElement = JS_UNDEFINED;
 static JSValue g_cached_document = JS_UNDEFINED;
 
 /* localStorage */
+#define MAX_STORAGE_ITEMS 256
+#define MAX_STORAGE_KEY_LEN 4096
+#define MAX_STORAGE_VALUE_LEN 1048576  /* 1MB */
 typedef struct {
-    char key[256];
-    char value[1024];
+    char *key;
+    char *value;
     int active;
 } StorageEntry;
 
 static StorageEntry g_storage[MAX_STORAGE_ITEMS];
+
+/* Storage file path - managed by platform layer */
+static int g_storage_dirty = 0;  /* Flag to track if storage needs saving */
 
 /* Images */
 typedef struct {
@@ -654,7 +661,7 @@ static int find_free_timer_slot(void) {
 
 static int find_storage_entry(const char *key) {
     for (int i = 0; i < MAX_STORAGE_ITEMS; i++) {
-        if (g_storage[i].active && strcmp(g_storage[i].key, key) == 0) {
+        if (g_storage[i].active && g_storage[i].key && strcmp(g_storage[i].key, key) == 0) {
             return i;
         }
     }
@@ -668,6 +675,200 @@ static int find_free_storage_slot(void) {
         }
     }
     return -1;
+}
+
+/* Simple JSON string escape */
+static void json_escape_string(const char *src, char *dst, size_t dst_size) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j < dst_size - 2; i++) {
+        char c = src[i];
+        if (c == '"' || c == '\\') {
+            if (j < dst_size - 3) {
+                dst[j++] = '\\';
+                dst[j++] = c;
+            }
+        } else if (c == '\n') {
+            if (j < dst_size - 3) {
+                dst[j++] = '\\';
+                dst[j++] = 'n';
+            }
+        } else if (c == '\r') {
+            if (j < dst_size - 3) {
+                dst[j++] = '\\';
+                dst[j++] = 'r';
+            }
+        } else if (c == '\t') {
+            if (j < dst_size - 3) {
+                dst[j++] = '\\';
+                dst[j++] = 't';
+            }
+        } else {
+            dst[j++] = c;
+        }
+    }
+    dst[j] = '\0';
+}
+
+/* Save storage to disk */
+static void save_storage(void) {
+    if (!g_storage_dirty) return;
+    
+    const char *path = platform_get_storage_path();
+    if (!path || !path[0]) return;
+
+    /* Build JSON content */
+    size_t buf_size = MAX_STORAGE_ITEMS * (MAX_STORAGE_KEY_LEN + MAX_STORAGE_VALUE_LEN + 32);
+    char *json = malloc(buf_size);
+    if (!json) return;
+    
+    char *p = json;
+    char *end = json + buf_size;
+    
+    p += snprintf(p, end - p, "{\n");
+    int first = 1;
+    for (int i = 0; i < MAX_STORAGE_ITEMS; i++) {
+        if (g_storage[i].active && g_storage[i].key && g_storage[i].value) {
+            if (!first) p += snprintf(p, end - p, ",\n");
+            first = 0;
+            char escaped_key[MAX_STORAGE_KEY_LEN * 2];
+            char escaped_value[MAX_STORAGE_VALUE_LEN > 65536 ? 65536 : MAX_STORAGE_VALUE_LEN];
+            json_escape_string(g_storage[i].key, escaped_key, sizeof(escaped_key));
+            json_escape_string(g_storage[i].value, escaped_value, sizeof(escaped_value));
+            p += snprintf(p, end - p, "  \"%s\": \"%s\"", escaped_key, escaped_value);
+        }
+    }
+    p += snprintf(p, end - p, "\n}\n");
+    
+    platform_save_storage(path, json);
+    free(json);
+    g_storage_dirty = 0;
+}
+
+/* Simple JSON string unescape */
+static void json_unescape_string(const char *src, char *dst, size_t dst_size) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j < dst_size - 1; i++) {
+        if (src[i] == '\\' && src[i+1]) {
+            i++;
+            switch (src[i]) {
+                case 'n': dst[j++] = '\n'; break;
+                case 'r': dst[j++] = '\r'; break;
+                case 't': dst[j++] = '\t'; break;
+                case '"': dst[j++] = '"'; break;
+                case '\\': dst[j++] = '\\'; break;
+                default: dst[j++] = src[i]; break;
+            }
+        } else {
+            dst[j++] = src[i];
+        }
+    }
+    dst[j] = '\0';
+}
+
+/* Load storage from disk */
+static void load_storage(void) {
+    const char *path = platform_get_storage_path();
+    if (!path || !path[0]) return;
+
+    char *content = NULL;
+    int size = platform_load_storage(path, &content);
+    if (size <= 0 || !content) return;
+
+    /* Simple JSON parser - just extract key:value pairs */
+    char *line = content;
+    char *line_end;
+    while ((line_end = strchr(line, '\n')) != NULL) {
+        *line_end = '\0';
+        
+        /* Skip non-data lines */
+        if (line[0] == '{' || line[0] == '}' || line[0] == '\n' || line[0] == '\0') {
+            line = line_end + 1;
+            continue;
+        }
+
+        /* Parse "key": "value" */
+        char *colon = strchr(line, ':');
+        if (!colon) {
+            line = line_end + 1;
+            continue;
+        }
+
+        char *key_start = strchr(line, '"');
+        if (!key_start || key_start >= colon) {
+            line = line_end + 1;
+            continue;
+        }
+        key_start++;
+
+        char *key_end = strchr(key_start, '"');
+        if (!key_end || key_end >= colon) {
+            line = line_end + 1;
+            continue;
+        }
+
+        char *value_start = strchr(colon, '"');
+        if (!value_start) {
+            line = line_end + 1;
+            continue;
+        }
+        value_start++;
+
+        char *value_end = strrchr(value_start, '"');
+        if (!value_end) {
+            line = line_end + 1;
+            continue;
+        }
+
+        /* Extract and unescape */
+        size_t key_len = key_end - key_start;
+        size_t value_len = value_end - value_start;
+
+        if (key_len >= MAX_STORAGE_KEY_LEN || value_len >= MAX_STORAGE_VALUE_LEN) {
+            line = line_end + 1;
+            continue;
+        }
+
+        int slot = find_free_storage_slot();
+        if (slot < 0) break;
+
+        char key[MAX_STORAGE_KEY_LEN];
+        char value[MAX_STORAGE_VALUE_LEN];
+
+        strncpy(key, key_start, key_len);
+        key[key_len] = '\0';
+
+        strncpy(value, value_start, value_len);
+        value[value_len] = '\0';
+
+        char unescaped_key[MAX_STORAGE_KEY_LEN];
+        char unescaped_value[MAX_STORAGE_VALUE_LEN];
+        json_unescape_string(key, unescaped_key, sizeof(unescaped_key));
+        json_unescape_string(value, unescaped_value, sizeof(unescaped_value));
+
+        g_storage[slot].key = strdup(unescaped_key);
+        g_storage[slot].value = strdup(unescaped_value);
+        g_storage[slot].active = 1;
+        
+        line = line_end + 1;
+    }
+
+    free(content);
+}
+
+/* Cleanup storage */
+static void cleanup_storage(void) {
+    save_storage();
+    for (int i = 0; i < MAX_STORAGE_ITEMS; i++) {
+        if (g_storage[i].key) {
+            free(g_storage[i].key);
+            g_storage[i].key = NULL;
+        }
+        if (g_storage[i].value) {
+            free(g_storage[i].value);
+            g_storage[i].value = NULL;
+        }
+        g_storage[i].active = 0;
+    }
 }
 
 static int find_image_by_id(int id) {
@@ -5122,16 +5323,17 @@ static JSValue js_cancelAnimationFrame(JSContext *ctx, JSValueConst this_val,
 static JSValue js_storage_getItem(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NULL;
-    
+
     const char *key = JS_ToCString(ctx, argv[0]);
     if (!key) return JS_NULL;
-    
+
     int idx = find_storage_entry(key);
     if (idx >= 0) {
+        JSValue result = JS_NewString(ctx, g_storage[idx].value);
         JS_FreeCString(ctx, key);
-        return JS_NewString(ctx, g_storage[idx].value);
+        return result;
     }
-    
+
     JS_FreeCString(ctx, key);
     return JS_NULL;
 }
@@ -5139,31 +5341,32 @@ static JSValue js_storage_getItem(JSContext *ctx, JSValueConst this_val,
 static JSValue js_storage_setItem(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
-    
+
     const char *key = JS_ToCString(ctx, argv[0]);
     const char *value = JS_ToCString(ctx, argv[1]);
-    
+
     if (!key || !value) {
         if (key) JS_FreeCString(ctx, key);
         if (value) JS_FreeCString(ctx, value);
         return JS_UNDEFINED;
     }
-    
+
     int idx = find_storage_entry(key);
     if (idx >= 0) {
-        strncpy(g_storage[idx].value, value, sizeof(g_storage[idx].value) - 1);
-        g_storage[idx].value[sizeof(g_storage[idx].value) - 1] = '\0';
+        /* Update existing entry */
+        free(g_storage[idx].value);
+        g_storage[idx].value = strdup(value);
     } else {
+        /* Create new entry */
         idx = find_free_storage_slot();
         if (idx >= 0) {
-            strncpy(g_storage[idx].key, key, sizeof(g_storage[idx].key) - 1);
-            g_storage[idx].key[sizeof(g_storage[idx].key) - 1] = '\0';
-            strncpy(g_storage[idx].value, value, sizeof(g_storage[idx].value) - 1);
-            g_storage[idx].value[sizeof(g_storage[idx].value) - 1] = '\0';
+            g_storage[idx].key = strdup(key);
+            g_storage[idx].value = strdup(value);
             g_storage[idx].active = 1;
         }
     }
-    
+
+    g_storage_dirty = 1;
     JS_FreeCString(ctx, key);
     JS_FreeCString(ctx, value);
     return JS_UNDEFINED;
@@ -5172,28 +5375,38 @@ static JSValue js_storage_setItem(JSContext *ctx, JSValueConst this_val,
 static JSValue js_storage_removeItem(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
     if (argc < 1) return JS_UNDEFINED;
-    
+
     const char *key = JS_ToCString(ctx, argv[0]);
     if (!key) return JS_UNDEFINED;
-    
+
     int idx = find_storage_entry(key);
     if (idx >= 0) {
+        free(g_storage[idx].key);
+        free(g_storage[idx].value);
+        g_storage[idx].key = NULL;
+        g_storage[idx].value = NULL;
         g_storage[idx].active = 0;
-        g_storage[idx].key[0] = '\0';
-        g_storage[idx].value[0] = '\0';
+        g_storage_dirty = 1;
     }
-    
+
     JS_FreeCString(ctx, key);
     return JS_UNDEFINED;
 }
 
 static JSValue js_storage_clear(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
+    int had_data = 0;
     for (int i = 0; i < MAX_STORAGE_ITEMS; i++) {
-        g_storage[i].active = 0;
-        g_storage[i].key[0] = '\0';
-        g_storage[i].value[0] = '\0';
+        if (g_storage[i].active) {
+            free(g_storage[i].key);
+            free(g_storage[i].value);
+            g_storage[i].key = NULL;
+            g_storage[i].value = NULL;
+            g_storage[i].active = 0;
+            had_data = 1;
+        }
     }
+    if (had_data) g_storage_dirty = 1;
     return JS_UNDEFINED;
 }
 
@@ -5208,12 +5421,12 @@ static JSValue js_storage_get_length(JSContext *ctx, JSValueConst this_val) {
 static JSValue js_storage_key(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NULL;
-    
+
     int idx;
     if (JS_ToInt32(ctx, &idx, argv[0])) {
         return JS_NULL;
     }
-    
+
     int count = 0;
     for (int i = 0; i < MAX_STORAGE_ITEMS; i++) {
         if (g_storage[i].active) {
@@ -5223,8 +5436,72 @@ static JSValue js_storage_key(JSContext *ctx, JSValueConst this_val,
             count++;
         }
     }
-    
+
     return JS_NULL;
+}
+
+/* Bracket notation support: localStorage["key"] */
+static JSValue js_storage_prop_get(JSContext *ctx, JSValueConst this_val,
+                                   JSAtom prop) {
+    const char *key = JS_AtomToCString(ctx, prop);
+    if (!key) return JS_UNDEFINED;
+    
+    /* Skip method/property names */
+    if (strcmp(key, "length") == 0 || strcmp(key, "getItem") == 0 ||
+        strcmp(key, "setItem") == 0 || strcmp(key, "removeItem") == 0 ||
+        strcmp(key, "clear") == 0 || strcmp(key, "key") == 0) {
+        JS_FreeCString(ctx, key);
+        return JS_UNDEFINED;
+    }
+    
+    int idx = find_storage_entry(key);
+    if (idx >= 0) {
+        JSValue result = JS_NewString(ctx, g_storage[idx].value);
+        JS_FreeCString(ctx, key);
+        return result;
+    }
+    
+    JS_FreeCString(ctx, key);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_storage_prop_set(JSContext *ctx, JSValueConst this_val,
+                                   JSAtom prop, JSValue value,
+                                   JSValue receiver, int flags) {
+    const char *key = JS_AtomToCString(ctx, prop);
+    if (!key) return JS_FALSE;
+    
+    /* Skip method/property names */
+    if (strcmp(key, "length") == 0 || strcmp(key, "getItem") == 0 ||
+        strcmp(key, "setItem") == 0 || strcmp(key, "removeItem") == 0 ||
+        strcmp(key, "clear") == 0 || strcmp(key, "key") == 0) {
+        JS_FreeCString(ctx, key);
+        return JS_FALSE;
+    }
+    
+    const char *value_str = JS_ToCString(ctx, value);
+    if (!value_str) {
+        JS_FreeCString(ctx, key);
+        return JS_FALSE;
+    }
+    
+    int idx = find_storage_entry(key);
+    if (idx >= 0) {
+        free(g_storage[idx].value);
+        g_storage[idx].value = strdup(value_str);
+    } else {
+        idx = find_free_storage_slot();
+        if (idx >= 0) {
+            g_storage[idx].key = strdup(key);
+            g_storage[idx].value = strdup(value_str);
+            g_storage[idx].active = 1;
+        }
+    }
+    
+    g_storage_dirty = 1;
+    JS_FreeCString(ctx, key);
+    JS_FreeCString(ctx, value_str);
+    return JS_TRUE;
 }
 
 static const JSCFunctionListEntry js_storage_funcs[] = {
@@ -5238,6 +5515,96 @@ static const JSCFunctionListEntry js_storage_funcs[] = {
 static const JSCFunctionListEntry js_storage_props[] = {
     JS_CGETSET_DEF("length", js_storage_get_length, NULL),
 };
+
+/* Initialize localStorage with bracket notation support */
+static JSValue js_create_storage_object(JSContext *ctx) {
+    JSValue storage = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, storage, js_storage_funcs,
+                               sizeof(js_storage_funcs) / sizeof(js_storage_funcs[0]));
+    JS_SetPropertyFunctionList(ctx, storage, js_storage_props,
+                               sizeof(js_storage_props) / sizeof(js_storage_props[0]));
+    
+    /* Set initial length */
+    JS_SetPropertyStr(ctx, storage, "length", JS_NewInt32(ctx, 0));
+    
+    /* Create a proxy handler for bracket notation support */
+    const char *proxy_handler = 
+        "(function(storage) {"
+        "  return new Proxy(storage, {"
+        "    get: function(target, prop) {"
+        "      if (prop === 'length') {"
+        "        var len = 0;"
+        "        for (var i = 0; i < 1000; i++) {"
+        "          var k = target.key(i);"
+        "          if (k === null) break;"
+        "          len++;"
+        "        }"
+        "        return len;"
+        "      }"
+        "      if (prop === 'getItem') return target.getItem;"
+        "      if (prop === 'setItem') return target.setItem;"
+        "      if (prop === 'removeItem') return target.removeItem;"
+        "      if (prop === 'clear') return target.clear;"
+        "      if (prop === 'key') return target.key;"
+        "      return target.getItem(String(prop));"
+        "    },"
+        "    set: function(target, prop, value) {"
+        "      if (prop === 'length') return true;"
+        "      if (prop === 'getItem' || prop === 'setItem' || prop === 'removeItem' || prop === 'clear' || prop === 'key') return true;"
+        "      target.setItem(String(prop), String(value));"
+        "      return true;"
+        "    },"
+        "    deleteProperty: function(target, prop) {"
+        "      target.removeItem(prop);"
+        "      return true;"
+        "    },"
+        "    has: function(target, prop) {"
+        "      if (prop === 'length') return true;"
+        "      return target.getItem(String(prop)) !== null;"
+        "    },"
+        "    ownKeys: function(target) {"
+        "      var keys = ['length', 'getItem', 'setItem', 'removeItem', 'clear', 'key'];"
+        "      for (var i = 0; i < 1000; i++) {"
+        "        var k = target.key(i);"
+        "        if (k === null) break;"
+        "        keys.push(k);"
+        "      }"
+        "      return keys;"
+        "    },"
+        "    getOwnPropertyDescriptor: function(target, prop) {"
+        "      if (prop === 'length') {"
+        "        var len = 0;"
+        "        for (var i = 0; i < 1000; i++) {"
+        "          var k = target.key(i);"
+        "          if (k === null) break;"
+        "          len++;"
+        "        }"
+        "        return { value: len, writable: false, enumerable: false, configurable: false };"
+        "      }"
+        "      if (prop === 'getItem' || prop === 'setItem' || prop === 'removeItem' || prop === 'clear' || prop === 'key') {"
+        "        return { value: target[prop], writable: true, enumerable: false, configurable: true };"
+        "      }"
+        "      var val = target.getItem(String(prop));"
+        "      if (val !== null) {"
+        "        return { value: val, writable: true, enumerable: true, configurable: true };"
+        "      }"
+        "      return undefined;"
+        "    }"
+        "  });"
+        "})";
+    
+    JSValue result = JS_Eval(ctx, proxy_handler, strlen(proxy_handler), "<storage_proxy>", JS_EVAL_TYPE_GLOBAL);
+    if (!JS_IsException(result)) {
+        JSValue proxy = JS_Call(ctx, result, storage, 1, &storage);
+        JS_FreeValue(ctx, result);
+        if (!JS_IsException(proxy)) {
+            JS_FreeValue(ctx, storage);
+            storage = proxy;
+        }
+    }
+    
+    return storage;
+}
 
 /* ============================================================================
  * Document Object
@@ -7388,6 +7755,9 @@ static void jscore_qjs_quit(void) {
         g_ctx2d.state_stack = NULL;
     }
 
+    /* Cleanup localStorage */
+    cleanup_storage();
+
     /* Free context and runtime - skip due to memory corruption issues in QuickJS */
     /* The OS will clean up memory when the process exits */
 #if 0
@@ -9135,12 +9505,8 @@ static void setup_globals_object(JSContext *ctx) {
                                sizeof(js_performance_funcs) / sizeof(js_performance_funcs[0]));
     JS_SetPropertyStr(ctx, global, "performance", performance);
 
-    /* localStorage */
-    JSValue localStorage = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, localStorage, js_storage_funcs,
-                               sizeof(js_storage_funcs) / sizeof(js_storage_funcs[0]));
-    JS_SetPropertyFunctionList(ctx, localStorage, js_storage_props,
-                               sizeof(js_storage_props) / sizeof(js_storage_props[0]));
+    /* localStorage - create with bracket notation support */
+    JSValue localStorage = js_create_storage_object(ctx);
     JS_SetPropertyStr(ctx, global, "localStorage", localStorage);
 
     /* Add missing window properties that libraries check */
@@ -9282,12 +9648,19 @@ static void setup_globals_object(JSContext *ctx) {
 
 static void jscore_qjs_setup_globals(int win_w, int win_h,
                                      CanvasInfo *canvases, int canvas_count,
-                                     ImageInfo *images, int image_count) {
+                                     ImageInfo *images, int image_count,
+                                     const char *window_title) {
     if (!g_ctx) return;
 
     /* Set window dimensions for screen object */
     g_win_w = win_w;
     g_win_h = win_h;
+
+    /* Initialize localStorage path based on window title */
+    if (window_title) {
+        platform_init_storage_path(window_title);
+        load_storage();
+    }
 
     setup_globals_object(g_ctx);
 

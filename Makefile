@@ -21,7 +21,7 @@
 #   make JSCORE_BACKEND=quickjs  - Build with QuickJS
 
 CC = gcc
-CFLAGS = -Wall -c -std=gnu99 -O3 -march=native -DNDEBUG
+CFLAGS = -Wall -c -std=gnu99 -O0 -g3 -march=native -DNDEBUG
 LDFLAGS = -lm -lSDL2 -lSDL2_image -lSDL2_ttf -lz -lvorbisfile -lvorbis -logg
 
 # JS Engine backend selection (default: quickjs)
@@ -107,6 +107,9 @@ INPUT_OBJ = src/input/SDL2/input_sdl2.o
 # SDL2 Sound backend
 SOUND_OBJ = src/sound/SDL2/sound_sdl2.o
 
+# Common platform abstraction
+PLATFORM_OBJ = src/common/platform.o
+
 # JS core backend - selected by JSCORE_BACKEND
 ifeq ($(JSCORE_BACKEND),quickjs)
 JSCORE_OBJ = src/jscore/quickjs/jscore_qjs.o $(QJS_CORE_OBJ)
@@ -118,7 +121,7 @@ endif
 MAIN_OBJ = src/main.o
 
 # All objects
-ALL_OBJ = $(RENDERER_OBJ) $(INPUT_OBJ) $(SOUND_OBJ) $(JSCORE_OBJ) $(MAIN_OBJ)
+ALL_OBJ = $(RENDERER_OBJ) $(INPUT_OBJ) $(SOUND_OBJ) $(PLATFORM_OBJ) $(JSCORE_OBJ) $(MAIN_OBJ)
 
 TARGET = canvas.elf
 
@@ -204,6 +207,13 @@ quickjs/libunicode.o: quickjs/libunicode.c
 	$(CC) $(CFLAGS) $(INCLUDES) -DCONFIG_ALL_UNICODE $< -o $@
 
 quickjs/dtoa.o: quickjs/dtoa.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
+
+# ----------------------------------------------------------------------------
+# Platform Abstraction
+# ----------------------------------------------------------------------------
+src/common/%.o: src/common/%.c src/common/%.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
 

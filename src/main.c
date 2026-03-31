@@ -26,6 +26,7 @@ static ImageInfo  g_image_info[MAX_IMAGES];
 static int        g_image_count  = 0;
 static ScriptInfo g_script_info[MAX_SCRIPTS];
 static int        g_script_count = 0;
+static char       g_window_title[512] = "Canvas Demo";  /* Default title */
 
 /* ============================================================================
  * Base directory for resolving relative paths (set from HTML file path)
@@ -263,10 +264,26 @@ static int parse_html(const char* path) {
                     strcpy(img_buffer, line);
                 }
             }
+
+            /* Parse title tag */
+            if (strstr(line, "<title>") != NULL) {
+                const char *start = strstr(line, "<title>") + 7;
+                const char *end = strstr(start, "</title>");
+                if (end && end > start) {
+                    size_t len = (size_t)(end - start);
+                    if (len > 0 && len < sizeof(g_window_title) - 1) {
+                        strncpy(g_window_title, start, len);
+                        g_window_title[len] = '\0';
+                    }
+                }
+            }
         }
     }
 
     fclose(f);
+
+    /* Use HTML title for localStorage path if available */
+    fprintf(stderr, "[main] Window title: %s\n", g_window_title);
     if (script_content) free(script_content);
 
     /* Log parsed images */
@@ -434,7 +451,8 @@ int main(int argc, char** argv) {
     /* --- Set up JS globals (document, window, canvas elements, …) --- */
     jscore.setup_globals(win_w, win_h,
                          g_canvas_info, g_canvas_count,
-                         g_image_info,  g_image_count);
+                         g_image_info,  g_image_count,
+                         g_window_title);
 
     /* --- Execute scripts in document order (inline and external interleaved) --- */
     fprintf(stderr, "[main] Total scripts: %d\n", g_script_count);

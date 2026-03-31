@@ -179,7 +179,8 @@ typedef struct {
 
     void (*setup_globals)(int win_w, int win_h,
                           CanvasInfo* canvases, int canvas_count,
-                          ImageInfo*  images,  int image_count);
+                          ImageInfo*  images,  int image_count,
+                          const char* window_title);
     void (*preload_images)(ImageInfo* images, int count);
 
     int  (*eval_file)(const char* path);
