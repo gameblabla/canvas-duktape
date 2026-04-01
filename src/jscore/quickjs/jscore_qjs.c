@@ -6997,6 +6997,18 @@ static JSValue js_window_clearTimeout_global(JSContext *ctx, JSValueConst this_v
     return js_clearTimeout(ctx, this_val, argc, argv);
 }
 
+/* matchMedia - returns MediaQueryList stub with matches=false */
+static JSValue js_window_matchMedia(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue result = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, result, "matches", JS_NewBool(ctx, false));
+    JS_SetPropertyStr(ctx, result, "media", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, result, "addEventListener", JS_NewCFunction(ctx, js_noop, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, result, "removeEventListener", JS_NewCFunction(ctx, js_noop, "removeEventListener", 2));
+    return result;
+}
+
 /* Key listener storage */
 static JSValue g_keydown_listeners[16];
 static JSValue g_keyup_listeners[16];
