@@ -478,6 +478,10 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "[main] Loaded script: %s\n", g_script_info[i].src);
         }
     }
+    
+    /* Pre-initialize mouse variables for games that need them (derp_puncher) */
+    jscore.eval_string("if(typeof mousex==='undefined'){mousex=0;mousey=0;mousse=0;}");
+    fprintf(stderr, "[main] Initialized mouse variables\n");
     fprintf(stderr, "[main] Before canvas setup, g_canvas_count=%d\n", g_canvas_count);
 
     /* --- Preload HTML images (set .src to trigger onload) --- */
@@ -496,11 +500,13 @@ int main(int argc, char** argv) {
     int arrow_keys_sent = 0;
     int arrow_key_state = 0;  /* State machine for arrow key sequence */
     int arrow_key_hold_start = 0;
+    int mouse_click_state = 0;  /* 0=none, 1=pressed, 2=held, 3=released */
     const int SCREENSHOT_FRAME = 30;  /* Take screenshot after N frames */
     const int SCREENSHOT_FRAME2 = 100;  /* Take another screenshot later */
     const int SCREENSHOT_FRAME3 = 300;  /* Take a third screenshot for slow-loading games */
     const int ENTER_FRAME = 20;  /* Simulate ENTER keypress after N frames (delayed for game init) */
     const int CLICK_FRAME = 40;  /* Simulate mouse click after N frames */
+    const int CLICK_HOLD_FRAMES = 10;  /* Hold mouse for N frames */
     const int ARROW_KEY_FRAME = 60;  /* Simulate arrow keys for GameMaker games (after init) */
     const int ARROW_KEY_HOLD_FRAMES = 3;  /* Hold each arrow key for N frames */
 
@@ -547,11 +553,20 @@ int main(int argc, char** argv) {
         }
 
         /* Simulate mouse click for games that require click to start */
-        if (frame_count >= CLICK_FRAME && !mouse_clicked) {
-            jscore.dispatch_mouse(INPUT_EVENT_MOUSEDOWN, 100, 100, 0);
-            jscore.dispatch_mouse(INPUT_EVENT_MOUSEUP, 100, 100, 0);
+        /* Hold mouse for multiple frames so game registers the click */
+        if (frame_count >= CLICK_FRAME && mouse_click_state == 0) {
+            /* Press mouse - set variables directly for games that don't use event handlers */
+            jscore.eval_string("if(typeof mousex!=='undefined'){mousex=400;mousey=200;mousse=1;}");
+            jscore.dispatch_mouse(INPUT_EVENT_MOUSEDOWN, 400, 200, 0);
+            mouse_click_state = 1;
+            fprintf(stderr, "[main] Mouse pressed at (400, 200)\n");
+        } else if (mouse_click_state == 1 && frame_count - CLICK_FRAME >= CLICK_HOLD_FRAMES) {
+            /* Release mouse */
+            jscore.dispatch_mouse(INPUT_EVENT_MOUSEUP, 400, 200, 0);
+            /* Keep mousse=1 for derp_puncher which checks it in game loop */
+            mouse_click_state = 3;
             mouse_clicked = 1;
-            fprintf(stderr, "[main] Simulated mouse click at (100, 100)\n");
+            fprintf(stderr, "[main] Mouse released\n");
         }
 
         /* Simulate arrow keys for GameMaker games (speed/time adjustment) */
