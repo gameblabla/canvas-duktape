@@ -444,6 +444,7 @@ static JSValue js_audiocontext_createOscillator(JSContext *ctx, JSValueConst thi
 static JSValue js_audiocontext_createBiquadFilter(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_createBuffer(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_createAnalyser(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_audiocontext_createDynamicsCompressor(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 /* Analyser methods */
 static JSValue js_audiocontext_analyser_getByteFrequencyData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_audiocontext_analyser_getByteTimeDomainData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
@@ -6635,6 +6636,13 @@ static JSValue js_textNode_get_textContent(JSContext *ctx, JSValueConst this_val
     return JS_UNDEFINED;
 }
 
+static JSValue js_document_getElementsByClassName(JSContext *ctx, JSValueConst this_val,
+                                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    /* Return an empty array so Array.from() and for..of work */
+    return JS_NewArray(ctx);
+}
+
 static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NULL;
@@ -8875,6 +8883,8 @@ static void setup_audiocontext_prototype(JSContext *ctx) {
         JS_NewCFunction(ctx, js_audiocontext_createPanner, "createPanner", 0));
     JS_SetPropertyStr(ctx, g_audiocontext_proto, "createBiquadFilter",
         JS_NewCFunction(ctx, js_audiocontext_createBiquadFilter, "createBiquadFilter", 0));
+    JS_SetPropertyStr(ctx, g_audiocontext_proto, "createDynamicsCompressor",
+        JS_NewCFunction(ctx, js_audiocontext_createDynamicsCompressor, "createDynamicsCompressor", 0));
     JS_SetPropertyStr(ctx, g_audiocontext_proto, "createMediaElementSource",
         JS_NewCFunction(ctx, js_audiocontext_createMediaElementSource, "createMediaElementSource", 1));
     JS_SetPropertyStr(ctx, g_audiocontext_proto, "decodeAudioData",
@@ -9463,6 +9473,53 @@ static JSValue js_audiocontext_createAnalyser(JSContext *ctx, JSValueConst this_
     return analyser;
 }
 
+static JSValue js_audiocontext_createDynamicsCompressor(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue comp = JS_NewObject(ctx);
+    /* Standard DynamicsCompressor AudioParams */
+    JSValue threshold = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, threshold, "value", JS_NewFloat64(ctx, -24.0));
+    JS_SetPropertyStr(ctx, threshold, "defaultValue", JS_NewFloat64(ctx, -24.0));
+    JS_SetPropertyStr(ctx, threshold, "setValueAtTime",
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, comp, "threshold", threshold);
+
+    JSValue knee = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, knee, "value", JS_NewFloat64(ctx, 30.0));
+    JS_SetPropertyStr(ctx, knee, "defaultValue", JS_NewFloat64(ctx, 30.0));
+    JS_SetPropertyStr(ctx, knee, "setValueAtTime",
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, comp, "knee", knee);
+
+    JSValue ratio = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, ratio, "value", JS_NewFloat64(ctx, 12.0));
+    JS_SetPropertyStr(ctx, ratio, "defaultValue", JS_NewFloat64(ctx, 12.0));
+    JS_SetPropertyStr(ctx, ratio, "setValueAtTime",
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, comp, "ratio", ratio);
+
+    JSValue attack = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, attack, "value", JS_NewFloat64(ctx, 0.003));
+    JS_SetPropertyStr(ctx, attack, "defaultValue", JS_NewFloat64(ctx, 0.003));
+    JS_SetPropertyStr(ctx, attack, "setValueAtTime",
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, comp, "attack", attack);
+
+    JSValue release = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, release, "value", JS_NewFloat64(ctx, 0.25));
+    JS_SetPropertyStr(ctx, release, "defaultValue", JS_NewFloat64(ctx, 0.25));
+    JS_SetPropertyStr(ctx, release, "setValueAtTime",
+        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
+    JS_SetPropertyStr(ctx, comp, "release", release);
+
+    JS_SetPropertyStr(ctx, comp, "reduction", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, comp, "connect",
+        JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
+    JS_SetPropertyStr(ctx, comp, "disconnect",
+        JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
+    return comp;
+}
+
 static JSValue js_getComputedStyle(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
     (void)this_val;
@@ -9690,8 +9747,8 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, document, "createTextNode", JS_NewCFunction(ctx, js_document_createTextNode, "createTextNode", 1));
     JS_SetPropertyStr(ctx, document, "createComment", JS_NewCFunction(ctx, js_document_createComment, "createComment", 1));
     JS_SetPropertyStr(ctx, document, "createEvent", JS_NewCFunction(ctx, js_document_createEvent, "createEvent", 1));
-    /* Add getElementsByClassName */
-    JS_SetPropertyStr(ctx, document, "getElementsByClassName", JS_NewCFunction(ctx, js_noop, "getElementsByClassName", 1));
+    /* Add getElementsByClassName — returns empty array (iterable) so Array.from() works */
+    JS_SetPropertyStr(ctx, document, "getElementsByClassName", JS_NewCFunction(ctx, js_document_getElementsByClassName, "getElementsByClassName", 1));
     /* querySelector/querySelectorAll already set via js_document_funcs above */
     /* Add getElementById (returns null for unknown ids) */
     JS_SetPropertyStr(ctx, document, "getElementById", JS_NewCFunction(ctx, js_document_getElementById, "getElementById", 1));
@@ -9902,6 +9959,16 @@ static void setup_globals_object(JSContext *ctx) {
     /* Register AudioContext and webkitAudioContext (for compatibility) */
     JS_SetPropertyStr(ctx, global, "AudioContext", AudioContext_ctor);
     JS_SetPropertyStr(ctx, global, "webkitAudioContext", JS_DupValue(ctx, AudioContext_ctor));
+
+    /* OfflineAudioContext — constructor(channels, length, sampleRate), mainly used for decodeAudioData */
+    JSValue OfflineAudioContext_ctor = JS_NewCFunction2(ctx, js_audiocontext_ctor, "OfflineAudioContext", 3,
+                                                         JS_CFUNC_constructor, 0);
+    JS_SetPropertyStr(ctx, OfflineAudioContext_ctor, "prototype", JS_DupValue(ctx, g_audiocontext_proto));
+    JS_SetPropertyStr(ctx, global, "OfflineAudioContext", OfflineAudioContext_ctor);
+    JS_SetPropertyStr(ctx, global, "webkitOfflineAudioContext", JS_DupValue(ctx, OfflineAudioContext_ctor));
+
+    /* window.matchMedia — returns MediaQueryList stub with matches=false */
+    JS_SetPropertyStr(ctx, global, "matchMedia", JS_NewCFunction(ctx, js_window_matchMedia, "matchMedia", 1));
 
     /* Global utility functions */
     JS_SetPropertyStr(ctx, global, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));

@@ -87,14 +87,47 @@ static int parse_html(const char* path) {
     }
 
     char   line[4096];
-    int    inside_script = 0;
-    int    inside_img    = 0;
+    int    inside_script  = 0;
+    int    inside_img     = 0;
+    int    inside_comment = 0;
     char   img_buffer[4096];
     char*  script_content      = NULL;
     size_t script_content_size = 0;
     size_t script_content_len  = 0;
 
     while (fgets(line, sizeof(line), f)) {
+        /* Strip HTML comments from non-script lines */
+        if (!inside_script) {
+            /* Handle multi-line comments with inside_comment flag */
+            char stripped[4096];
+            char *src = line, *dst = stripped;
+            while (*src) {
+                if (inside_comment) {
+                    char *end = strstr(src, "-->");
+                    if (end) {
+                        inside_comment = 0;
+                        src = end + 3;
+                    } else {
+                        break; /* rest of line is inside comment */
+                    }
+                } else {
+                    char *start = strstr(src, "<!--");
+                    if (start) {
+                        /* copy up to comment start */
+                        while (src < start) *dst++ = *src++;
+                        inside_comment = 1;
+                        src = start + 4;
+                    } else {
+                        /* no comment start - copy rest */
+                        while (*src) *dst++ = *src++;
+                    }
+                }
+            }
+            *dst = '\0';
+            strncpy(line, stripped, sizeof(line) - 1);
+            line[sizeof(line) - 1] = '\0';
+        }
+
         if (inside_script) {
             /* Check for closing script tag */
             if (strstr(line, "</script>") != NULL) {
