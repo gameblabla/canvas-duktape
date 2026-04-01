@@ -6759,6 +6759,9 @@ static JSValue js_document_get_documentElement(JSContext *ctx, JSValueConst this
     JS_SetPropertyStr(ctx, g_cached_documentElement, "nodeName", JS_NewString(ctx, "HTML"));
     JS_SetPropertyStr(ctx, g_cached_documentElement, "tagName", JS_NewString(ctx, "HTML"));
     JS_SetPropertyStr(ctx, g_cached_documentElement, "nodeType", JS_NewInt32(ctx, 1));
+    /* Add dataset object for data-* attributes (used by dark_color_scheme.bundle.js) */
+    JSValue dataset = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, g_cached_documentElement, "dataset", dataset);
     /* Ensure documentElement has children for jQuery */
     JSValue childStub = js_make_child_stub(ctx, 0);
     JS_SetPropertyStr(ctx, g_cached_documentElement, "firstChild", JS_DupValue(ctx, childStub));
@@ -9704,6 +9707,8 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, docElem, "nodeName", JS_NewString(ctx, "HTML"));
     JS_SetPropertyStr(ctx, docElem, "tagName", JS_NewString(ctx, "HTML"));
     JS_SetPropertyStr(ctx, docElem, "nodeType", JS_NewInt32(ctx, 1));
+    /* Add dataset object for data-* attributes (used by dark_color_scheme.bundle.js) */
+    JS_SetPropertyStr(ctx, docElem, "dataset", JS_NewObject(ctx));
     JS_SetPropertyStr(ctx, docElem, "scrollHeight", JS_NewInt32(ctx, 600));
     JS_SetPropertyStr(ctx, docElem, "scrollWidth", JS_NewInt32(ctx, 800));
     JS_SetPropertyStr(ctx, docElem, "clientHeight", JS_NewInt32(ctx, 600));
