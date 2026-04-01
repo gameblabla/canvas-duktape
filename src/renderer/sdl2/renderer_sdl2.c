@@ -206,6 +206,32 @@ static void render_with_transform(SDL_Texture* src_tex,
         SDL_SetTextureAlphaMod(src_tex, 255);
         return;
     }
+
+    /* Check for rotation (possibly with translation and uniform scale) */
+    double scale = sqrt(m[0]*m[0] + m[1]*m[1]);
+    double angle = atan2(m[1], m[0]) * 180.0 / M_PI;  /* Convert to degrees */
+    /* Check if this is a rotation matrix (rotation + optional uniform scale + translation) */
+    int is_rotation = (fabs(fabs(m[0]) - fabs(m[3])) < 0.001 && fabs(m[1] + m[2]) < 0.001);
+
+    if (is_rotation && scale > 0.001) {
+        /* Use SDL_RenderCopyEx for clean rotation */
+        SDL_SetTextureAlphaMod(src_tex, alphaMod);
+
+        /* Calculate center of destination rect for rotation pivot */
+        SDL_Point center;
+        center.x = d->w / 2;
+        center.y = d->h / 2;
+
+        /* Determine flip flags */
+        SDL_RendererFlip flip = SDL_FLIP_NONE;
+        if (m[0] < 0) flip |= SDL_FLIP_HORIZONTAL;
+        if (m[3] < 0) flip |= SDL_FLIP_VERTICAL;
+
+        SDL_RenderCopyEx(g_sdl_renderer, src_tex, s, d, angle, &center, flip);
+        SDL_SetTextureAlphaMod(src_tex, 255);
+        return;
+    }
+
     int flip_h = (m[0] < 0) ? 1 : 0;
     int flip_v = (m[3] < 0) ? 1 : 0;
     int is_pure_flip = (fabs(m[1]) < 0.001 && fabs(m[2]) < 0.001
@@ -217,24 +243,12 @@ static void render_with_transform(SDL_Texture* src_tex,
         return;
     }
     if (is_pure_flip) {
-        float scale_x = (float)d->w / (float)s->w;
-        float scale_y = (float)d->h / (float)s->h;
-        for (int sy = 0; sy < s->h; sy++) {
-            int dy2 = flip_v ? (s->h - 1 - sy) : sy;
-            int dst_y = d->y + (int)(dy2 * scale_y);
-            int dst_h = (int)((dy2 + 1) * scale_y) - (int)(dy2 * scale_y);
-            if (dst_h < 1) dst_h = 1;
-            for (int sx2 = 0; sx2 < s->w; sx2++) {
-                int dx2 = flip_h ? (s->w - 1 - sx2) : sx2;
-                int dst_x = d->x + (int)(dx2 * scale_x);
-                int dst_w2 = (int)((dx2+1)*scale_x) - (int)(dx2*scale_x);
-                if (dst_w2 < 1) dst_w2 = 1;
-                SDL_Rect sr = { s->x + sx2, s->y + sy, 1, 1 };
-                SDL_Rect dr = { dst_x, dst_y, dst_w2, dst_h };
-                SDL_SetTextureAlphaMod(src_tex, alphaMod);
-                SDL_RenderCopy(g_sdl_renderer, src_tex, &sr, &dr);
-            }
-        }
+        /* Use SDL_RenderCopyEx for flip */
+        SDL_SetTextureAlphaMod(src_tex, alphaMod);
+        SDL_RendererFlip flip = SDL_FLIP_NONE;
+        if (flip_h) flip |= SDL_FLIP_HORIZONTAL;
+        if (flip_v) flip |= SDL_FLIP_VERTICAL;
+        SDL_RenderCopyEx(g_sdl_renderer, src_tex, s, d, 0, NULL, flip);
         SDL_SetTextureAlphaMod(src_tex, 255);
         return;
     }
@@ -379,6 +393,8 @@ static int r_init(int w, int h, const char* title) {
         SDL_DestroyWindow(g_window);
         TTF_Quit(); IMG_Quit(); SDL_Quit(); return 0;
     }
+    /* Set global render scale quality to nearest-neighbor for pixel-perfect rendering */
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
 
     g_offscreen = SDL_CreateTexture(g_sdl_renderer,
                                     SDL_PIXELFORMAT_RGBA8888,
@@ -391,6 +407,8 @@ static int r_init(int w, int h, const char* title) {
     }
     g_offscreen_w = w;
     g_offscreen_h = h;
+    /* Set nearest-neighbor scaling for pixel-perfect rendering */
+    SDL_SetTextureScaleMode(g_offscreen, SDL_ScaleModeNearest);
     SDL_SetTextureBlendMode(g_offscreen, get_premult_blend_mode());
     SDL_SetRenderTarget(g_sdl_renderer, g_offscreen);
     SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
@@ -471,6 +489,8 @@ static void* r_create_texture(int w, int h) {
     fprintf(stderr, "[r_create_texture] %dx%d -> %p\n", w, h, t);
 #endif
     if (!t) return NULL;
+    /* Set nearest-neighbor scaling for pixel-perfect rendering */
+    SDL_SetTextureScaleMode(t, SDL_ScaleModeNearest);
     SDL_SetTextureBlendMode(t, get_premult_blend_mode());
     SDL_SetRenderTarget(g_sdl_renderer, t);
     SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
@@ -491,15 +511,19 @@ static void* r_load_image_file(const char* path) {
     /* Resolve resource path */
     char full_path[1024];
     get_resource_path(path, full_path, sizeof(full_path));
-    
+
     SDL_Surface* sf = IMG_Load(full_path);
     if (!sf) {
         fprintf(stderr, "[load_image_file] %s: %s\n", full_path, IMG_GetError());
         return NULL;
     }
     SDL_Texture* t = SDL_CreateTextureFromSurface(g_sdl_renderer, sf);
-    if (!t)
+    if (t) {
+        /* Set nearest-neighbor scaling for pixel-perfect rendering */
+        SDL_SetTextureScaleMode(t, SDL_ScaleModeNearest);
+    } else {
         fprintf(stderr, "[load_image_file] texture from %s: %s\n", full_path, SDL_GetError());
+    }
     SDL_FreeSurface(sf);
     return t;
 }
@@ -511,6 +535,10 @@ static void* r_load_image_mem(const unsigned char* data, int len) {
     SDL_FreeRW(rw);
     if (!sf) return NULL;
     SDL_Texture* t = SDL_CreateTextureFromSurface(g_sdl_renderer, sf);
+    if (t) {
+        /* Set nearest-neighbor scaling for pixel-perfect rendering */
+        SDL_SetTextureScaleMode(t, SDL_ScaleModeNearest);
+    }
     SDL_FreeSurface(sf);
     return t;
 }
@@ -754,6 +782,8 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     SDL_Texture* tt = SDL_CreateTextureFromSurface(g_sdl_renderer, sf);
     SDL_FreeSurface(sf);
     if (!tt) return;
+    /* Set nearest-neighbor scaling for pixel-perfect rendering */
+    SDL_SetTextureScaleMode(tt, SDL_ScaleModeNearest);
     int tw, th;
     SDL_QueryTexture(tt, NULL, NULL, &tw, &th);
     
@@ -822,6 +852,8 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
     SDL_Texture* tt = SDL_CreateTextureFromSurface(g_sdl_renderer, sf);
     SDL_FreeSurface(sf);
     if (!tt) return;
+    /* Set nearest-neighbor scaling for pixel-perfect rendering */
+    SDL_SetTextureScaleMode(tt, SDL_ScaleModeNearest);
     int tw, th;
     SDL_QueryTexture(tt, NULL, NULL, &tw, &th);
     
