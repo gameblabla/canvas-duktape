@@ -1932,6 +1932,7 @@ static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueCons
         else if (strcmp(op, "source-atop") == 0)   g_ctx2d.global_composite = 9;
         else if (strcmp(op, "destination-out") == 0) g_ctx2d.global_composite = 10;
         else if (strcmp(op, "destination-atop") == 0) g_ctx2d.global_composite = 11;
+        else if (strcmp(op, "screen") == 0)           g_ctx2d.global_composite = 12;
         /* else: keep previous value (invalid op ignored) */
         JS_FreeCString(ctx, op);
     }
@@ -1952,6 +1953,7 @@ static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueCons
         case 9: return JS_NewString(ctx, "source-atop");
         case 10: return JS_NewString(ctx, "destination-out");
         case 11: return JS_NewString(ctx, "destination-atop");
+        case 12: return JS_NewString(ctx, "screen");
         default: return JS_NewString(ctx, "source-over");
     }
 }
@@ -2629,7 +2631,7 @@ static JSValue js_ctx2d_fill(JSContext *ctx, JSValueConst this_val,
     }
 
     if (g_renderer->fill_polygon) {
-        g_renderer->fill_polygon(target, pts, use_count, r, g, b, a, 0, fill_rule);
+        g_renderer->fill_polygon(target, pts, use_count, r, g, b, a, g_ctx2d.global_composite, fill_rule);
     }
 
     free(pts);
@@ -2878,7 +2880,13 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
         uint8_t sa = color_to_byte(g_ctx2d.shadow_color[3]);
         int blur = g_ctx2d.shadow_blur;
         if (blur > 0) {
-            /* Draw multiple rects to approximate blur spread */
+            /* Draw multiple rects to approximate blur spread.
+             * Scale per-pass alpha to prevent full opacity accumulation. */
+            int n_steps = 0;
+            for (int bx = -blur; bx <= blur; bx += (blur/4 + 1)) n_steps++;
+            int n_passes = n_steps * n_steps;
+            uint8_t iter_sa = (uint8_t)((int)sa * 3 / (n_passes > 0 ? n_passes : 1));
+            if (iter_sa < 1 && sa > 0) iter_sa = 1;
             for (int bx = -blur; bx <= blur; bx += (blur/4 + 1)) {
                 for (int by = -blur; by <= blur; by += (blur/4 + 1)) {
                     double sm[6];
@@ -2886,7 +2894,7 @@ static JSValue js_ctx2d_fillRect(JSContext *ctx, JSValueConst this_val,
                     sm[4] += g_ctx2d.shadow_offset_x + bx;
                     sm[5] += g_ctx2d.shadow_offset_y + by;
                     g_renderer->fill_rect(target, x - blur, y - blur, w + 2*blur, h + 2*blur,
-                                          sr, sg, sb, sa, 0, sm);
+                                          sr, sg, sb, iter_sa, 0, sm);
                 }
             }
         } else {

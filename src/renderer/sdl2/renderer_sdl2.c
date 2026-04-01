@@ -626,6 +626,10 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     } else if (blend_add == 11) { /* destination-atop: Src*(1-DstA) + Dst*SrcA */
         bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 12) { /* screen: Src + Dst*(1-SrcColor) */
+        bm = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_COLOR, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else {
         bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     }
@@ -688,7 +692,8 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
     apply_clip_for_texture(tex);
     /* Set pattern alpha */
     SDL_SetTextureAlphaMod(pat, alpha);
-    SDL_SetTextureBlendMode(pat, SDL_BLENDMODE_BLEND);
+    /* Keep the pattern texture's natural blend mode (premultiplied for canvas
+     * textures) so alpha is composited correctly. */
     /* Tile the pattern */
     for (int ty = y; ty < y+h; ty += ph) {
         for (int tx = x; tx < x+w; tx += pw) {
@@ -749,6 +754,15 @@ static void r_draw_image(void* target, void* img,
     SDL_Rect srcRect = {sx, sy, sw, sh};
     SDL_Rect dstRect;
     apply_transform_to_dst(dx, dy, dw, dh, m, &dstRect);
+    /* When globalAlpha < 1 (alpha_mod < 255), SDL's custom premultiplied
+     * blend mode incorrectly scales RGB channels by alpha_mod. Switch to
+     * SDL_BLENDMODE_BLEND which handles alpha_mod correctly in that case.
+     * When alpha == 255 keep the premultiplied blend mode so straight-stored
+     * semi-transparent source pixels composite with correct color. */
+    SDL_BlendMode saved_bm;
+    SDL_GetTextureBlendMode(src, &saved_bm);
+    if (alpha < 255)
+        SDL_SetTextureBlendMode(src, SDL_BLENDMODE_BLEND);
     SDL_SetTextureAlphaMod(src, alpha);
     SDL_SetRenderTarget(g_sdl_renderer, dst);
     /* Apply clip rect for the target texture */
@@ -759,6 +773,7 @@ static void r_draw_image(void* target, void* img,
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
     SDL_RenderFlush(g_sdl_renderer);
     SDL_SetTextureAlphaMod(src, 255);
+    SDL_SetTextureBlendMode(src, saved_bm);
 }
 
 static void r_draw_canvas(void* target, void* src_tex,
@@ -1016,8 +1031,66 @@ static void r_fill_polygon(void* target, const double* pts, int count,
         bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 6) {
-        bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
-                                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+        /* destination-in: Dst*SrcA inside polygon, clear outside.
+         * Two-pass: apply mask inside spans, clear outside spans per scanline. */
+        int tex_w = 0, tex_h = 0;
+        SDL_QueryTexture(tex, NULL, NULL, &tex_w, &tex_h);
+        double di_min_x=pts[0], di_max_x=pts[0], di_min_y=pts[1], di_max_y=pts[1];
+        for (int i=1; i<count; i++) {
+            double px=pts[i*2], py=pts[i*2+1];
+            if(px<di_min_x)di_min_x=px; if(px>di_max_x)di_max_x=px;
+            if(py<di_min_y)di_min_y=py; if(py>di_max_y)di_max_y=py;
+        }
+        SDL_BlendMode mask_bm = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+        /* Clear rows above and below polygon */
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
+        int above_y = (int)floor(di_min_y);
+        if (above_y > 0) {
+            SDL_Rect t = {0, 0, tex_w, above_y}; SDL_RenderFillRect(g_sdl_renderer, &t);
+        }
+        int below_y = (int)ceil(di_max_y) + 1;
+        if (below_y < tex_h) {
+            SDL_Rect t = {0, below_y, tex_w, tex_h - below_y}; SDL_RenderFillRect(g_sdl_renderer, &t);
+        }
+        /* Per-scanline: clear outside spans, apply mask inside spans */
+        for (int scan_y = above_y; scan_y <= (int)ceil(di_max_y); scan_y++) {
+            double ixs2[128]; int cnt2 = 0;
+            for (int i=0; i<count-1; i++) {
+                double x1=pts[i*2], y1=pts[i*2+1];
+                double x2=pts[(i+1)*2], y2=pts[(i+1)*2+1];
+                if ((y1<=scan_y && y2>scan_y)||(y2<=scan_y && y1>scan_y)) {
+                    if (cnt2 < 127)
+                        ixs2[cnt2++] = x1 + (scan_y-y1)/(y2-y1)*(x2-x1);
+                }
+            }
+            for(int i=0;i<cnt2-1;i++) for(int j=i+1;j<cnt2;j++)
+                if(ixs2[i]>ixs2[j]){double tt=ixs2[i];ixs2[i]=ixs2[j];ixs2[j]=tt;}
+            /* Clear left of polygon */
+            SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+            SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
+            int lx0 = cnt2 > 0 ? (int)floor(ixs2[0]) : tex_w;
+            if (lx0 > 0) { SDL_Rect t={0,scan_y,lx0,1}; SDL_RenderFillRect(g_sdl_renderer,&t); }
+            /* Apply mask inside spans */
+            SDL_SetRenderDrawBlendMode(g_sdl_renderer, mask_bm);
+            SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
+            for(int i=0; i<cnt2-1; i+=2) {
+                int lx=(int)floor(ixs2[i]), rx=(int)ceil(ixs2[i+1]);
+                if(rx>lx){SDL_Rect t={lx,scan_y,rx-lx,1}; SDL_RenderFillRect(g_sdl_renderer,&t);}
+            }
+            /* Clear right of polygon */
+            SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+            SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
+            int rx0 = cnt2 > 0 ? (int)ceil(ixs2[cnt2-1]) : 0;
+            if (rx0 < tex_w) { SDL_Rect t={rx0,scan_y,tex_w-rx0,1}; SDL_RenderFillRect(g_sdl_renderer,&t); }
+        }
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        remove_clip_for_texture(tex);
+        SDL_SetRenderTarget(g_sdl_renderer, NULL);
+        SDL_RenderFlush(g_sdl_renderer);
+        return;
     } else if (blend_add == 7) {
         bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
@@ -1032,6 +1105,10 @@ static void r_fill_polygon(void* target, const double* pts, int count,
     } else if (blend_add == 11) { /* destination-atop: Src*(1-DstA) + Dst*SrcA */
         bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 12) { /* screen: Src + Dst*(1-SrcColor) */
+        bm = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_COLOR, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else {
         bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     }
