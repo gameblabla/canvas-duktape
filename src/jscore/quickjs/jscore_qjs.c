@@ -411,6 +411,9 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id);
 static int point_in_path_evenodd(double x, double y, const double *pts, int count);
 static int point_in_path_nonzero(double x, double y, const double *pts, int count);
 static JSValue js_make_element_stub(JSContext *ctx);
+static JSValue js_style_getPropertyValue(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_canvas_get_offsetWidth(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_canvas_get_offsetHeight(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 
 /* jQuery support forward declarations */
 static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
@@ -4271,6 +4274,215 @@ static JSValue js_canvas_get_width(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt32(ctx, 0);
 }
 
+static JSValue js_canvas_get_clientWidth(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == id) {
+            /* Check if CSS width is set in style */
+            if (g_canvases[i].style[0] != '\0') {
+                /* Parse CSS width from style string (e.g., "width: 200px; height: 150px" */
+                const char *p = strstr(g_canvases[i].style, "width:");
+                if (p) {
+                    p += 6;
+                    while (*p == ' ') p++;
+                    int w = atoi(p);
+                    if (w > 0) return JS_NewInt32(ctx, w);
+                }
+            }
+            return JS_NewInt32(ctx, g_canvases[i].width);
+        }
+    }
+    return JS_NewInt32(ctx, 0);
+}
+
+static JSValue js_canvas_get_clientHeight(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == id) {
+            /* Check if CSS height is set in style */
+            if (g_canvases[i].style[0] != '\0') {
+                /* Parse CSS height from style string */
+                const char *p = strstr(g_canvases[i].style, "height:");
+                if (p) {
+                    p += 7;
+                    while (*p == ' ') p++;
+                    int h = atoi(p);
+                    if (h > 0) return JS_NewInt32(ctx, h);
+                }
+            }
+            return JS_NewInt32(ctx, g_canvases[i].height);
+        }
+    }
+    return JS_NewInt32(ctx, 0);
+}
+
+/* Style width/height getters and setters for canvas.style.width/height */
+static JSValue js_canvas_get_style_width(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    /* Get canvas ID from style object's _canvasId property */
+    JSValue cid_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
+    int id = 0;
+    if (!JS_IsUndefined(cid_val)) {
+        JS_ToInt32(ctx, &id, cid_val);
+    }
+    JS_FreeValue(ctx, cid_val);
+    
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == id) {
+            if (g_canvases[i].style[0] != '\0') {
+                const char *p = strstr(g_canvases[i].style, "width:");
+                if (p) {
+                    p += 6;
+                    while (*p == ' ') p++;
+                    char buf[64];
+                    int len = 0;
+                    while (*p && *p != ';' && *p != ' ' && len < 63) {
+                        buf[len++] = *p++;
+                    }
+                    buf[len] = '\0';
+                    return JS_NewString(ctx, buf);
+                }
+            }
+            break;
+        }
+    }
+    return JS_NewString(ctx, "");
+}
+
+static JSValue js_canvas_set_style_width(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    /* Get canvas ID from style object's _canvasId property */
+    JSValue cid_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
+    int id = 0;
+    if (!JS_IsUndefined(cid_val)) {
+        JS_ToInt32(ctx, &id, cid_val);
+    }
+    JS_FreeValue(ctx, cid_val);
+    
+    if (argc < 1) return JS_UNDEFINED;
+    const char *val = JS_ToCString(ctx, argv[0]);
+    if (!val) return JS_UNDEFINED;
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == id) {
+            /* Update style string with new width */
+            char new_style[256] = "";
+            if (g_canvases[i].style[0] != '\0' && strstr(g_canvases[i].style, "width:")) {
+                /* Replace existing width */
+                const char *p = g_canvases[i].style;
+                while (*p && p < g_canvases[i].style + sizeof(g_canvases[i].style)) {
+                    if (strncmp(p, "width:", 6) == 0) {
+                        /* Skip old width value */
+                        p += 6;
+                        while (*p && *p != ';' && *p != ' ') p++;
+                        if (*p == ';' || *p == ' ') p++;
+                        /* Insert new width */
+                        snprintf(new_style + strlen(new_style), sizeof(new_style) - strlen(new_style), "width:%s; ", val);
+                        /* Copy rest of style */
+                        strncat(new_style, p, sizeof(new_style) - strlen(new_style) - 1);
+                        break;
+                    } else {
+                        char c[2] = {*p, '\0'};
+                        strcat(new_style, c);
+                        p++;
+                    }
+                }
+            } else {
+                /* Add new width */
+                snprintf(new_style, sizeof(new_style), "%s width:%s;", g_canvases[i].style, val);
+            }
+            strncpy(g_canvases[i].style, new_style, sizeof(g_canvases[i].style) - 1);
+            break;
+        }
+    }
+    JS_FreeCString(ctx, val);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_canvas_get_style_height(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    /* Get canvas ID from style object's _canvasId property */
+    JSValue cid_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
+    int id = 0;
+    if (!JS_IsUndefined(cid_val)) {
+        JS_ToInt32(ctx, &id, cid_val);
+    }
+    JS_FreeValue(ctx, cid_val);
+    
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == id) {
+            if (g_canvases[i].style[0] != '\0') {
+                const char *p = strstr(g_canvases[i].style, "height:");
+                if (p) {
+                    p += 7;
+                    while (*p == ' ') p++;
+                    char buf[64];
+                    int len = 0;
+                    while (*p && *p != ';' && *p != ' ' && len < 63) {
+                        buf[len++] = *p++;
+                    }
+                    buf[len] = '\0';
+                    return JS_NewString(ctx, buf);
+                }
+            }
+            break;
+        }
+    }
+    return JS_NewString(ctx, "");
+}
+
+static JSValue js_canvas_set_style_height(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    /* Get canvas ID from style object's _canvasId property */
+    JSValue cid_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
+    int id = 0;
+    if (!JS_IsUndefined(cid_val)) {
+        JS_ToInt32(ctx, &id, cid_val);
+    }
+    JS_FreeValue(ctx, cid_val);
+    
+    if (argc < 1) return JS_UNDEFINED;
+    const char *val = JS_ToCString(ctx, argv[0]);
+    if (!val) return JS_UNDEFINED;
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == id) {
+            /* Update style string with new height */
+            char new_style[256] = "";
+            if (g_canvases[i].style[0] != '\0' && strstr(g_canvases[i].style, "height:")) {
+                /* Replace existing height */
+                const char *p = g_canvases[i].style;
+                while (*p && p < g_canvases[i].style + sizeof(g_canvases[i].style)) {
+                    if (strncmp(p, "height:", 7) == 0) {
+                        /* Skip old height value */
+                        p += 7;
+                        while (*p && *p != ';' && *p != ' ') p++;
+                        if (*p == ';' || *p == ' ') p++;
+                        /* Insert new height */
+                        snprintf(new_style + strlen(new_style), sizeof(new_style) - strlen(new_style), "height:%s; ", val);
+                        /* Copy rest of style */
+                        strncat(new_style, p, sizeof(new_style) - strlen(new_style) - 1);
+                        break;
+                    } else {
+                        char c[2] = {*p, '\0'};
+                        strcat(new_style, c);
+                        p++;
+                    }
+                }
+            } else {
+                /* Add new height */
+                snprintf(new_style, sizeof(new_style), "%s height:%s;", g_canvases[i].style, val);
+            }
+            strncpy(g_canvases[i].style, new_style, sizeof(g_canvases[i].style) - 1);
+            break;
+        }
+    }
+    JS_FreeCString(ctx, val);
+    return JS_UNDEFINED;
+}
+
 static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
     int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
@@ -6178,7 +6390,7 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     JS_SetPropertyStr(ctx, style, "transition",     JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "cursor",        JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "whiteSpace",    JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, style, "getPropertyValue", JS_NewCFunction(ctx, js_noop, "getPropertyValue", 1));
+    JS_SetPropertyStr(ctx, style, "getPropertyValue", JS_NewCFunction(ctx, js_style_getPropertyValue, "getPropertyValue", 1));
     JS_SetPropertyStr(ctx, style, "setProperty",   JS_NewCFunction(ctx, js_noop, "setProperty", 2));
     JS_SetPropertyStr(ctx, obj, "style",            style);
     JS_SetPropertyStr(ctx, obj, "className",        JS_NewString(ctx, ""));
@@ -6313,6 +6525,26 @@ static JSValue js_canvas_getBoundingClientRect(JSContext *ctx, JSValueConst this
         if (g_canvases[i].id == canvas_id) {
             w = g_canvases[i].width;
             h = g_canvases[i].height;
+            /* Check for CSS width/height */
+            if (g_canvases[i].style[0] != '\0') {
+                const char *p = strstr(g_canvases[i].style, "width:");
+                if (p) {
+                    p += 6;
+                    while (*p == ' ') p++;
+                    int css_w = atoi(p);
+                    if (css_w > 0) w = css_w;
+                }
+                p = strstr(g_canvases[i].style, "height:");
+                if (p) {
+                    p += 7;
+                    while (*p == ' ') p++;
+                    int css_h = atoi(p);
+                    if (css_h > 0) h = css_h;
+                }
+            }
+            /* Add 2px for borders (1px each side) */
+            w += 2;
+            h += 2;
             break;
         }
     }
@@ -6344,7 +6576,61 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
         JS_SetPropertyStr(ctx, style, "cssText", JS_NewString(ctx, ""));
         JS_SetPropertyStr(ctx, style, "width", JS_NewString(ctx, ""));
         JS_SetPropertyStr(ctx, style, "height", JS_NewString(ctx, ""));
+        /* Border properties - default to 1px for canvas elements */
+        JS_SetPropertyStr(ctx, style, "border", JS_NewString(ctx, "1px solid rgb(153, 153, 153)"));
+        JS_SetPropertyStr(ctx, style, "borderWidth", JS_NewString(ctx, "1px"));
+        JS_SetPropertyStr(ctx, style, "borderTopWidth", JS_NewString(ctx, "1px"));
+        JS_SetPropertyStr(ctx, style, "borderBottomWidth", JS_NewString(ctx, "1px"));
+        JS_SetPropertyStr(ctx, style, "borderLeftWidth", JS_NewString(ctx, "1px"));
+        JS_SetPropertyStr(ctx, style, "borderRightWidth", JS_NewString(ctx, "1px"));
+        /* Add getPropertyValue for getComputedStyle support */
+        JS_SetPropertyStr(ctx, style, "getPropertyValue", JS_NewCFunction(ctx, js_style_getPropertyValue, "getPropertyValue", 1));
         JS_SetPropertyStr(ctx, obj, "style", style);
+    }
+    /* clientWidth/clientHeight - getters that return CSS size or intrinsic size */
+    {
+        JSAtom clientWidth_atom = JS_NewAtom(ctx, "clientWidth");
+        JSValue clientWidth_getter = JS_NewCFunction(ctx, js_canvas_get_clientWidth, "clientWidth", 0);
+        JS_DefineProperty(ctx, obj, clientWidth_atom, JS_UNDEFINED,
+            clientWidth_getter, JS_UNDEFINED,
+            JS_PROP_HAS_GET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, clientWidth_atom);
+        JS_FreeValue(ctx, clientWidth_getter);
+        
+        JSAtom clientHeight_atom = JS_NewAtom(ctx, "clientHeight");
+        JSValue clientHeight_getter = JS_NewCFunction(ctx, js_canvas_get_clientHeight, "clientHeight", 0);
+        JS_DefineProperty(ctx, obj, clientHeight_atom, JS_UNDEFINED,
+            clientHeight_getter, JS_UNDEFINED,
+            JS_PROP_HAS_GET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, clientHeight_atom);
+        JS_FreeValue(ctx, clientHeight_getter);
+    }
+    /* Set style.width/style.height setters to update canvas style string */
+    {
+        JSValue style = JS_GetPropertyStr(ctx, obj, "style");
+        /* Store canvas ID on style object so setters can find the canvas */
+        JS_SetPropertyStr(ctx, style, "_canvasId", JS_NewInt32(ctx, id));
+        JSAtom width_atom = JS_NewAtom(ctx, "width");
+        JSValue width_getter = JS_NewCFunction(ctx, js_canvas_get_style_width, "width", 0);
+        JSValue width_setter = JS_NewCFunction(ctx, js_canvas_set_style_width, "width", 1);
+        JS_DefineProperty(ctx, style, width_atom, JS_UNDEFINED,
+            width_getter, width_setter,
+            JS_PROP_HAS_GET | JS_PROP_HAS_SET | JS_PROP_CONFIGURABLE);
+        JS_FreeAtom(ctx, width_atom);
+        JS_FreeValue(ctx, width_getter);
+        JS_FreeValue(ctx, width_setter);
+        
+        JSAtom height_atom = JS_NewAtom(ctx, "height");
+        JSValue height_getter = JS_NewCFunction(ctx, js_canvas_get_style_height, "height", 0);
+        JSValue height_setter = JS_NewCFunction(ctx, js_canvas_set_style_height, "height", 1);
+        JS_DefineProperty(ctx, style, height_atom, JS_UNDEFINED,
+            height_getter, height_setter,
+            JS_PROP_HAS_GET | JS_PROP_HAS_SET | JS_PROP_CONFIGURABLE);
+        JS_FreeAtom(ctx, height_atom);
+        JS_FreeValue(ctx, height_getter);
+        JS_FreeValue(ctx, height_setter);
+        
+        JS_FreeValue(ctx, style);
     }
     JS_SetPropertyStr(ctx, obj, "addEventListener",
         JS_NewCFunction(ctx, js_canvas_addEventListener, "addEventListener", 2));
@@ -6354,6 +6640,24 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
         JS_NewCFunction(ctx, js_canvas_getBoundingClientRect, "getBoundingClientRect", 0));
     JS_SetPropertyStr(ctx, obj, "offsetLeft",       JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, obj, "offsetTop",        JS_NewInt32(ctx, 0));
+    /* offsetWidth/offsetHeight - getters that return CSS size + borders */
+    {
+        JSAtom offsetWidth_atom = JS_NewAtom(ctx, "offsetWidth");
+        JSValue offsetWidth_getter = JS_NewCFunction(ctx, js_canvas_get_offsetWidth, "offsetWidth", 0);
+        JS_DefineProperty(ctx, obj, offsetWidth_atom, JS_UNDEFINED,
+            offsetWidth_getter, JS_UNDEFINED,
+            JS_PROP_HAS_GET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, offsetWidth_atom);
+        JS_FreeValue(ctx, offsetWidth_getter);
+        
+        JSAtom offsetHeight_atom = JS_NewAtom(ctx, "offsetHeight");
+        JSValue offsetHeight_getter = JS_NewCFunction(ctx, js_canvas_get_offsetHeight, "offsetHeight", 0);
+        JS_DefineProperty(ctx, obj, offsetHeight_atom, JS_UNDEFINED,
+            offsetHeight_getter, JS_UNDEFINED,
+            JS_PROP_HAS_GET | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, offsetHeight_atom);
+        JS_FreeValue(ctx, offsetHeight_getter);
+    }
     JS_SetPropertyStr(ctx, obj, "setAttribute",     JS_NewCFunction(ctx, js_noop, "setAttribute", 2));
     JS_SetPropertyStr(ctx, obj, "getAttribute",     JS_NewCFunction(ctx, js_noop, "getAttribute", 1));
     JS_SetPropertyStr(ctx, obj, "nextSibling",      JS_UNDEFINED);
@@ -7292,6 +7596,9 @@ static JSValue js_window_addEventListener(JSContext *ctx, JSValueConst this_val,
         /* Store load listener in global array */
         if (g_load_listener_count < 16) {
             g_load_listeners[g_load_listener_count++] = JS_DupValue(ctx, listener);
+            fprintf(stderr, "[addEventListener] Registered load listener #%d\n", g_load_listener_count - 1);
+        } else {
+            fprintf(stderr, "[addEventListener] Load listener array full!\n");
         }
     } else if (strcmp(event, "mousedown") == 0) {
         if (g_window_mousedown_count < 16) {
@@ -9838,9 +10145,11 @@ static JSValue js_audiocontext_createDynamicsCompressor(JSContext *ctx, JSValueC
 static JSValue js_getComputedStyle(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
     (void)this_val;
+    fprintf(stderr, "[getComputedStyle] called with %d args\n", argc);
     /* Return the element's style object (or a new empty object) */
     if (argc < 1) return JS_NewObject(ctx);
     JSValue style = JS_GetPropertyStr(ctx, argv[0], "style");
+    fprintf(stderr, "[getComputedStyle] style type=%d\n", (int)JS_VALUE_GET_TAG(style));
     if (JS_IsUndefined(style) || JS_IsNull(style)) {
         JS_FreeValue(ctx, style);
         return JS_NewObject(ctx);
@@ -10377,8 +10686,8 @@ static void jscore_qjs_setup_globals(int win_w, int win_h,
     /* Ensure first canvas slot is always initialized for games that create canvas via JS */
     if (canvas_count == 0 && g_canvases_cap > 0) {
         g_canvases[0].id = 1;
-        g_canvases[0].width = 432;  /* Default size for games that don't specify canvas dimensions */
-        g_canvases[0].height = 304;
+        g_canvases[0].width = 300;  /* HTML5 spec default canvas width */
+        g_canvases[0].height = 150; /* HTML5 spec default canvas height */
         g_canvases[0].style[0] = '\0';
         g_canvases[0].tex_handle = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
         /* Resize renderer to match default canvas size */
@@ -10570,16 +10879,23 @@ static void jscore_qjs_call_window_load_listeners(void) {
     if (!g_ctx) return;
 
     JSValue global = JS_GetGlobalObject(g_ctx);
-    
+
+    fprintf(stderr, "[jscore] Calling %d load listeners\n", g_load_listener_count);
+
     /* Call listeners registered via addEventListener('load', ...) */
     for (int i = 0; i < g_load_listener_count; i++) {
         if (!JS_IsUndefined(g_load_listeners[i])) {
+            fprintf(stderr, "[jscore] Calling load listener #%d\n", i);
             JSValue ret = JS_Call(g_ctx, g_load_listeners[i], global, 0, NULL);
             if (JS_IsException(ret)) {
                 JSValue exc = JS_GetException(g_ctx);
+                const char *s = JS_ToCString(g_ctx, exc);
+                if (s) { fprintf(stderr, "[jscore] Load listener #%d exception: %s\n", i, s); JS_FreeCString(g_ctx, s); }
                 JS_FreeValue(g_ctx, exc);
             }
             JS_FreeValue(g_ctx, ret);
+        } else {
+            fprintf(stderr, "[jscore] Load listener #%d is undefined\n", i);
         }
     }
 
@@ -10746,6 +11062,127 @@ static void jscore_qjs_check_timers(void) {
 static JSValue js_noop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_UNDEFINED;
+}
+
+/* Get CSS property value from element's style */
+static JSValue js_style_getPropertyValue(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewString(ctx, "");
+    const char *prop = JS_ToCString(ctx, argv[0]);
+    if (!prop) return JS_NewString(ctx, "");
+    
+    /* Get cssText from the style object */
+    JSValue cssTextVal = JS_GetPropertyStr(ctx, this_val, "cssText");
+    const char *cssText = "";
+    if (!JS_IsUndefined(cssTextVal) && !JS_IsNull(cssTextVal)) {
+        cssText = JS_ToCString(ctx, cssTextVal);
+    }
+    
+    /* Search for property in cssText (format: "prop: value; prop2: value2; ...") */
+    char searchProp[128];
+    snprintf(searchProp, sizeof(searchProp), "%s:", prop);
+    const char *p = strstr(cssText, searchProp);
+    JS_FreeCString(ctx, cssText);
+    JS_FreeValue(ctx, cssTextVal);
+    
+    if (p) {
+        p += strlen(searchProp);
+        while (*p == ' ' || *p == '\t') p++;
+        const char *end = p;
+        while (*end && *end != ';' && *end != '}') end++;
+        char value[256];
+        int len = end - p;
+        if (len > 255) len = 255;
+        strncpy(value, p, len);
+        value[len] = '\0';
+        /* Trim trailing whitespace */
+        while (len > 0 && (value[len-1] == ' ' || value[len-1] == '\t')) value[--len] = '\0';
+        JS_FreeCString(ctx, prop);
+        return JS_NewString(ctx, value);
+    }
+    
+    /* Also check for direct property on style object (try both kebab-case and camelCase) */
+    JSValue val = JS_GetPropertyStr(ctx, this_val, prop);
+    if (JS_IsString(val)) {
+        JS_FreeCString(ctx, prop);
+        return val;
+    }
+    JS_FreeValue(ctx, val);
+    
+    /* Convert kebab-case to camelCase and try again */
+    char camelProp[128];
+    int j = 0;
+    for (int i = 0; prop[i] && j < 127; i++) {
+        if (prop[i] == '-') {
+            i++;
+            if (prop[i] >= 'a' && prop[i] <= 'z') {
+                camelProp[j++] = prop[i] - 'a' + 'A';
+            } else {
+                camelProp[j++] = prop[i];
+            }
+        } else {
+            camelProp[j++] = prop[i];
+        }
+    }
+    camelProp[j] = '\0';
+    
+    val = JS_GetPropertyStr(ctx, this_val, camelProp);
+    JS_FreeCString(ctx, prop);
+    if (JS_IsString(val)) {
+        return val;
+    }
+    JS_FreeValue(ctx, val);
+    return JS_NewString(ctx, "");
+}
+
+/* Get canvas offsetWidth (CSS width + borders) */
+static JSValue js_canvas_get_offsetWidth(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == id) {
+            int w = g_canvases[i].width;
+            /* Check for CSS width */
+            if (g_canvases[i].style[0] != '\0') {
+                const char *p = strstr(g_canvases[i].style, "width:");
+                if (p) {
+                    p += 6;
+                    while (*p == ' ') p++;
+                    int css_w = atoi(p);
+                    if (css_w > 0) w = css_w;
+                }
+            }
+            /* Add 2px for borders (1px each side) */
+            return JS_NewInt32(ctx, w + 2);
+        }
+    }
+    return JS_NewInt32(ctx, 0);
+}
+
+/* Get canvas offsetHeight (CSS height + borders) */
+static JSValue js_canvas_get_offsetHeight(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    int id = (int)(intptr_t)JS_GetOpaque(this_val, js_canvas_class_id);
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == id) {
+            int h = g_canvases[i].height;
+            /* Check for CSS height */
+            if (g_canvases[i].style[0] != '\0') {
+                const char *p = strstr(g_canvases[i].style, "height:");
+                if (p) {
+                    p += 7;
+                    while (*p == ' ') p++;
+                    int css_h = atoi(p);
+                    if (css_h > 0) h = css_h;
+                }
+            }
+            /* Add 2px for borders (1px each side) */
+            return JS_NewInt32(ctx, h + 2);
+        }
+    }
+    return JS_NewInt32(ctx, 0);
 }
 
 static void jscore_qjs_dispatch_key(int keycode, int is_down) {
