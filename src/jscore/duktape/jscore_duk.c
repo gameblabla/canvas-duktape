@@ -16,7 +16,7 @@ static InputInterface*    g_IN  = NULL; /* input    */
 static SoundInterface*    g_SND = NULL; /* sound    */
 static duk_context*       g_ctx = NULL;
 
-static int g_win_w = 120, g_win_h = 160;
+static int g_win_w = 300, g_win_h = 150;
 
 static CanvasInfo g_canvas_info[MAX_IMAGES];
 static int        g_canvas_count = 0;

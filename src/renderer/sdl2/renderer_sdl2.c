@@ -18,10 +18,10 @@
 static SDL_Window*   g_window           = NULL;
 static SDL_Renderer* g_sdl_renderer     = NULL;
 static SDL_Texture*  g_offscreen        = NULL;
-static int           g_win_w            = 120;
-static int           g_win_h            = 160;
-static int           g_offscreen_w      = 120;  /* Actual offscreen texture width */
-static int           g_offscreen_h      = 160;  /* Actual offscreen texture height */
+static int           g_win_w            = 300;
+static int           g_win_h            = 150;
+static int           g_offscreen_w      = 300;  /* Actual offscreen texture width */
+static int           g_offscreen_h      = 150;  /* Actual offscreen texture height */
 
 /* Resource directory for loading fonts and other assets */
 static char g_resource_dir[1024] = {0};

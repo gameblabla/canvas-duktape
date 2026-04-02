@@ -414,6 +414,7 @@ static JSValue js_make_element_stub(JSContext *ctx);
 static JSValue js_style_getPropertyValue(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_canvas_get_offsetWidth(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_canvas_get_offsetHeight(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_imagedata_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv);
 
 /* jQuery support forward declarations */
 static JSValue js_element_appendChild(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
@@ -3637,6 +3638,80 @@ static JSValue js_ctx2d_measureText(JSContext *ctx, JSValueConst this_val,
     return obj;
 }
 
+/* ImageData constructor and prototype */
+static JSValue g_imagedata_proto = JS_UNDEFINED;
+
+static JSValue js_imagedata_ctor(JSContext *ctx, JSValueConst new_target,
+                                  int argc, JSValueConst *argv) {
+    int w = 0, h = 0;
+    JSValue data_arg = JS_UNDEFINED;
+    
+    /* ImageData constructor can be called as:
+     * new ImageData(width, height)
+     * new ImageData(data, width, height)
+     * new ImageData(data, width, height, settings)
+     */
+    if (argc >= 1) {
+        if (JS_IsArray(argv[0])) {
+            /* First arg is data array */
+            data_arg = JS_DupValue(ctx, argv[0]);
+            if (argc >= 2) JS_ToInt32(ctx, &w, argv[1]);
+            if (argc >= 3) JS_ToInt32(ctx, &h, argv[2]);
+        } else {
+            /* First two args are width and height */
+            /* Check for non-finite values */
+            double dw = 0, dh = 0;
+            if (JS_ToFloat64(ctx, &dw, argv[0]) < 0) {
+                return JS_ThrowTypeError(ctx, "ImageData: width is not a finite number");
+            }
+            w = (int)dw;
+            if (argc >= 2) {
+                if (JS_ToFloat64(ctx, &dh, argv[1]) < 0) {
+                    return JS_ThrowTypeError(ctx, "ImageData: height is not a finite number");
+                }
+                h = (int)dh;
+            }
+        }
+    }
+    
+    /* Validate dimensions */
+    if (w <= 0 || h <= 0) {
+        return JS_ThrowTypeError(ctx, "ImageData: width and height must be > 0");
+    }
+    
+    /* Create ImageData object with proper prototype */
+    JSValue obj = JS_NewObject(ctx);
+    /* Get ImageData constructor and set prototype */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue ImageData = JS_GetPropertyStr(ctx, global, "ImageData");
+    if (!JS_IsUndefined(ImageData)) {
+        JSValue proto = JS_GetPropertyStr(ctx, ImageData, "prototype");
+        if (!JS_IsUndefined(proto)) {
+            JS_SetPropertyStr(ctx, obj, "__proto__", JS_DupValue(ctx, proto));
+            JS_SetPropertyStr(ctx, obj, "constructor", JS_DupValue(ctx, ImageData));
+        }
+    }
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, ImageData);
+    JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, w));
+    JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, h));
+    
+    /* Create data array */
+    JSValue data_arr;
+    if (!JS_IsUndefined(data_arg)) {
+        data_arr = data_arg;
+    } else {
+        data_arr = JS_NewArray(ctx);
+        int size = w * h * 4;
+        for (int i = 0; i < size; i++) {
+            JS_SetPropertyUint32(ctx, data_arr, i, JS_NewInt32(ctx, 0));
+        }
+    }
+    JS_SetPropertyStr(ctx, obj, "data", data_arr);
+    
+    return obj;
+}
+
 static JSValue js_ctx2d_createImageData(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv) {
     CTX_SWITCH(ctx, this_val);
@@ -3651,23 +3726,33 @@ static JSValue js_ctx2d_createImageData(JSContext *ctx, JSValueConst this_val,
             JS_FreeValue(ctx, wv);
             JS_FreeValue(ctx, hv);
         } else {
-            JS_ToInt32(ctx, &w, argv[0]);
-            if (argc >= 2) JS_ToInt32(ctx, &h, argv[1]);
+            /* Check for non-finite values */
+            double dw = 0, dh = 0;
+            if (JS_ToFloat64(ctx, &dw, argv[0]) < 0 || dw != dw || dw == 1.0/0.0 || dw == -1.0/0.0) {
+                return JS_ThrowTypeError(ctx, "createImageData: width is not a finite number");
+            }
+            w = (int)dw;
+            if (argc >= 2) {
+                if (JS_ToFloat64(ctx, &dh, argv[1]) < 0 || dh != dh || dh == 1.0/0.0 || dh == -1.0/0.0) {
+                    return JS_ThrowTypeError(ctx, "createImageData: height is not a finite number");
+                }
+                h = (int)dh;
+            }
         }
     }
 
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, w));
-    JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, h));
-
-    /* Create data array */
-    JSValue data_arr = JS_NewArray(ctx);
-    int size = w * h * 4;
-    for (int i = 0; i < size; i++) {
-        JS_SetPropertyUint32(ctx, data_arr, i, JS_NewInt32(ctx, 0));
+    /* Validate dimensions */
+    if (w <= 0 || h <= 0) {
+        return JS_ThrowTypeError(ctx, "createImageData: width and height must be > 0");
     }
-    JS_SetPropertyStr(ctx, obj, "data", data_arr);
 
+    /* Create ImageData using constructor */
+    JSValue args[2];
+    args[0] = JS_NewInt32(ctx, w);
+    args[1] = JS_NewInt32(ctx, h);
+    JSValue obj = js_imagedata_ctor(ctx, JS_UNDEFINED, 2, args);
+    JS_FreeValue(ctx, args[0]);
+    JS_FreeValue(ctx, args[1]);
     return obj;
 }
 
@@ -3679,24 +3764,35 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
     if (argc >= 2) JS_ToInt32(ctx, &sy, argv[1]);
     if (argc >= 3) JS_ToInt32(ctx, &sw, argv[2]);
     if (argc >= 4) JS_ToInt32(ctx, &sh, argv[3]);
-    
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, sw));
-    JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, sh));
-    
+
+    /* Validate dimensions */
+    if (sw <= 0 || sh <= 0) {
+        return JS_ThrowTypeError(ctx, "getImageData: width and height must be > 0");
+    }
+
     if (!g_renderer) {
-        JSValue data_arr = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, obj, "data", data_arr);
+        /* Return empty ImageData */
+        JSValue args[2];
+        args[0] = JS_NewInt32(ctx, sw);
+        args[1] = JS_NewInt32(ctx, sh);
+        JSValue obj = js_imagedata_ctor(ctx, JS_UNDEFINED, 2, args);
+        JS_FreeValue(ctx, args[0]);
+        JS_FreeValue(ctx, args[1]);
         return obj;
     }
 
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
-        JSValue data_arr = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, obj, "data", data_arr);
+        /* Return empty ImageData */
+        JSValue args[2];
+        args[0] = JS_NewInt32(ctx, sw);
+        args[1] = JS_NewInt32(ctx, sh);
+        JSValue obj = js_imagedata_ctor(ctx, JS_UNDEFINED, 2, args);
+        JS_FreeValue(ctx, args[0]);
+        JS_FreeValue(ctx, args[1]);
         return obj;
     }
-    
+
     /* Get pixels */
     uint8_t *pixels = malloc(sw * sh * 4);
     if (g_renderer->get_pixels) {
@@ -3712,13 +3808,21 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
         }
     }
 
+    /* Create ImageData with pixel data */
     JSValue data_arr = JS_NewArray(ctx);
     for (int i = 0; i < sw * sh * 4; i++) {
         JS_SetPropertyUint32(ctx, data_arr, i, JS_NewInt32(ctx, pixels[i]));
     }
-    JS_SetPropertyStr(ctx, obj, "data", data_arr);
-    
     free(pixels);
+
+    /* Create ImageData using constructor with data */
+    JSValue args[3];
+    args[0] = data_arr;
+    args[1] = JS_NewInt32(ctx, sw);
+    args[2] = JS_NewInt32(ctx, sh);
+    JSValue obj = js_imagedata_ctor(ctx, JS_UNDEFINED, 3, args);
+    JS_FreeValue(ctx, args[1]);
+    JS_FreeValue(ctx, args[2]);
     return obj;
 }
 
@@ -10605,6 +10709,12 @@ static void setup_globals_object(JSContext *ctx) {
             JS_SetPropertyStr(ctx, ab_ctor, "prototype", JS_NewObject(ctx));
             JS_SetPropertyStr(ctx, global, "AudioBuffer", ab_ctor);
         }
+
+        /* ImageData constructor — needed for canvas pixel manipulation tests */
+        g_imagedata_proto = JS_NewObject(ctx);
+        JSValue ImageData_ctor = JS_NewCFunction2(ctx, js_imagedata_ctor, "ImageData", 3, JS_CFUNC_constructor, 0);
+        JS_SetPropertyStr(ctx, ImageData_ctor, "prototype", JS_DupValue(ctx, g_imagedata_proto));
+        JS_SetPropertyStr(ctx, global, "ImageData", ImageData_ctor);
     }
 
     /* window.matchMedia — returns MediaQueryList stub with matches=false */
