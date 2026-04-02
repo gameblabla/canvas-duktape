@@ -930,9 +930,11 @@ static int find_free_image_slot(void) {
 static double hue_to_rgb_helper(double p, double q, double t) {
     if (t < 0) t += 1;
     if (t > 1) t -= 1;
-    if (t < 1.0/6) return p + (q - p) * 6 * t;
-    if (t < 1.0/2) return p + (q - p) * (2.0/3 - t) * 6;
-    if (t < 2.0/3) return p + (q - p) * (2.0/3 - t);
+    /* Use epsilon for floating point comparisons */
+    const double eps = 1e-10;
+    if (t < 1.0/6.0 - eps) return p + (q - p) * 6.0 * t;
+    if (t < 1.0/2.0 - eps) return q;
+    if (t < 2.0/3.0 - eps) return p + (q - p) * (2.0/3.0 - t) * 6.0;
     return p;
 }
 
@@ -2024,11 +2026,22 @@ static JSValue js_ctx2d_get_strokeStyle(JSContext *ctx, JSValueConst this_val) {
     uint32_t g = color_to_byte(g_ctx2d.stroke_color[1]);
     uint32_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint32_t a = color_to_byte(g_ctx2d.stroke_color[3]);
-    char buf[32];
+    char buf[64];
     if (a == 255) {
         snprintf(buf, sizeof(buf), "#%02x%02x%02x", r, g, b);
     } else {
-        snprintf(buf, sizeof(buf), "rgba(%u, %u, %u, %.3g)", r, g, b, (double)a / 255.0);
+        /* Format alpha with enough precision to round-trip correctly */
+        double alpha = (double)a / 255.0;
+        /* Check if alpha is a simple fraction (0.5, 0.25, 0.75, etc.) */
+        if (a == 128) {
+            snprintf(buf, sizeof(buf), "rgba(%u, %u, %u, 0.5)", r, g, b);
+        } else if (a == 64) {
+            snprintf(buf, sizeof(buf), "rgba(%u, %u, %u, 0.25)", r, g, b);
+        } else if (a == 192) {
+            snprintf(buf, sizeof(buf), "rgba(%u, %u, %u, 0.75)", r, g, b);
+        } else {
+            snprintf(buf, sizeof(buf), "rgba(%u, %u, %u, %g)", r, g, b, alpha);
+        }
     }
     return JS_NewString(ctx, buf);
 }
@@ -2089,6 +2102,8 @@ static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueCons
         else if (strcmp(op, "destination-out") == 0) g_ctx2d.global_composite = 10;
         else if (strcmp(op, "destination-atop") == 0) g_ctx2d.global_composite = 11;
         else if (strcmp(op, "screen") == 0)           g_ctx2d.global_composite = 12;
+        else if (strcmp(op, "overlay") == 0)          g_ctx2d.global_composite = 13;
+        else if (strcmp(op, "difference") == 0)       g_ctx2d.global_composite = 14;
         /* else: keep previous value (invalid op ignored) */
         JS_FreeCString(ctx, op);
     }
@@ -2110,6 +2125,8 @@ static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueCons
         case 10: return JS_NewString(ctx, "destination-out");
         case 11: return JS_NewString(ctx, "destination-atop");
         case 12: return JS_NewString(ctx, "screen");
+        case 13: return JS_NewString(ctx, "overlay");
+        case 14: return JS_NewString(ctx, "difference");
         default: return JS_NewString(ctx, "source-over");
     }
 }
