@@ -829,6 +829,7 @@ static void r_fill_text(void* target, const char* text, double x, double y,
                          TextBaseline baseline, const char* font_family) {
     SDL_Texture* tex = (SDL_Texture*)target;
     if (!tex || !text || !text[0]) return;
+    if (font_size <= 0) return;
     TTF_Font* font = get_font(font_family, font_size);
     if (!font) return;
     SDL_Color fg = {r, g, b, 255};
@@ -882,13 +883,13 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     int ascent  = TTF_FontAscent(font);
     int descent = TTF_FontDescent(font); /* negative in SDL_TTF */
     int ry;
-    
+
     switch (baseline) {
         case TEXT_BASELINE_HANGING:
             ry = (int)y;
             break;
         case TEXT_BASELINE_TOP:
-            ry = (int)y - 2;
+            ry = (int)y;
             break;
         case TEXT_BASELINE_MIDDLE:
             ry = (int)y - (ascent - descent) / 2;
@@ -902,7 +903,7 @@ static void r_fill_text(void* target, const char* text, double x, double y,
             ry = (int)y - ascent;
             break;
     }
-    
+
     SDL_SetRenderTarget(g_sdl_renderer, tex);
     apply_clip_for_texture(tex);
     SDL_Rect dst = {rx, ry, tw, th};
