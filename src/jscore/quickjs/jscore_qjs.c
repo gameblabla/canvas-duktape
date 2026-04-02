@@ -3594,32 +3594,42 @@ static JSValue js_ctx2d_strokeText(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
     CTX_SWITCH(ctx, this_val);
     if (argc < 1 || !g_renderer) return JS_UNDEFINED;
-    
+
     const char *text = JS_ToCString(ctx, argv[0]);
     if (!text) return JS_UNDEFINED;
-    
+
     double x = 0, y = 0;
     if (argc >= 2) JS_ToFloat64(ctx, &x, argv[1]);
     if (argc >= 3) JS_ToFloat64(ctx, &y, argv[2]);
-    
+
     uint8_t r = color_to_byte(g_ctx2d.stroke_color[0]);
     uint8_t g = color_to_byte(g_ctx2d.stroke_color[1]);
     uint8_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.stroke_color[3]);
-    
+
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         JS_FreeCString(ctx, text);
         return JS_UNDEFINED;
     }
-    
+
     double tx, ty;
     transform_point(&tx, &ty, g_ctx2d.transform, x, y);
+
+    /* Handle RTL direction - adjust align enum accordingly (same as fillText) */
+    TextAlign effective_align = g_ctx2d.text_align_enum;
+    if (strcmp(g_ctx2d.direction, "rtl") == 0) {
+        if (g_ctx2d.text_align_enum == TEXT_ALIGN_START) {
+            effective_align = TEXT_ALIGN_RIGHT;
+        } else if (g_ctx2d.text_align_enum == TEXT_ALIGN_END) {
+            effective_align = TEXT_ALIGN_LEFT;
+        }
+    }
 
     if (g_renderer->stroke_text) {
         g_renderer->stroke_text(target, text, tx, ty, r, g, b, a,
                                 g_ctx2d.font_size, g_ctx2d.line_width,
-                                g_ctx2d.text_align_enum, g_ctx2d.text_baseline_enum,
+                                effective_align, g_ctx2d.text_baseline_enum,
                                 g_ctx2d.font_family);
     }
 

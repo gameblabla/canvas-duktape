@@ -960,7 +960,7 @@ static void r_stroke_text(void* target, const char* text, double x, double y,
             ry = (int)y;
             break;
         case TEXT_BASELINE_TOP:
-            ry = (int)y - 2;
+            ry = (int)y;
             break;
         case TEXT_BASELINE_MIDDLE:
             ry = (int)y - (ascent - descent) / 2;
