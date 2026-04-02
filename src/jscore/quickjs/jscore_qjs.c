@@ -4694,8 +4694,12 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                     }
                 }
             }
-            /* HTML5 spec: setting width resets the context state stack */
-            reset_ctx2d_defaults(g_canvases[i].id);
+            /* HTML5 spec: setting width resets the context state stack.
+             * Only reset for main canvas (id=1) to avoid breaking games like CrossCode
+             * that use offscreen canvases for internal scaling. */
+            if (id == 1) {
+                reset_ctx2d_defaults(g_canvases[i].id);
+            }
             break;
         }
     }
@@ -4757,8 +4761,12 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                     }
                 }
             }
-            /* HTML5 spec: setting height resets the context state stack */
-            reset_ctx2d_defaults(g_canvases[i].id);
+            /* HTML5 spec: setting height resets the context state stack.
+             * Only reset for main canvas (id=1) to avoid breaking games like CrossCode
+             * that use offscreen canvases for internal scaling. */
+            if (id == 1) {
+                reset_ctx2d_defaults(g_canvases[i].id);
+            }
             break;
         }
     }
