@@ -831,10 +831,14 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     if (!tex || !text || !text[0]) return;
     if (font_size <= 0) return;
     TTF_Font* font = get_font(font_family, font_size);
-    if (!font) return;
+    if (!font) {
+        return;
+    }
     SDL_Color fg = {r, g, b, 255};
     SDL_Surface* sf = TTF_RenderUTF8_Blended(font, text, fg);
-    if (!sf) return;
+    if (!sf) {
+        return;
+    }
     /* Premultiply alpha: canvas textures use premultiplied alpha internally */
     SDL_Surface* sf32 = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, 0);
     SDL_FreeSurface(sf);
@@ -861,7 +865,7 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     SDL_SetTextureScaleMode(tt, SDL_ScaleModeNearest);
     int tw, th;
     SDL_QueryTexture(tt, NULL, NULL, &tw, &th);
-    
+
     int rx = (int)x;
     switch (align) {
         case TEXT_ALIGN_CENTER:
@@ -876,7 +880,7 @@ static void r_fill_text(void* target, const char* text, double x, double y,
         default:
             break;
     }
-    
+
     /* SDL_TTF: ascent is positive, descent is negative.
      * Surface top pixel = baseline - ascent.
      * Baseline calculations to match HTML5 Canvas spec: */

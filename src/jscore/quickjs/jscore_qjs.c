@@ -77,7 +77,7 @@ typedef struct {
     double transform[6];  /* [a, b, c, d, e, f] for affine transform */
     double fill_color[4]; /* RGBA 0-1 */
     double stroke_color[4];
-    int line_width;
+    double line_width;
     double global_alpha;  /* 0.0 - 1.0 */
     int image_smoothing_enabled;  /* 0 or 1 */
     int global_composite;  /* 0=source-over, 1=lighter, 2=destination-over, 3=copy */
@@ -142,7 +142,7 @@ typedef struct {
         double transform[6];
         double fill_color[4];
         double stroke_color[4];
-        int line_width;
+        double line_width;
         double global_alpha;
         int image_smoothing_enabled;
         int global_composite;
@@ -2037,13 +2037,14 @@ static JSValue js_ctx2d_set_lineWidth(JSContext *ctx, JSValueConst this_val, JSV
     CTX_SWITCH(ctx, this_val);
     double v = 0;
     JS_ToFloat64(ctx, &v, val);
-    if (v > 0) g_ctx2d.line_width = (int)v;
+    /* Per spec: ignore zero and negative values */
+    if (v > 0) g_ctx2d.line_width = v;
     return JS_UNDEFINED;
 }
 
 static JSValue js_ctx2d_get_lineWidth(JSContext *ctx, JSValueConst this_val) {
     CTX_SWITCH(ctx, this_val);
-    return JS_NewInt32(ctx, g_ctx2d.line_width);
+    return JS_NewFloat64(ctx, g_ctx2d.line_width);
 }
 
 static JSValue js_ctx2d_set_globalAlpha(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
@@ -2823,7 +2824,9 @@ static JSValue js_ctx2d_stroke(JSContext *ctx, JSValueConst this_val,
     uint8_t g = color_to_byte(g_ctx2d.stroke_color[1]);
     uint8_t b = color_to_byte(g_ctx2d.stroke_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.stroke_color[3]);
-    int lw = g_ctx2d.line_width;
+    /* Round line_width for rendering (per Canvas spec) */
+    int lw = (int)(g_ctx2d.line_width + 0.5);
+    if (lw < 1) lw = 1;
 
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
@@ -3512,10 +3515,10 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
     CTX_SWITCH(ctx, this_val);
     if (argc < 1 || !g_renderer) return JS_UNDEFINED;
-    
+
     const char *text = JS_ToCString(ctx, argv[0]);
     if (!text) return JS_UNDEFINED;
-    
+
     double x = 0, y = 0;
     if (argc >= 2) JS_ToFloat64(ctx, &x, argv[1]);
     if (argc >= 3) JS_ToFloat64(ctx, &y, argv[2]);
@@ -3524,7 +3527,7 @@ static JSValue js_ctx2d_fillText(JSContext *ctx, JSValueConst this_val,
     uint8_t g = color_to_byte(g_ctx2d.fill_color[1]);
     uint8_t b = color_to_byte(g_ctx2d.fill_color[2]);
     uint8_t a = color_to_byte(g_ctx2d.fill_color[3]);
-    
+
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
         JS_FreeCString(ctx, text);
