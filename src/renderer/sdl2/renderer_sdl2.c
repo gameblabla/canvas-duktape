@@ -507,6 +507,22 @@ static void r_destroy_texture(void* tex) {
 
 static void* r_get_main_texture(void) { return g_offscreen; }
 
+/* Set the offscreen texture directly (for frameworks like PixiJS that render to their own texture) */
+static void r_set_main_texture(void* tex, int w, int h) {
+    if (g_offscreen && g_offscreen != tex) {
+        SDL_DestroyTexture(g_offscreen);
+    }
+    g_offscreen = (SDL_Texture*)tex;
+    g_offscreen_w = w;
+    g_offscreen_h = h;
+    g_win_w = w;
+    g_win_h = h;
+    /* Update window size to match */
+    if (g_window) {
+        SDL_SetWindowSize(g_window, w, h);
+    }
+}
+
 static void* r_load_image_file(const char* path) {
     /* Resolve resource path */
     char full_path[1024];
@@ -1454,6 +1470,7 @@ void renderer_sdl2_init_iface(RendererInterface* iface) {
     iface->create_texture       = r_create_texture;
     iface->destroy_texture      = r_destroy_texture;
     iface->get_main_texture     = r_get_main_texture;
+    iface->set_main_texture     = r_set_main_texture;
     iface->load_image_file      = r_load_image_file;
     iface->load_image_mem   = r_load_image_mem;
     iface->destroy_image    = r_destroy_image;

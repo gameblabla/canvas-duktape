@@ -69,6 +69,7 @@ typedef struct {
     void*  (*create_texture)(int w, int h);
     void   (*destroy_texture)(void* tex);
     void*  (*get_main_texture)(void);
+    void   (*set_main_texture)(void* tex, int w, int h);
 
     /* Image loading */
     void*  (*load_image_file)(const char* path);

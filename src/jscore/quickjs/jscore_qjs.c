@@ -271,6 +271,13 @@ static JSValue g_cached_head = JS_UNDEFINED;
 static JSValue g_cached_documentElement = JS_UNDEFINED;
 static JSValue g_cached_document = JS_UNDEFINED;
 
+/* Element stub cache: ensures getElementById always returns the SAME object per ID
+ * so addEventListener + click() on the same logical element work correctly. */
+#define MAX_ELEM_STUB_CACHE 128
+typedef struct { char id[64]; JSValue obj; } ElemStubEntry;
+static ElemStubEntry g_elem_stub_cache[MAX_ELEM_STUB_CACHE];
+static int g_elem_stub_cache_count = 0;
+
 /* localStorage */
 #define MAX_STORAGE_ITEMS 256
 #define MAX_STORAGE_KEY_LEN 4096
@@ -412,6 +419,7 @@ static JSValue js_element_removeChild(JSContext *ctx, JSValueConst this_val, int
 static JSValue js_element_cloneNode(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_element_getAttribute(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_element_setAttribute(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue js_element_getElementsByClassName(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_element_compareDocumentPosition(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_textNode_get_textContent(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 static JSValue js_element_getBoundingClientRect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
@@ -461,6 +469,9 @@ static JSValue js_audiocontext_audioparam_cancelAndHoldAtTime(JSContext *ctx, JS
 /* Internal helper */
 static void setup_audiocontext_prototype(JSContext *ctx);
 
+/* Track which canvas is the main display canvas */
+static int g_display_canvas_id = 1;
+
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     /* Get canvas ID from the context object's _canvasId property */
     JSValue canvas_id_val = JS_GetPropertyStr(ctx, this_val, "_canvasId");
@@ -474,33 +485,44 @@ static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     g_ctx2d_ptr = ctx_state_for_canvas(canvas_id);
     g_ctx2d.canvas_id = canvas_id;
 
-#ifdef EXTRA_DEBUG
-    fprintf(stderr, "[get_current_canvas_texture] canvas_id=%d\n", canvas_id);
-#endif
-
     /* If canvas_id is 0, use main texture */
     if (canvas_id == 0) {
         void *main_tex = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
-#ifdef EXTRA_DEBUG
-        fprintf(stderr, "[get_current_canvas_texture] Using main texture %p\n", main_tex);
-#endif
         return main_tex;
     }
 
     /* Find canvas by ID */
     for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == canvas_id) {
-#ifdef EXTRA_DEBUG
-            fprintf(stderr, "[get_current_canvas_texture] Found canvas %d: tex=%p\n", i, g_canvases[i].tex_handle);
-#endif
             return g_canvases[i].tex_handle;
         }
     }
 
-#ifdef EXTRA_DEBUG
-    fprintf(stderr, "[get_current_canvas_texture] Canvas %d not found, using main texture\n", canvas_id);
-#endif
     return g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+}
+
+/* Update the display canvas to track which canvas should be shown */
+static void update_display_canvas(int canvas_id) {
+    if (canvas_id <= 0 || canvas_id == g_display_canvas_id) return;
+    
+    /* Find the canvas */
+    for (int i = 0; i < g_canvases_cap; i++) {
+        if (g_canvases[i].id == canvas_id && g_canvases[i].tex_handle) {
+            /* Update main canvas to use this canvas's texture */
+            g_canvases[0].tex_handle = g_canvases[i].tex_handle;
+            g_canvases[0].width = g_canvases[i].width;
+            g_canvases[0].height = g_canvases[i].height;
+            g_display_canvas_id = canvas_id;
+            
+            /* Set renderer's main texture to this canvas's texture */
+            if (g_renderer && g_renderer->set_main_texture) {
+                g_renderer->set_main_texture(g_canvases[i].tex_handle, 
+                                            g_canvases[i].width, 
+                                            g_canvases[i].height);
+            }
+            break;
+        }
+    }
 }
 
 static void init_transform(double *m) {
@@ -1280,6 +1302,10 @@ static JSValue js_image_ctor(JSContext *ctx, JSValueConst new_target,
     JS_SetPropertyStr(ctx, obj, "tagName", JS_NewString(ctx, "IMG"));
     JS_SetPropertyStr(ctx, obj, "nodeName", JS_NewString(ctx, "IMG"));
     /* onload/onerror are handled via CGETSET on the prototype - do NOT set own props */
+    /* addEventListener/removeEventListener for PIXI-style image loading */
+    JS_SetPropertyStr(ctx, obj, "_listeners",          JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, obj, "addEventListener",    JS_NewCFunction(ctx, js_element_addEventListener,    "addEventListener", 3));
+    JS_SetPropertyStr(ctx, obj, "removeEventListener", JS_NewCFunction(ctx, js_element_removeEventListener, "removeEventListener", 3));
 
     return obj;
 }
@@ -1300,7 +1326,113 @@ static JSValue js_image_get_src(JSContext *ctx, JSValueConst this_val) {
     return JS_NewString(ctx, "");
 }
 
+/* Called deferred: sets complete=true, fires onload + _listeners["load"] */
+static JSValue js_image_deferred_load_complete(JSContext *ctx, JSValueConst this_val,
+                                               int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    /* this_val = the image JS object */
+    fprintf(stderr, "[imgdeferred] firing: setting complete=true\n");
+    JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 1));
+    /* Fire onload property callback */
+    JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
+    fprintf(stderr, "[imgdeferred] onload is_func=%d\n", JS_IsFunction(ctx, onload));
+    if (JS_IsFunction(ctx, onload)) {
+        JSValue ev = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
+        JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "load"));
+        JSValue result = JS_Call(ctx, onload, this_val, 1, &ev);
+        if (JS_IsException(result)) {
+            JSValue exc = JS_GetException(ctx);
+            const char *s = JS_ToCString(ctx, exc);
+            if (s) { fprintf(stderr, "[image] deferred onload error: %s\n", s); JS_FreeCString(ctx, s); }
+            JS_FreeValue(ctx, exc);
+        }
+        JS_FreeValue(ctx, result);
+        JS_FreeValue(ctx, ev);
+    }
+    JS_FreeValue(ctx, onload);
+    /* Fire addEventListener("load") listeners */
+    JSValue listeners_obj = JS_GetPropertyStr(ctx, this_val, "_listeners");
+    if (!JS_IsUndefined(listeners_obj) && !JS_IsNull(listeners_obj)) {
+        JSValue arr = JS_GetPropertyStr(ctx, listeners_obj, "load");
+        if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+            JSValue len_v = JS_GetPropertyStr(ctx, arr, "length");
+            int32_t len = 0; JS_ToInt32(ctx, &len, len_v); JS_FreeValue(ctx, len_v);
+            fprintf(stderr, "[imgdeferred] _listeners['load'] count=%d\n", len);
+            JSValue ev = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
+            JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "load"));
+            for (int li = 0; li < len; li++) {
+                char idx_s[16]; snprintf(idx_s, sizeof(idx_s), "%d", li);
+                JSValue fn = JS_GetPropertyStr(ctx, arr, idx_s);
+                fprintf(stderr, "[imgdeferred] calling listener[%d] is_func=%d\n", li, JS_IsFunction(ctx, fn));
+                if (JS_IsFunction(ctx, fn)) {
+                    JSValue result = JS_Call(ctx, fn, this_val, 1, &ev);
+                    if (JS_IsException(result)) {
+                        JSValue exc = JS_GetException(ctx);
+                        const char *s = JS_ToCString(ctx, exc); JSValue stk = JS_GetPropertyStr(ctx, exc, "stack");
+                        if (s) { fprintf(stderr, "[imgdeferred] listener error: %s\n", s); JS_FreeCString(ctx, s); }
+                        if (!JS_IsUndefined(stk)) { const char *ss = JS_ToCString(ctx, stk); if (ss) { fprintf(stderr, "  Stack: %s\n", ss); JS_FreeCString(ctx, ss); } }
+                        JS_FreeValue(ctx, stk); JS_FreeValue(ctx, exc);
+                    }
+                    JS_FreeValue(ctx, result);
+                }
+                JS_FreeValue(ctx, fn);
+            }
+            JS_FreeValue(ctx, ev);
+        } else {
+            fprintf(stderr, "[imgdeferred] _listeners['load'] arr is missing\n");
+        }
+        JS_FreeValue(ctx, arr);
+    } else {
+        fprintf(stderr, "[imgdeferred] no _listeners object\n");
+    }
+    JS_FreeValue(ctx, listeners_obj);
+    fprintf(stderr, "[imgdeferred] done\n");
+    return JS_UNDEFINED;
+}
+
+/* Fire _listeners["load"] or _listeners["error"] stored via img.addEventListener() */
+static void image_fire_listeners(JSContext *ctx, JSValueConst img_obj, int success) {
+    const char *event_name = success ? "load" : "error";
+    JSValue ev = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, img_obj));
+    JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, event_name));
+    JSValue listeners_obj = JS_GetPropertyStr(ctx, img_obj, "_listeners");
+    fprintf(stderr, "[image] fire_listeners: event='%s' has_listeners=%d\n", event_name,
+            !JS_IsUndefined(listeners_obj) && !JS_IsNull(listeners_obj));
+    if (!JS_IsUndefined(listeners_obj) && !JS_IsNull(listeners_obj)) {
+        JSValue arr = JS_GetPropertyStr(ctx, listeners_obj, event_name);
+        { JSValue lv = JS_GetPropertyStr(ctx, arr, "length"); int32_t ln=0; JS_ToInt32(ctx,&ln,lv); JS_FreeValue(ctx,lv);
+          fprintf(stderr, "[image] fire_listeners: arr len=%d\n", ln); }
+        if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+            JSValue len_v = JS_GetPropertyStr(ctx, arr, "length");
+            int32_t len = 0; JS_ToInt32(ctx, &len, len_v); JS_FreeValue(ctx, len_v);
+            for (int li = 0; li < len; li++) {
+                char idx_s[16]; snprintf(idx_s, sizeof(idx_s), "%d", li);
+                JSValue fn = JS_GetPropertyStr(ctx, arr, idx_s);
+                if (JS_IsFunction(ctx, fn)) {
+                    JSValue ret = JS_Call(ctx, fn, img_obj, 1, &ev);
+                    if (JS_IsException(ret)) {
+                        JSValue exc = JS_GetException(ctx);
+                        fprintf(stderr, "[image] listener '%s' exception\n", event_name);
+                        JS_FreeValue(ctx, exc);
+                    }
+                    JS_FreeValue(ctx, ret);
+                }
+                JS_FreeValue(ctx, fn);
+            }
+        }
+        JS_FreeValue(ctx, arr);
+    }
+    JS_FreeValue(ctx, listeners_obj);
+    JS_FreeValue(ctx, ev);
+}
+
 static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    /* Debug: log when src is set */
+    { const char *dbg = JS_ToCString(ctx, val);
+      if (dbg) { fprintf(stderr, "[image] set_src: '%s'\n", dbg); JS_FreeCString(ctx, dbg); } }
     /* Get image ID from the _imageId property */
     JSValue imageIdVal = JS_GetPropertyStr(ctx, this_val, "_imageId");
     int id = -1;
@@ -1310,6 +1442,7 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
     JS_FreeValue(ctx, imageIdVal);
     
     int idx = find_image_by_id(id);
+    fprintf(stderr, "[image] id=%d idx=%d\n", id, idx);
     if (idx >= 0) {
         const char *src = JS_ToCString(ctx, val);
         if (src) {
@@ -1445,6 +1578,7 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                         schedule_deferred_call(ctx, onload);
                     }
                     JS_FreeValue(ctx, onload);
+                    image_fire_listeners(ctx, this_val, 1);
                 } else {
                     /* Invalid data - call onerror */
                     JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 0));
@@ -1453,6 +1587,7 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                         schedule_deferred_call_this(ctx, onerror, this_val);
                     }
                     JS_FreeValue(ctx, onerror);
+                    image_fire_listeners(ctx, this_val, 0);
                 }
             } else if (strncmp(src, "blob:canvas:", 12) == 0) {
                 /* Handle blob: URLs */
@@ -1513,6 +1648,7 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                         fprintf(stderr, "[blob URL] onload is not a function (type=%d)\n", (int)JS_VALUE_GET_TAG(onload));
                     }
                     JS_FreeValue(ctx, onload);
+                    image_fire_listeners(ctx, this_val, 1);
                 } else {
                     /* Blob not found - call onerror */
                     JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 0));
@@ -1521,6 +1657,7 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                         schedule_deferred_call_this(ctx, onerror, this_val);
                     }
                     JS_FreeValue(ctx, onerror);
+                    image_fire_listeners(ctx, this_val, 0);
                 }
             } else {
                 /* Try to load the image */
@@ -1543,22 +1680,26 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                     } else {
                         snprintf(full_path, sizeof(full_path), "%s/%s", g_jscore_base_dir, src_clean);
                     }
+                    fprintf(stderr, "[image] loading full_path='%s'\n", full_path);
                     g_images[idx].img_handle = g_renderer->load_image_file(full_path);
+                    fprintf(stderr, "[image] load result: %s\n", g_images[idx].img_handle ? "OK" : "FAILED");
                     if (g_images[idx].img_handle && g_renderer->get_image_size) {
                         g_renderer->get_image_size(g_images[idx].img_handle,
                                                    &g_images[idx].width,
                                                    &g_images[idx].height);
                         g_images[idx].loaded = 1;
-                        JS_SetPropertyStr(ctx, this_val, "complete", JS_NewBool(ctx, 1));
-                        JS_SetPropertyStr(ctx, this_val, "width", JS_NewInt32(ctx, g_images[idx].width));
-                        JS_SetPropertyStr(ctx, this_val, "height", JS_NewInt32(ctx, g_images[idx].height));
+                        /* Set dimensions but NOT complete yet — defer complete+callbacks
+                         * so PIXI sees complete=false and uses the i.onload= path */
+                        JS_SetPropertyStr(ctx, this_val, "width",         JS_NewInt32(ctx, g_images[idx].width));
+                        JS_SetPropertyStr(ctx, this_val, "height",        JS_NewInt32(ctx, g_images[idx].height));
+                        JS_SetPropertyStr(ctx, this_val, "naturalWidth",  JS_NewInt32(ctx, g_images[idx].width));
+                        JS_SetPropertyStr(ctx, this_val, "naturalHeight", JS_NewInt32(ctx, g_images[idx].height));
 
-                        /* Defer onload (with image as this) to be async like a real browser */
-                        JSValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
-                        if (JS_IsFunction(ctx, onload)) {
-                            schedule_deferred_call_this(ctx, onload, this_val);
-                        }
-                        JS_FreeValue(ctx, onload);
+                        /* Schedule deferred callback: sets complete=true, fires onload + listeners */
+                        JSValue cb = JS_NewCFunction(ctx, js_image_deferred_load_complete,
+                                                     "imgLoadComplete", 0);
+                        schedule_deferred_call_this(ctx, cb, this_val);
+                        JS_FreeValue(ctx, cb);
                     } else {
                         /* Load failed - defer onerror (with image as this) */
                         JSValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
@@ -1566,6 +1707,7 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                             schedule_deferred_call_this(ctx, onerror, this_val);
                         }
                         JS_FreeValue(ctx, onerror);
+                        image_fire_listeners(ctx, this_val, 0);
                     }
                 }
             }
@@ -1616,12 +1758,14 @@ static JSValue js_image_get_onload(JSContext *ctx, JSValueConst this_val) {
 static JSValue js_image_set_onload(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
     JS_SetPropertyStr(ctx, this_val, "_onload_cb", JS_DupValue(ctx, val));
     if (JS_IsFunction(ctx, val)) {
-        JSValue imageIdVal = JS_GetPropertyStr(ctx, this_val, "_imageId");
-        int id = -1;
-        JS_ToInt32(ctx, &id, imageIdVal);
-        JS_FreeValue(ctx, imageIdVal);
-        int idx = find_image_by_id(id);
-        if (idx >= 0 && g_images[idx].loaded) {
+        /* Only fire immediately if complete=true (deferred callback has already run).
+         * If loaded-but-not-complete, the deferred callback will fire onload. */
+        JSValue completev = JS_GetPropertyStr(ctx, this_val, "complete");
+        int is_complete = JS_ToBool(ctx, completev);
+        JS_FreeValue(ctx, completev);
+        fprintf(stderr, "[setonload] set to function, complete=%d → %s\n", is_complete,
+                is_complete ? "scheduling deferred" : "will fire via imgdeferred");
+        if (is_complete) {
             schedule_deferred_call_this(ctx, val, this_val);
         }
     }
@@ -3199,6 +3343,7 @@ static JSValue js_ctx2d_clearRect(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+static int g_drawimage_logged = 0;
 static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     CTX_SWITCH(ctx, this_val);
@@ -3206,7 +3351,11 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
 
     /* Get image object */
     JSValue img_obj = argv[0];
-    
+    if (g_drawimage_logged < 200) {
+        g_drawimage_logged++;
+        fprintf(stderr, "[drawImage] call #%d: argc=%d\n", g_drawimage_logged, argc);
+    }
+
     /* Try to get image ID from _imageId property first (for JS_NewObjectProto images) */
     JSValue imageIdVal = JS_GetPropertyStr(ctx, img_obj, "_imageId");
     int img_id = -1;
@@ -3214,12 +3363,12 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
         JS_ToInt32(ctx, &img_id, imageIdVal);
     }
     JS_FreeValue(ctx, imageIdVal);
-    
+
     /* Fall back to opaque data (for JS_NewObjectClass images) */
     if (img_id < 0) {
         img_id = (int)(intptr_t)JS_GetOpaque(img_obj, js_image_class_id);
     }
-    
+
     int img_idx = find_image_by_id(img_id);
 
     /* Also check for canvas */
@@ -3294,6 +3443,12 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
     }
 
     void *target = get_current_canvas_texture(ctx, this_val);
+    
+    /* Update display canvas if this is a different canvas being actively rendered to */
+    if (g_ctx2d.canvas_id > 0) {
+        update_display_canvas(g_ctx2d.canvas_id);
+    }
+    
     if (!target) {
         return JS_UNDEFINED;
     }
@@ -4124,20 +4279,29 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                 }
             } else {
                 /* Main canvas (id=1) - resize window if size changed */
+                /* Prevent invalid dimensions (PixiJS composite test uses 6x1) */
+                if (new_width < 64) {
+                    /* Ignore invalid width - keep current valid dimension */
+                    new_width = g_canvases[i].width;
+                }
                 if (g_canvases[i].width != new_width) {
                     fprintf(stderr, "[canvas] Main canvas width changed to %d (was %d)\n",
                             new_width, g_canvases[i].width);
                 }
                 g_canvases[i].width = new_width;
-                /* Resize window and main texture */
-                if (g_renderer && g_renderer->resize_window) {
-                    g_renderer->resize_window(g_canvases[i].width, g_canvases[i].height);
-                    /* Update main texture reference after resize */
-                    g_canvases[i].tex_handle = g_renderer->get_main_texture();
-                }
-                /* Clear the resized canvas */
-                if (g_renderer && g_renderer->clear_rect) {
-                    g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
+                /* Skip resize if either dimension is invalid (too small) - wait for both to be set */
+                /* Minimum canvas size is 64x64 to prevent PixiJS test from breaking the display */
+                if (g_canvases[i].width >= 64 && g_canvases[i].height >= 64) {
+                    /* Resize window and main texture */
+                    if (g_renderer && g_renderer->resize_window) {
+                        g_renderer->resize_window(g_canvases[i].width, g_canvases[i].height);
+                        /* Update main texture reference after resize */
+                        g_canvases[i].tex_handle = g_renderer->get_main_texture();
+                    }
+                    /* Clear the resized canvas */
+                    if (g_renderer && g_renderer->clear_rect) {
+                        g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
+                    }
                 }
             }
             /* HTML5 spec: setting width resets the context state stack */
@@ -4183,20 +4347,29 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                 }
             } else {
                 /* Main canvas (id=1) - resize window if size changed */
+                /* Prevent invalid dimensions (PixiJS composite test uses 6x1) */
+                if (new_height < 64) {
+                    /* Ignore invalid height - keep current valid dimension */
+                    new_height = g_canvases[i].height;
+                }
                 if (g_canvases[i].height != new_height) {
                     fprintf(stderr, "[canvas] Main canvas height changed to %d (was %d)\n",
                             new_height, g_canvases[i].height);
                 }
                 g_canvases[i].height = new_height;
-                /* Resize window and main texture */
-                if (g_renderer && g_renderer->resize_window) {
-                    g_renderer->resize_window(g_canvases[i].width, g_canvases[i].height);
-                    /* Update main texture reference after resize */
-                    g_canvases[i].tex_handle = g_renderer->get_main_texture();
-                }
-                /* Clear the resized canvas */
-                if (g_renderer && g_renderer->clear_rect) {
-                    g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
+                /* Skip resize if either dimension is invalid (too small) - wait for both to be set */
+                /* Minimum canvas size is 64x64 to prevent PixiJS test from breaking the display */
+                if (g_canvases[i].width >= 64 && g_canvases[i].height >= 64) {
+                    /* Resize window and main texture */
+                    if (g_renderer && g_renderer->resize_window) {
+                        g_renderer->resize_window(g_canvases[i].width, g_canvases[i].height);
+                        /* Update main texture reference after resize */
+                        g_canvases[i].tex_handle = g_renderer->get_main_texture();
+                    }
+                    /* Clear the resized canvas */
+                    if (g_renderer && g_renderer->clear_rect) {
+                        g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
+                    }
                 }
             }
             /* HTML5 spec: setting height resets the context state stack */
@@ -5749,7 +5922,13 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, id);
         return audio;
     }
-    /* Unknown element — return a stub with the requested id and innerHTML if registered */
+    /* Unknown element — return cached stub (same object per ID so addEventListener + click work) */
+    for (int ci = 0; ci < g_elem_stub_cache_count; ci++) {
+        if (strcmp(g_elem_stub_cache[ci].id, id) == 0) {
+            JS_FreeCString(ctx, id);
+            return JS_DupValue(ctx, g_elem_stub_cache[ci].obj);
+        }
+    }
     JSValue stub = js_make_element_stub(ctx);
     JS_SetPropertyStr(ctx, stub, "id", JS_NewString(ctx, id));
     for (int ri = 0; ri < g_element_registry_count; ri++) {
@@ -5758,6 +5937,13 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
                               JS_NewString(ctx, g_element_registry[ri].innerHTML));
             break;
         }
+    }
+    /* Cache it for future lookups */
+    if (g_elem_stub_cache_count < MAX_ELEM_STUB_CACHE) {
+        strncpy(g_elem_stub_cache[g_elem_stub_cache_count].id, id,
+                sizeof(g_elem_stub_cache[0].id) - 1);
+        g_elem_stub_cache[g_elem_stub_cache_count].obj = JS_DupValue(ctx, stub);
+        g_elem_stub_cache_count++;
     }
     JS_FreeCString(ctx, id);
     return stub;
@@ -6055,6 +6241,19 @@ static JSValue js_make_element_stub(JSContext *ctx) {
     JS_SetPropertyStr(ctx, obj, "getAttribute",     JS_NewCFunction(ctx, js_element_getAttribute, "getAttribute", 1));
     JS_SetPropertyStr(ctx, obj, "setAttribute",     JS_NewCFunction(ctx, js_element_setAttribute, "setAttribute", 2));
     JS_SetPropertyStr(ctx, obj, "getElementsByTagName", JS_NewCFunction(ctx, js_document_getElementsByTagName, "getElementsByTagName", 1));
+    /* getElementsByClassName returns array with one safe stub so [0].classList.add() doesn't throw */
+    JS_SetPropertyStr(ctx, obj, "getElementsByClassName", JS_NewCFunction(ctx, js_element_getElementsByClassName, "getElementsByClassName", 1));
+    /* classList with add/remove/contains/toggle (track in className string not needed, just no-throw) */
+    {
+        JSValue cl = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, cl, "add",    JS_NewCFunction(ctx, js_noop, "add",    1));
+        JS_SetPropertyStr(ctx, cl, "remove", JS_NewCFunction(ctx, js_noop, "remove", 1));
+        JS_SetPropertyStr(ctx, cl, "toggle", JS_NewCFunction(ctx, js_noop, "toggle", 1));
+        JS_SetPropertyStr(ctx, cl, "contains", JS_NewCFunction(ctx, js_noop, "contains", 1));
+        JS_SetPropertyStr(ctx, obj, "classList", cl);
+    }
+    /* dataset object for data-* attributes */
+    JS_SetPropertyStr(ctx, obj, "dataset", JS_NewObject(ctx));
     /* Audio support detection for buzz.js */
     JS_SetPropertyStr(ctx, obj, "canPlayType", JS_NewCFunction(ctx, js_element_canPlayType, "canPlayType", 1));
     return obj;
@@ -6132,8 +6331,7 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
     JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, id));
     {
         JSValue style = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, style, "width",   JS_NewString(ctx, ""));
-        JS_SetPropertyStr(ctx, style, "height",  JS_NewString(ctx, ""));
+        /* Style properties - use getters/setters for width/height to sync with canvas dimensions */
         JS_SetPropertyStr(ctx, style, "cssText", JS_NewString(ctx, ""));
         JS_SetPropertyStr(ctx, obj, "style", style);
     }
@@ -6643,6 +6841,17 @@ static JSValue js_document_getElementsByClassName(JSContext *ctx, JSValueConst t
     return JS_NewArray(ctx);
 }
 
+/* elem.getElementsByClassName — returns array with one safe stub so [0].classList.add() doesn't throw */
+static JSValue js_element_getElementsByClassName(JSContext *ctx, JSValueConst this_val,
+                                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue arr = JS_NewArray(ctx);
+    JSValue stub = js_make_element_stub(ctx);
+    JS_SetPropertyStr(ctx, arr, "0", stub);
+    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, 1));
+    return arr;
+}
+
 static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NULL;
@@ -6705,8 +6914,25 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
             g_images[slot].src[0] = '\0';
             g_images[slot].loaded = 0;
             g_images[slot].img_handle = NULL;
-            obj = JS_NewObjectClass(ctx, js_image_class_id);
-            JS_SetOpaque(obj, (void*)(intptr_t)id);
+            /* Use image prototype (has src CGETSET) same as js_image_ctor */
+            if (!JS_IsUndefined(g_image_proto)) {
+                obj = JS_NewObjectProto(ctx, g_image_proto);
+            } else {
+                obj = JS_NewObjectClass(ctx, js_image_class_id);
+            }
+            JS_SetPropertyStr(ctx, obj, "_imageId", JS_NewInt32(ctx, id));
+            JS_SetPropertyStr(ctx, obj, "width",         JS_NewInt32(ctx, 0));
+            JS_SetPropertyStr(ctx, obj, "height",        JS_NewInt32(ctx, 0));
+            JS_SetPropertyStr(ctx, obj, "naturalWidth",  JS_NewInt32(ctx, 0));
+            JS_SetPropertyStr(ctx, obj, "naturalHeight", JS_NewInt32(ctx, 0));
+            JS_SetPropertyStr(ctx, obj, "complete",      JS_NewBool(ctx, 0));
+            JS_SetPropertyStr(ctx, obj, "tagName",       JS_NewString(ctx, "IMG"));
+            JS_SetPropertyStr(ctx, obj, "nodeName",      JS_NewString(ctx, "IMG"));
+            JS_SetPropertyStr(ctx, obj, "_listeners",    JS_NewObject(ctx));
+            JS_SetPropertyStr(ctx, obj, "addEventListener",
+                JS_NewCFunction(ctx, js_element_addEventListener, "addEventListener", 3));
+            JS_SetPropertyStr(ctx, obj, "removeEventListener",
+                JS_NewCFunction(ctx, js_element_removeEventListener, "removeEventListener", 3));
         }
     } else if (strcmp(tag, "audio") == 0) {
         obj = js_audio_ctor(ctx, JS_UNDEFINED, 0, NULL);
@@ -7976,6 +8202,14 @@ static void jscore_qjs_quit(void) {
         g_cached_document = JS_UNDEFINED;
     }
 
+    /* Free element stub cache */
+    for (int ci = 0; ci < g_elem_stub_cache_count; ci++) {
+        JS_FreeValue(g_ctx, g_elem_stub_cache[ci].obj);
+        g_elem_stub_cache[ci].obj = JS_UNDEFINED;
+        g_elem_stub_cache[ci].id[0] = '\0';
+    }
+    g_elem_stub_cache_count = 0;
+
     /* Free path and state stack */
     if (g_ctx2d.path_pts) {
         free(g_ctx2d.path_pts);
@@ -8181,36 +8415,80 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
     }
     JS_FreeValue(ctx, cb);
 
+    const char *event_name = success ? "load" : "error";
+    JSValue ev = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
+    JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, event_name));
+    JS_SetPropertyStr(ctx, ev, "loaded", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, ev, "total",  JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, ev, "lengthComputable", JS_NewBool(ctx, 0));
+
     if (success) {
         cb = JS_GetPropertyStr(ctx, this_val, "onload");
         if (JS_IsFunction(ctx, cb)) {
-            /* Build event object with target pointing to XHR */
-            JSValue ev = JS_NewObject(ctx);
-            JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
-            JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "load"));
-            /* Use JS_UNDEFINED as 'this' so ClearEventListeners(this) gets globalThis
-             * (window), which has a removeEventListener no-op stub. Passing xhr would
-             * cause TypeError since XHR objects don't carry removeEventListener. */
             JSValue ret = JS_Call(ctx, cb, JS_UNDEFINED, 1, &ev);
             if (JS_IsException(ret)) xhr_log_exception(ctx, "onload");
             JS_FreeValue(ctx, ret);
-            JS_FreeValue(ctx, ev);
         }
         JS_FreeValue(ctx, cb);
     } else {
         cb = JS_GetPropertyStr(ctx, this_val, "onerror");
         if (JS_IsFunction(ctx, cb)) {
-            /* Build event object with target pointing to XHR */
-            JSValue ev = JS_NewObject(ctx);
-            JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
-            JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "error"));
             JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
             if (JS_IsException(ret)) xhr_log_exception(ctx, "onerror");
             JS_FreeValue(ctx, ret);
-            JS_FreeValue(ctx, ev);
         }
         JS_FreeValue(ctx, cb);
     }
+
+    /* Also fire any listeners stored via addEventListener("load"/"error") */
+    JSValue listeners_obj = JS_GetPropertyStr(ctx, this_val, "_listeners");
+    if (!JS_IsUndefined(listeners_obj) && !JS_IsNull(listeners_obj)) {
+        JSValue arr = JS_GetPropertyStr(ctx, listeners_obj, event_name);
+        if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+            JSValue len_v = JS_GetPropertyStr(ctx, arr, "length");
+            int32_t len = 0; JS_ToInt32(ctx, &len, len_v); JS_FreeValue(ctx, len_v);
+            for (int li = 0; li < len; li++) {
+                char idx_s[16]; snprintf(idx_s, sizeof(idx_s), "%d", li);
+                JSValue fn = JS_GetPropertyStr(ctx, arr, idx_s);
+                if (JS_IsFunction(ctx, fn)) {
+                    JSValue ret = JS_Call(ctx, fn, this_val, 1, &ev);
+                    if (JS_IsException(ret)) xhr_log_exception(ctx, event_name);
+                    JS_FreeValue(ctx, ret);
+                }
+                JS_FreeValue(ctx, fn);
+            }
+        }
+        JS_FreeValue(ctx, arr);
+    }
+    JS_FreeValue(ctx, listeners_obj);
+    JS_FreeValue(ctx, ev);
+
+    /* Also fire loadend listeners (some libraries use it to detect completion regardless of outcome) */
+    JSValue listeners_obj2 = JS_GetPropertyStr(ctx, this_val, "_listeners");
+    if (!JS_IsUndefined(listeners_obj2) && !JS_IsNull(listeners_obj2)) {
+        JSValue arr2 = JS_GetPropertyStr(ctx, listeners_obj2, "loadend");
+        if (!JS_IsUndefined(arr2) && !JS_IsNull(arr2)) {
+            JSValue len_v = JS_GetPropertyStr(ctx, arr2, "length");
+            int32_t len2 = 0; JS_ToInt32(ctx, &len2, len_v); JS_FreeValue(ctx, len_v);
+            JSValue ev2 = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, ev2, "target", JS_DupValue(ctx, this_val));
+            JS_SetPropertyStr(ctx, ev2, "type", JS_NewString(ctx, "loadend"));
+            for (int li = 0; li < len2; li++) {
+                char idx_s[16]; snprintf(idx_s, sizeof(idx_s), "%d", li);
+                JSValue fn = JS_GetPropertyStr(ctx, arr2, idx_s);
+                if (JS_IsFunction(ctx, fn)) {
+                    JSValue ret = JS_Call(ctx, fn, this_val, 1, &ev2);
+                    if (JS_IsException(ret)) xhr_log_exception(ctx, "loadend");
+                    JS_FreeValue(ctx, ret);
+                }
+                JS_FreeValue(ctx, fn);
+            }
+            JS_FreeValue(ctx, ev2);
+        }
+        JS_FreeValue(ctx, arr2);
+    }
+    JS_FreeValue(ctx, listeners_obj2);
 }
 
 static JSValue js_xhr_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -8748,6 +9026,10 @@ static JSValue js_xhr_ctor(JSContext *ctx, JSValueConst new_target, int argc, JS
     JS_SetPropertyStr(ctx, obj, "getResponseHeader",   JS_NewCFunction(ctx, js_xhr_getResponseHeader, "getResponseHeader",     1));
     JS_SetPropertyStr(ctx, obj, "abort",               JS_NewCFunction(ctx, js_xhr_abort,             "abort",                 0));
     JS_SetPropertyStr(ctx, obj, "overrideMimeType",    JS_NewCFunction(ctx, js_xhr_overrideMimeType,  "overrideMimeType",      1));
+    /* addEventListener/removeEventListener for PIXI/fetch-style XHR usage */
+    JS_SetPropertyStr(ctx, obj, "_listeners",          JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, obj, "addEventListener",    JS_NewCFunction(ctx, js_element_addEventListener,    "addEventListener",    3));
+    JS_SetPropertyStr(ctx, obj, "removeEventListener", JS_NewCFunction(ctx, js_element_removeEventListener, "removeEventListener", 3));
     return obj;
 }
 
@@ -9654,6 +9936,8 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, audio_ctor, "prototype", JS_DupValue(ctx, g_audio_proto));
     
     JS_SetPropertyStr(ctx, global, "Audio", audio_ctor);
+    /* HTMLAudioElement = Audio for instanceof checks (PIXI Sound uses t instanceof HTMLAudioElement) */
+    JS_SetPropertyStr(ctx, global, "HTMLAudioElement", JS_DupValue(ctx, audio_ctor));
 
     /* location object - create early so it can be used by document and global */
     JSValue location = JS_NewObject(ctx);
@@ -9891,8 +10175,7 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global, "Event", JS_UNDEFINED);
     /* HTMLElement constructor is set earlier - do not override with UNDEFINED */
     JS_SetPropertyStr(ctx, global, "Node", JS_UNDEFINED);
-    /* Add Promise (jQuery Deferred might use it) */
-    JS_SetPropertyStr(ctx, global, "Promise", JS_UNDEFINED);
+    /* Do not set Promise - QuickJS has native Promise support */
     /* Add Map, Set, WeakMap, WeakSet */
     JS_SetPropertyStr(ctx, global, "Map", JS_UNDEFINED);
     JS_SetPropertyStr(ctx, global, "Set", JS_UNDEFINED);
@@ -9987,6 +10270,13 @@ static void setup_globals_object(JSContext *ctx) {
     /* window.matchMedia — returns MediaQueryList stub with matches=false */
     JS_SetPropertyStr(ctx, global, "matchMedia", JS_NewCFunction(ctx, js_window_matchMedia, "matchMedia", 1));
 
+    /* AudioBuffer constructor stub — needed for instanceof checks in Web Audio libraries */
+    {
+        JSValue ab_ctor = JS_NewCFunction2(ctx, js_audiocontext_createBuffer, "AudioBuffer", 3, JS_CFUNC_constructor, 0);
+        JS_SetPropertyStr(ctx, ab_ctor, "prototype", JS_NewObject(ctx));
+        JS_SetPropertyStr(ctx, global, "AudioBuffer", ab_ctor);
+    }
+
     /* Global utility functions */
     JS_SetPropertyStr(ctx, global, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));
     JS_SetPropertyStr(ctx, global, "atob", JS_NewCFunction(ctx, js_atob, "atob", 1));
@@ -10044,6 +10334,8 @@ static void jscore_qjs_setup_globals(int win_w, int win_h,
 
     setup_globals_object(g_ctx);
 
+    /* Promise is natively supported by QuickJS - no patch needed */
+
     /* Pre-setup canvases */
     for (int i = 0; i < canvas_count && i < g_canvases_cap; i++) {
         g_canvases[i].id = i + 1;
@@ -10058,6 +10350,18 @@ static void jscore_qjs_setup_globals(int win_w, int win_h,
             g_canvases[i].tex_handle = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
         } else if (g_renderer && g_renderer->create_texture) {
             g_canvases[i].tex_handle = g_renderer->create_texture(canvases[i].width, canvases[i].height);
+        }
+    }
+    /* Ensure first canvas slot is always initialized for games that create canvas via JS */
+    if (canvas_count == 0 && g_canvases_cap > 0) {
+        g_canvases[0].id = 1;
+        g_canvases[0].width = 432;  /* Default size for games that don't specify canvas dimensions */
+        g_canvases[0].height = 304;
+        g_canvases[0].style[0] = '\0';
+        g_canvases[0].tex_handle = g_renderer->get_main_texture ? g_renderer->get_main_texture() : NULL;
+        /* Resize renderer to match default canvas size */
+        if (g_renderer && g_renderer->resize_window) {
+            g_renderer->resize_window(g_canvases[0].width, g_canvases[0].height);
         }
     }
 
@@ -10307,6 +10611,21 @@ static void jscore_qjs_check_timers(void) {
                 argv[0] = ev;
                 argc = 1;
             }
+            fprintf(stderr, "[timer] firing: slot=%d is_event=%d func_tag=%d\n",
+                    i, g_timers[i].is_event, (int)JS_VALUE_GET_TAG(func));
+            if (!JS_IsFunction(g_ctx, func)) {
+                fprintf(stderr, "[timer] WARNING: func is not callable (tag=%d), skipping\n",
+                        (int)JS_VALUE_GET_TAG(func));
+                if (g_timers[i].is_event && argc > 0) JS_FreeValue(g_ctx, argv[0]);
+                JS_FreeValue(g_ctx, call_this);
+                JS_FreeValue(g_ctx, func);
+                if (!g_timers[i].repeat) {
+                    JS_FreeValue(g_ctx, g_timers[i].func);
+                    JS_FreeValue(g_ctx, g_timers[i].this_val);
+                    g_timers[i].active = 0;
+                }
+                continue;
+            }
             JSValue result = JS_Call(g_ctx, func, call_this, argc, argv);
             if (g_timers[i].is_event && argc > 0) {
                 JS_FreeValue(g_ctx, argv[0]);
@@ -10319,6 +10638,13 @@ static void jscore_qjs_check_timers(void) {
                 if (exc_str) {
                     fprintf(stderr, "Timer error: %s\n", exc_str);
                     JS_FreeCString(g_ctx, exc_str);
+                }
+                /* Print name and message separately for better info */
+                JSValue msg = JS_GetPropertyStr(g_ctx, exc, "message");
+                if (!JS_IsUndefined(msg)) {
+                    const char *ms = JS_ToCString(g_ctx, msg);
+                    if (ms) { fprintf(stderr, "  Message: %s\n", ms); JS_FreeCString(g_ctx, ms); }
+                    JS_FreeValue(g_ctx, msg);
                 }
                 /* Print stack trace if available */
                 JSValue stack = JS_GetPropertyStr(g_ctx, exc, "stack");
