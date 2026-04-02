@@ -1267,6 +1267,9 @@ static const JSCFunctionListEntry js_console_funcs[] = {
 /* Forward declaration - defined later */
 extern JSValue g_image_proto;
 
+/* External flag from main.c for --no-webaudio option */
+extern int g_disable_webaudio;
+
 static JSValue js_image_ctor(JSContext *ctx, JSValueConst new_target,
                              int argc, JSValueConst *argv) {
     int width = 0, height = 0;
@@ -3346,7 +3349,10 @@ static JSValue js_ctx2d_clearRect(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+#ifdef EXTRA_DEBUG
 static int g_drawimage_logged = 0;
+#endif
+
 static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     CTX_SWITCH(ctx, this_val);
@@ -3354,10 +3360,12 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
 
     /* Get image object */
     JSValue img_obj = argv[0];
+#ifdef EXTRA_DEBUG
     if (g_drawimage_logged < 200) {
         g_drawimage_logged++;
         fprintf(stderr, "[drawImage] call #%d: argc=%d\n", g_drawimage_logged, argc);
     }
+#endif
 
     /* Try to get image ID from _imageId property first (for JS_NewObjectProto images) */
     JSValue imageIdVal = JS_GetPropertyStr(ctx, img_obj, "_imageId");
@@ -10262,40 +10270,40 @@ static void setup_globals_object(JSContext *ctx) {
     /* fetch stub — just needs to exist for feature detection */
     JS_SetPropertyStr(ctx, global, "fetch", JS_NewCFunction(ctx, js_noop, "fetch", 1));
 
-    /* Web Audio API - Enable AudioContext constructor */
-    /* Create AudioContext constructor function */
-    JSValue AudioContext_ctor = JS_NewCFunction2(ctx, js_audiocontext_ctor, "AudioContext", 0,
-                                                  JS_CFUNC_constructor, 0);
-    /* Setup prototype */
-    setup_audiocontext_prototype(ctx);
-    JS_SetPropertyStr(ctx, AudioContext_ctor, "prototype", JS_DupValue(ctx, g_audiocontext_proto));
-    
-    /* Register AudioContext and webkitAudioContext (for compatibility) */
-    JS_SetPropertyStr(ctx, global, "AudioContext", AudioContext_ctor);
-    JS_SetPropertyStr(ctx, global, "webkitAudioContext", JS_DupValue(ctx, AudioContext_ctor));
+    /* Web Audio API - Enable AudioContext constructor (unless --no-webaudio is set) */
+    if (!g_disable_webaudio) {
+        /* Create AudioContext constructor function */
+        JSValue AudioContext_ctor = JS_NewCFunction2(ctx, js_audiocontext_ctor, "AudioContext", 0,
+                                                      JS_CFUNC_constructor, 0);
+        /* Setup prototype */
+        setup_audiocontext_prototype(ctx);
+        JS_SetPropertyStr(ctx, AudioContext_ctor, "prototype", JS_DupValue(ctx, g_audiocontext_proto));
 
-    /* OfflineAudioContext — constructor(channels, length, sampleRate), mainly used for decodeAudioData */
-    JSValue OfflineAudioContext_ctor = JS_NewCFunction2(ctx, js_audiocontext_ctor, "OfflineAudioContext", 3,
-                                                         JS_CFUNC_constructor, 0);
-    JS_SetPropertyStr(ctx, OfflineAudioContext_ctor, "prototype", JS_DupValue(ctx, g_audiocontext_proto));
-    JS_SetPropertyStr(ctx, global, "OfflineAudioContext", OfflineAudioContext_ctor);
-    JS_SetPropertyStr(ctx, global, "webkitOfflineAudioContext", JS_DupValue(ctx, OfflineAudioContext_ctor));
+        /* Register AudioContext and webkitAudioContext (for compatibility) */
+        JS_SetPropertyStr(ctx, global, "AudioContext", AudioContext_ctor);
+        JS_SetPropertyStr(ctx, global, "webkitAudioContext", JS_DupValue(ctx, AudioContext_ctor));
+
+        /* OfflineAudioContext — constructor(channels, length, sampleRate), mainly used for decodeAudioData */
+        JSValue OfflineAudioContext_ctor = JS_NewCFunction2(ctx, js_audiocontext_ctor, "OfflineAudioContext", 3,
+                                                             JS_CFUNC_constructor, 0);
+        JS_SetPropertyStr(ctx, OfflineAudioContext_ctor, "prototype", JS_DupValue(ctx, g_audiocontext_proto));
+        JS_SetPropertyStr(ctx, global, "OfflineAudioContext", OfflineAudioContext_ctor);
+        JS_SetPropertyStr(ctx, global, "webkitOfflineAudioContext", JS_DupValue(ctx, OfflineAudioContext_ctor));
+
+        /* AudioBuffer constructor stub — needed for instanceof checks in Web Audio libraries */
+        {
+            JSValue ab_ctor = JS_NewCFunction2(ctx, js_audiocontext_createBuffer, "AudioBuffer", 3, JS_CFUNC_constructor, 0);
+            JS_SetPropertyStr(ctx, ab_ctor, "prototype", JS_NewObject(ctx));
+            JS_SetPropertyStr(ctx, global, "AudioBuffer", ab_ctor);
+        }
+    }
 
     /* window.matchMedia — returns MediaQueryList stub with matches=false */
     JS_SetPropertyStr(ctx, global, "matchMedia", JS_NewCFunction(ctx, js_window_matchMedia, "matchMedia", 1));
-
-    /* AudioBuffer constructor stub — needed for instanceof checks in Web Audio libraries */
-    {
-        JSValue ab_ctor = JS_NewCFunction2(ctx, js_audiocontext_createBuffer, "AudioBuffer", 3, JS_CFUNC_constructor, 0);
-        JS_SetPropertyStr(ctx, ab_ctor, "prototype", JS_NewObject(ctx));
-        JS_SetPropertyStr(ctx, global, "AudioBuffer", ab_ctor);
-    }
-
-    /* Global utility functions */
-    JS_SetPropertyStr(ctx, global, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));
     JS_SetPropertyStr(ctx, global, "atob", JS_NewCFunction(ctx, js_atob, "atob", 1));
     JS_SetPropertyStr(ctx, global, "atoi", JS_NewCFunction(ctx, js_atoi, "atoi", 1));
     JS_SetPropertyStr(ctx, global, "atof", JS_NewCFunction(ctx, js_atof, "atof", 1));
+    JS_SetPropertyStr(ctx, global, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));
     JS_SetPropertyStr(ctx, global, "isNaN", JS_NewCFunction(ctx, js_isNaN, "isNaN", 1));
     JS_SetPropertyStr(ctx, global, "isFinite", JS_NewCFunction(ctx, js_isFinite, "isFinite", 1));
     JS_SetPropertyStr(ctx, global, "encodeURIComponent", JS_NewCFunction(ctx, js_encodeURIComponent, "encodeURIComponent", 1));
@@ -10625,8 +10633,12 @@ static void jscore_qjs_check_timers(void) {
                 argv[0] = ev;
                 argc = 1;
             }
+
+#ifdef EXTRA_DEBUG
             fprintf(stderr, "[timer] firing: slot=%d is_event=%d func_tag=%d\n",
                     i, g_timers[i].is_event, (int)JS_VALUE_GET_TAG(func));
+#endif                    
+                    
             if (!JS_IsFunction(g_ctx, func)) {
                 fprintf(stderr, "[timer] WARNING: func is not callable (tag=%d), skipping\n",
                         (int)JS_VALUE_GET_TAG(func));

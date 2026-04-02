@@ -381,7 +381,7 @@ static void get_exe_dir(const char* argv0, char* out, size_t out_size) {
  * ============================================================================ */
 
 /* Global flag to disable WebAudio API (for debugging) */
-static int g_disable_webaudio = 0;
+int g_disable_webaudio = 0;
 
 /* Global flag to enable broken/incomplete WebGL support (for testing) */
 static int g_broken_webgl = 0;
