@@ -471,6 +471,8 @@ static void setup_audiocontext_prototype(JSContext *ctx);
 
 /* Track which canvas is the main display canvas */
 static int g_display_canvas_id = 1;
+static int g_display_canvas_draw_count = 0;
+static int g_canvas1_from_getElementById = 0; /* set when game claims canvas 1 via getElementById */
 
 static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
     /* Get canvas ID from the context object's _canvasId property */
@@ -504,7 +506,7 @@ static void* get_current_canvas_texture(JSContext *ctx, JSValueConst this_val) {
 /* Update the display canvas to track which canvas should be shown */
 static void update_display_canvas(int canvas_id) {
     if (canvas_id <= 0 || canvas_id == g_display_canvas_id) return;
-    
+
     /* Find the canvas */
     for (int i = 0; i < g_canvases_cap; i++) {
         if (g_canvases[i].id == canvas_id && g_canvases[i].tex_handle) {
@@ -513,11 +515,12 @@ static void update_display_canvas(int canvas_id) {
             g_canvases[0].width = g_canvases[i].width;
             g_canvases[0].height = g_canvases[i].height;
             g_display_canvas_id = canvas_id;
-            
+            g_display_canvas_draw_count = 0;
+
             /* Set renderer's main texture to this canvas's texture */
             if (g_renderer && g_renderer->set_main_texture) {
-                g_renderer->set_main_texture(g_canvases[i].tex_handle, 
-                                            g_canvases[i].width, 
+                g_renderer->set_main_texture(g_canvases[i].tex_handle,
+                                            g_canvases[i].width,
                                             g_canvases[i].height);
             }
             break;
@@ -3444,9 +3447,14 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
 
     void *target = get_current_canvas_texture(ctx, this_val);
     
-    /* Update display canvas if this is a different canvas being actively rendered to */
-    if (g_ctx2d.canvas_id > 0) {
-        update_display_canvas(g_ctx2d.canvas_id);
+    /* Only switch display canvas if canvas 1 is never drawn to directly.
+     * Games like CrossCode draw to canvas 1 themselves; games like Pikachu
+     * Volleyball (PixiJS) create a dynamic canvas and never touch canvas 1. */
+    if (g_ctx2d.canvas_id > 1000 && !g_canvas1_from_getElementById) {
+        g_display_canvas_draw_count++;
+        if (g_display_canvas_draw_count >= 10 && g_display_canvas_id != g_ctx2d.canvas_id) {
+            update_display_canvas(g_ctx2d.canvas_id);
+        }
     }
     
     if (!target) {
@@ -4279,11 +4287,6 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                 }
             } else {
                 /* Main canvas (id=1) - resize window if size changed */
-                /* Prevent invalid dimensions (PixiJS composite test uses 6x1) */
-                if (new_width < 64) {
-                    /* Ignore invalid width - keep current valid dimension */
-                    new_width = g_canvases[i].width;
-                }
                 if (g_canvases[i].width != new_width) {
                     fprintf(stderr, "[canvas] Main canvas width changed to %d (was %d)\n",
                             new_width, g_canvases[i].width);
@@ -4347,11 +4350,6 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                 }
             } else {
                 /* Main canvas (id=1) - resize window if size changed */
-                /* Prevent invalid dimensions (PixiJS composite test uses 6x1) */
-                if (new_height < 64) {
-                    /* Ignore invalid height - keep current valid dimension */
-                    new_height = g_canvases[i].height;
-                }
                 if (g_canvases[i].height != new_height) {
                     fprintf(stderr, "[canvas] Main canvas height changed to %d (was %d)\n",
                             new_height, g_canvases[i].height);
@@ -5883,7 +5881,10 @@ static JSValue js_document_getElementById(JSContext *ctx, JSValueConst this_val,
             if (match) {
                 /* If the main canvas is accessed via getElementById, mark stage as claimed
                  * so subsequent createElement('canvas') creates a new offscreen canvas */
-                if (g_canvases[i].id == 1) g_stage_canvas_claimed = 1;
+                if (g_canvases[i].id == 1) {
+                    g_stage_canvas_claimed = 1;
+                    g_canvas1_from_getElementById = 1; /* game wants canvas 1 as display */
+                }
                 JSValue obj = js_make_canvas_object(ctx, g_canvases[i].id);
                 JS_FreeCString(ctx, id);
                 return obj;
@@ -6331,8 +6332,10 @@ static JSValue js_make_canvas_object(JSContext *ctx, int id) {
     JS_SetPropertyStr(ctx, obj, "_canvasId", JS_NewInt32(ctx, id));
     {
         JSValue style = JS_NewObject(ctx);
-        /* Style properties - use getters/setters for width/height to sync with canvas dimensions */
+        /* Style properties - width/height as strings for CSS compatibility */
         JS_SetPropertyStr(ctx, style, "cssText", JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, style, "width", JS_NewString(ctx, ""));
+        JS_SetPropertyStr(ctx, style, "height", JS_NewString(ctx, ""));
         JS_SetPropertyStr(ctx, obj, "style", style);
     }
     JS_SetPropertyStr(ctx, obj, "addEventListener",
@@ -7316,6 +7319,10 @@ static JSValue js_window_get_location(JSContext *ctx, JSValueConst this_val) {
     JS_SetPropertyStr(ctx, obj, "port", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "search", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, obj, "hash", JS_NewString(ctx, ""));
+    /* Add replace function (CrossCode and other games call location.replace()) */
+    JS_SetPropertyStr(ctx, obj, "replace", JS_NewCFunction(ctx, js_noop, "replace", 1));
+    JS_SetPropertyStr(ctx, obj, "reload", JS_NewCFunction(ctx, js_noop, "reload", 0));
+    JS_SetPropertyStr(ctx, obj, "assign", JS_NewCFunction(ctx, js_noop, "assign", 1));
     return obj;
 }
 
@@ -8024,6 +8031,9 @@ static int jscore_qjs_init(RendererInterface *renderer,
     g_sound = sound;
 
     g_stage_canvas_claimed = 0;
+    g_canvas1_from_getElementById = 0;
+    g_display_canvas_id = 1;
+    g_display_canvas_draw_count = 0;
     memset(g_mouse_listeners, 0, sizeof(g_mouse_listeners));
     ctx_pool_init();
 
@@ -9949,6 +9959,10 @@ static void setup_globals_object(JSContext *ctx) {
     JS_SetPropertyStr(ctx, location, "port", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, location, "search", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, location, "hash", JS_NewString(ctx, ""));
+    /* Add replace function (CrossCode and other games call location.replace()) */
+    JS_SetPropertyStr(ctx, location, "replace", JS_NewCFunction(ctx, js_noop, "replace", 1));
+    JS_SetPropertyStr(ctx, location, "reload", JS_NewCFunction(ctx, js_noop, "reload", 0));
+    JS_SetPropertyStr(ctx, location, "assign", JS_NewCFunction(ctx, js_noop, "assign", 1));
 
     /* Window functions on global FIRST (before document needs them) */
     JS_SetPropertyFunctionList(ctx, global, js_window_funcs,
