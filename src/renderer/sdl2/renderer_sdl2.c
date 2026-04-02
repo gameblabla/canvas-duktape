@@ -172,7 +172,11 @@ static TTF_Font* get_font_for_size(int size) {
 static void apply_transform_to_dst(int dx, int dy, int dw, int dh,
                                     const double* m, SDL_Rect* out) {
     if (m[0]==1 && m[1]==0 && m[2]==0 && m[3]==1 && m[4]==0 && m[5]==0) {
-        out->x = dx; out->y = dy; out->w = dw; out->h = dh;
+        /* Normalize negative dw/dh (negative means flip; SDL needs positive dims) */
+        out->x = dw < 0 ? dx + dw : dx;
+        out->y = dh < 0 ? dy + dh : dy;
+        out->w = dw < 0 ? -dw : dw;
+        out->h = dh < 0 ? -dh : dh;
         return;
     }
     double x1=dx,    y1=dy;
@@ -202,7 +206,27 @@ static void render_with_transform(SDL_Texture* src_tex,
                                    int local_dw, int local_dh) {
     if (m[0]==1 && m[1]==0 && m[2]==0 && m[3]==1 && m[4]==0 && m[5]==0) {
         SDL_SetTextureAlphaMod(src_tex, alphaMod);
-        SDL_RenderCopy(g_sdl_renderer, src_tex, s, d);
+        /* Handle negative dw/dh (flip) even in the identity-transform case */
+        if (local_dw < 0 || local_dh < 0) {
+            SDL_RendererFlip flip = SDL_FLIP_NONE;
+            if (local_dw < 0) flip |= SDL_FLIP_HORIZONTAL;
+            if (local_dh < 0) flip |= SDL_FLIP_VERTICAL;
+            SDL_RenderCopyEx(g_sdl_renderer, src_tex, s, d, 0, NULL, flip);
+        } else {
+            SDL_RenderCopy(g_sdl_renderer, src_tex, s, d);
+        }
+        SDL_SetTextureAlphaMod(src_tex, 255);
+        return;
+    }
+
+    /* Pure scale/flip (no rotation): m[1]=0, m[2]=0.
+     * scale(-1,1) falls here, NOT into is_rotation which would give wrong angle=180. */
+    if (fabs(m[1]) < 0.001 && fabs(m[2]) < 0.001) {
+        SDL_SetTextureAlphaMod(src_tex, alphaMod);
+        SDL_RendererFlip flip = SDL_FLIP_NONE;
+        if (m[0] < 0) flip |= SDL_FLIP_HORIZONTAL;
+        if (m[3] < 0) flip |= SDL_FLIP_VERTICAL;
+        SDL_RenderCopyEx(g_sdl_renderer, src_tex, s, d, 0, NULL, flip);
         SDL_SetTextureAlphaMod(src_tex, 255);
         return;
     }
@@ -810,9 +834,28 @@ static void r_fill_text(void* target, const char* text, double x, double y,
     SDL_Color fg = {r, g, b, 255};
     SDL_Surface* sf = TTF_RenderUTF8_Blended(font, text, fg);
     if (!sf) return;
-    SDL_Texture* tt = SDL_CreateTextureFromSurface(g_sdl_renderer, sf);
+    /* Premultiply alpha: canvas textures use premultiplied alpha internally */
+    SDL_Surface* sf32 = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, 0);
     SDL_FreeSurface(sf);
+    if (!sf32) return;
+    SDL_LockSurface(sf32);
+    {
+        Uint32* pix = (Uint32*)sf32->pixels;
+        int npix = sf32->w * sf32->h;
+        for (int pi = 0; pi < npix; pi++) {
+            Uint8 pa, pr, pg, pb;
+            SDL_GetRGBA(pix[pi], sf32->format, &pr, &pg, &pb, &pa);
+            pr = (Uint8)((pr * pa + 127) / 255);
+            pg = (Uint8)((pg * pa + 127) / 255);
+            pb = (Uint8)((pb * pa + 127) / 255);
+            pix[pi] = SDL_MapRGBA(sf32->format, pr, pg, pb, pa);
+        }
+    }
+    SDL_UnlockSurface(sf32);
+    SDL_Texture* tt = SDL_CreateTextureFromSurface(g_sdl_renderer, sf32);
+    SDL_FreeSurface(sf32);
     if (!tt) return;
+    SDL_SetTextureBlendMode(tt, get_premult_blend_mode());
     /* Set nearest-neighbor scaling for pixel-perfect rendering */
     SDL_SetTextureScaleMode(tt, SDL_ScaleModeNearest);
     int tw, th;
