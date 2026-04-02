@@ -3675,14 +3675,25 @@ static JSValue js_imagedata_ctor(JSContext *ctx, JSValueConst new_target,
                                   int argc, JSValueConst *argv) {
     int w = 0, h = 0;
     JSValue data_arg = JS_UNDEFINED;
-    
+
     /* ImageData constructor can be called as:
      * new ImageData(width, height)
      * new ImageData(data, width, height)
      * new ImageData(data, width, height, settings)
      */
     if (argc >= 1) {
-        if (JS_IsArray(argv[0])) {
+        /* Check if first arg is array-like (regular array or typed array like Uint8ClampedArray) */
+        int is_array_like = JS_IsArray(argv[0]);
+        if (!is_array_like && JS_IsObject(argv[0])) {
+            /* Check for typed arrays - they have a numeric length property */
+            JSValue len_val = JS_GetPropertyStr(ctx, argv[0], "length");
+            if (!JS_IsUndefined(len_val)) {
+                is_array_like = 1;
+            }
+            JS_FreeValue(ctx, len_val);
+        }
+        
+        if (is_array_like) {
             /* First arg is data array */
             data_arg = JS_DupValue(ctx, argv[0]);
             if (argc >= 2) JS_ToInt32(ctx, &w, argv[1]);
@@ -3703,7 +3714,7 @@ static JSValue js_imagedata_ctor(JSContext *ctx, JSValueConst new_target,
             }
         }
     }
-    
+
     /* Validate dimensions */
     if (w <= 0 || h <= 0) {
         return JS_ThrowTypeError(ctx, "ImageData: width and height must be > 0");
@@ -3776,13 +3787,32 @@ static JSValue js_ctx2d_createImageData(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "createImageData: width and height must be > 0");
     }
 
-    /* Create ImageData using constructor */
-    JSValue args[2];
-    args[0] = JS_NewInt32(ctx, w);
-    args[1] = JS_NewInt32(ctx, h);
-    JSValue obj = js_imagedata_ctor(ctx, JS_UNDEFINED, 2, args);
-    JS_FreeValue(ctx, args[0]);
-    JS_FreeValue(ctx, args[1]);
+    /* Create ImageData object directly */
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, w));
+    JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, h));
+    
+    /* Create and initialize data array */
+    JSValue data_arr = JS_NewArray(ctx);
+    int size = w * h * 4;
+    for (int i = 0; i < size; i++) {
+        JS_SetPropertyUint32(ctx, data_arr, i, JS_NewInt32(ctx, 0));
+    }
+    JS_SetPropertyStr(ctx, obj, "data", data_arr);
+    
+    /* Set prototype */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue ImageData = JS_GetPropertyStr(ctx, global, "ImageData");
+    if (!JS_IsUndefined(ImageData)) {
+        JSValue proto = JS_GetPropertyStr(ctx, ImageData, "prototype");
+        if (!JS_IsUndefined(proto)) {
+            JS_SetPropertyStr(ctx, obj, "__proto__", JS_DupValue(ctx, proto));
+            JS_SetPropertyStr(ctx, obj, "constructor", JS_DupValue(ctx, ImageData));
+        }
+    }
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, ImageData);
+    
     return obj;
 }
 
@@ -3800,26 +3830,38 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "getImageData: width and height must be > 0");
     }
 
+    /* Create ImageData object directly */
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, sw));
+    JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, sh));
+    
+    /* Create and initialize data array */
+    JSValue data_arr = JS_NewArray(ctx);
+    int size = sw * sh * 4;
+    for (int i = 0; i < size; i++) {
+        JS_SetPropertyUint32(ctx, data_arr, i, JS_NewInt32(ctx, 0));
+    }
+    JS_SetPropertyStr(ctx, obj, "data", data_arr);
+    
+    /* Set prototype */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue ImageData = JS_GetPropertyStr(ctx, global, "ImageData");
+    if (!JS_IsUndefined(ImageData)) {
+        JSValue proto = JS_GetPropertyStr(ctx, ImageData, "prototype");
+        if (!JS_IsUndefined(proto)) {
+            JS_SetPropertyStr(ctx, obj, "__proto__", JS_DupValue(ctx, proto));
+            JS_SetPropertyStr(ctx, obj, "constructor", JS_DupValue(ctx, ImageData));
+        }
+    }
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, ImageData);
+
     if (!g_renderer) {
-        /* Return empty ImageData */
-        JSValue args[2];
-        args[0] = JS_NewInt32(ctx, sw);
-        args[1] = JS_NewInt32(ctx, sh);
-        JSValue obj = js_imagedata_ctor(ctx, JS_UNDEFINED, 2, args);
-        JS_FreeValue(ctx, args[0]);
-        JS_FreeValue(ctx, args[1]);
         return obj;
     }
 
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) {
-        /* Return empty ImageData */
-        JSValue args[2];
-        args[0] = JS_NewInt32(ctx, sw);
-        args[1] = JS_NewInt32(ctx, sh);
-        JSValue obj = js_imagedata_ctor(ctx, JS_UNDEFINED, 2, args);
-        JS_FreeValue(ctx, args[0]);
-        JS_FreeValue(ctx, args[1]);
         return obj;
     }
 
@@ -3838,21 +3880,12 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    /* Create ImageData with pixel data */
-    JSValue data_arr = JS_NewArray(ctx);
+    /* Update pixel data in the existing array */
     for (int i = 0; i < sw * sh * 4; i++) {
         JS_SetPropertyUint32(ctx, data_arr, i, JS_NewInt32(ctx, pixels[i]));
     }
     free(pixels);
-
-    /* Create ImageData using constructor with data */
-    JSValue args[3];
-    args[0] = data_arr;
-    args[1] = JS_NewInt32(ctx, sw);
-    args[2] = JS_NewInt32(ctx, sh);
-    JSValue obj = js_imagedata_ctor(ctx, JS_UNDEFINED, 3, args);
-    JS_FreeValue(ctx, args[1]);
-    JS_FreeValue(ctx, args[2]);
+    
     return obj;
 }
 

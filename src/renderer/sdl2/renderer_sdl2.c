@@ -679,6 +679,26 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     int is_identity = (!m || (m[0]==1 && m[1]==0 && m[2]==0 &&
                        m[3]==1 && m[4]==0 && m[5]==0));
     if (!is_identity) {
+        /* Check for extremely large scale - if so, just fill the entire canvas */
+        double scale_x = fabs(m[0]) + fabs(m[1]);
+        double scale_y = fabs(m[2]) + fabs(m[3]);
+        int tex_w = 0, tex_h = 0;
+        SDL_QueryTexture(tex, NULL, NULL, &tex_w, &tex_h);
+        
+        /* If scaled rect is much larger than canvas, just fill the whole canvas */
+        if ((w * scale_x > tex_w * 10.0 && h * scale_y > tex_h * 10.0) ||
+            (w * scale_x > 1e6 || h * scale_y > 1e6)) {
+            SDL_SetRenderDrawBlendMode(g_sdl_renderer, bm);
+            SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
+            SDL_RenderFillRect(g_sdl_renderer, NULL);
+            remove_clip_for_texture(tex);
+            SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+            SDL_SetRenderTarget(g_sdl_renderer, NULL);
+            SDL_RenderFlush(g_sdl_renderer);
+            SDL_RenderFlush(g_sdl_renderer);
+            return;
+        }
+        
         /* Scanline-fill the transformed quad */
         double x1=x,   y1=y;
         double x2=x+w, y2=y;
@@ -688,8 +708,14 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
         double tx2=m[0]*x2+m[2]*y2+m[4], ty2=m[1]*x2+m[3]*y2+m[5];
         double tx3=m[0]*x3+m[2]*y3+m[4], ty3=m[1]*x3+m[3]*y3+m[5];
         double tx4=m[0]*x4+m[2]*y4+m[4], ty4=m[1]*x4+m[3]*y4+m[5];
+        
+        /* Clamp scanline range to texture bounds to avoid overflow with large scales */
         int min_y = (int)floor(fmin(fmin(ty1,ty2),fmin(ty3,ty4)));
         int max_y = (int)ceil (fmax(fmax(ty1,ty2),fmax(ty3,ty4)));
+        if (min_y < 0) min_y = 0;
+        if (max_y > tex_h) max_y = tex_h;
+        if (min_y >= max_y) { SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE); SDL_SetRenderTarget(g_sdl_renderer, NULL); return; }
+        
         double px[4]={tx1,tx2,tx3,tx4}, py[4]={ty1,ty2,ty3,ty4};
         for (int scan_y = min_y; scan_y <= max_y; scan_y++) {
             double ixs[8]; int cnt = 0;
@@ -706,9 +732,16 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
             }
             for (int i=0;i<cnt-1;i++) for(int j=i+1;j<cnt;j++)
                 if(ixs[i]>ixs[j]){double tmp=ixs[i];ixs[i]=ixs[j];ixs[j]=tmp;}
-            for (int i=0;i<cnt-1;i+=2)
-                SDL_RenderDrawLine(g_sdl_renderer,
-                    (int)floor(ixs[i]), scan_y, (int)ceil(ixs[i+1]), scan_y);
+            for (int i=0;i<cnt-1;i+=2) {
+                int x_start = (int)floor(ixs[i]);
+                int x_end = (int)ceil(ixs[i+1]);
+                /* Clamp to texture bounds */
+                if (x_start < 0) x_start = 0;
+                if (x_end > tex_w) x_end = tex_w;
+                if (x_start < x_end) {
+                    SDL_RenderDrawLine(g_sdl_renderer, x_start, scan_y, x_end, scan_y);
+                }
+            }
         }
     } else {
         SDL_RenderFillRect(g_sdl_renderer, &((SDL_Rect){x,y,w,h}));
