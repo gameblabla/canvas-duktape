@@ -4561,6 +4561,15 @@ static JSValue js_canvas_set_style_width(JSContext *ctx, JSValueConst this_val,
                 snprintf(new_style, sizeof(new_style), "%s width:%s;", g_canvases[i].style, val);
             }
             strncpy(g_canvases[i].style, new_style, sizeof(g_canvases[i].style) - 1);
+            /* If main canvas, trigger window resize when both CSS dimensions are set */
+            if (id == 1 && g_renderer && g_renderer->handle_window_resize) {
+                const char *pw = strstr(g_canvases[i].style, "width:");
+                const char *ph = strstr(g_canvases[i].style, "height:");
+                int css_w = pw ? atoi(pw + 6) : 0;
+                int css_h = ph ? atoi(ph + 7) : 0;
+                if (css_w > 0 && css_h > 0)
+                    g_renderer->handle_window_resize(css_w, css_h);
+            }
             break;
         }
     }
@@ -4643,6 +4652,15 @@ static JSValue js_canvas_set_style_height(JSContext *ctx, JSValueConst this_val,
                 snprintf(new_style, sizeof(new_style), "%s height:%s;", g_canvases[i].style, val);
             }
             strncpy(g_canvases[i].style, new_style, sizeof(g_canvases[i].style) - 1);
+            /* If main canvas, trigger window resize when both CSS dimensions are set */
+            if (id == 1 && g_renderer && g_renderer->handle_window_resize) {
+                const char *pw = strstr(g_canvases[i].style, "width:");
+                const char *ph = strstr(g_canvases[i].style, "height:");
+                int css_w = pw ? atoi(pw + 6) : 0;
+                int css_h = ph ? atoi(ph + 7) : 0;
+                if (css_w > 0 && css_h > 0)
+                    g_renderer->handle_window_resize(css_w, css_h);
+            }
             break;
         }
     }

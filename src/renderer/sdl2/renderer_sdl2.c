@@ -492,16 +492,17 @@ static int r_resize_window(int w, int h) {
     return 1;
 }
 
-/* Handle window resize event from user dragging window edge */
+/* Handle window resize event from user dragging window edge, or CSS display size change */
 static int r_handle_window_resize(int new_w, int new_h) {
     if (!g_window || !g_sdl_renderer) return 0;
+    if (new_w == g_win_w && new_h == g_win_h) return 1;
 
-    fprintf(stderr, "[renderer] User resized window to %dx%d\n", new_w, new_h);
+    fprintf(stderr, "[renderer] Resize display to %dx%d\n", new_w, new_h);
 
-    /* Store new window size for scaling during present */
+    SDL_SetWindowSize(g_window, new_w, new_h);
     g_win_w = new_w;
     g_win_h = new_h;
-    
+
     return 1;
 }
 
