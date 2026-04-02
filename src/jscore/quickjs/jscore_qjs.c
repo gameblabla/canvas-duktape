@@ -7768,15 +7768,15 @@ static JSValue js_window_addEventListener(JSContext *ctx, JSValueConst this_val,
             fprintf(stderr, "[addEventListener] Load listener array full!\n");
         }
     } else if (strcmp(event, "mousedown") == 0) {
-        if (g_window_mousedown_count < 16) {
+        if (JS_IsFunction(ctx, listener) && g_window_mousedown_count < 16) {
             g_window_mousedown_listeners[g_window_mousedown_count++] = JS_DupValue(ctx, listener);
         }
     } else if (strcmp(event, "mousemove") == 0) {
-        if (g_window_mousemove_count < 16) {
+        if (JS_IsFunction(ctx, listener) && g_window_mousemove_count < 16) {
             g_window_mousemove_listeners[g_window_mousemove_count++] = JS_DupValue(ctx, listener);
         }
     } else if (strcmp(event, "mouseup") == 0) {
-        if (g_window_mouseup_count < 16) {
+        if (JS_IsFunction(ctx, listener) && g_window_mouseup_count < 16) {
             g_window_mouseup_listeners[g_window_mouseup_count++] = JS_DupValue(ctx, listener);
         }
     }
@@ -11468,6 +11468,10 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
     JS_SetPropertyStr(g_ctx, event, "stopPropagation", JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
 
     JSValue global = JS_GetGlobalObject(g_ctx);
+    
+    /* Add target and currentTarget for event propagation */
+    JS_SetPropertyStr(g_ctx, event, "target", JS_DupValue(g_ctx, global));
+    JS_SetPropertyStr(g_ctx, event, "currentTarget", JS_DupValue(g_ctx, global));
 
     /* Fire listeners registered via canvas.addEventListener */
     for (int i = 0; i < MAX_MOUSE_LISTENERS; i++) {
@@ -11491,8 +11495,26 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
     else if (event_type == 6) { win_listeners = g_window_mouseup_listeners; win_count = g_window_mouseup_count; }
     if (win_listeners && win_count > 0) {
         for (int i = 0; i < win_count; i++) {
-            if (!JS_IsUndefined(win_listeners[i])) {
-                JSValue ret = JS_Call(g_ctx, win_listeners[i], global, 1, &event);
+            if (!JS_IsUndefined(win_listeners[i]) && JS_IsFunction(g_ctx, win_listeners[i])) {
+                /* Create a fresh event object for each listener to avoid issues */
+                JSValue local_event = JS_NewObject(g_ctx);
+                JS_SetPropertyStr(g_ctx, local_event, "type",     JS_NewString(g_ctx, evtype));
+                JS_SetPropertyStr(g_ctx, local_event, "clientX",  JS_NewInt32(g_ctx, x));
+                JS_SetPropertyStr(g_ctx, local_event, "clientY",  JS_NewInt32(g_ctx, y));
+                JS_SetPropertyStr(g_ctx, local_event, "pageX",    JS_NewInt32(g_ctx, x));
+                JS_SetPropertyStr(g_ctx, local_event, "pageY",    JS_NewInt32(g_ctx, y));
+                JS_SetPropertyStr(g_ctx, local_event, "screenX",  JS_NewInt32(g_ctx, x));
+                JS_SetPropertyStr(g_ctx, local_event, "screenY",  JS_NewInt32(g_ctx, y));
+                JS_SetPropertyStr(g_ctx, local_event, "button",   JS_NewInt32(g_ctx, button));
+                JS_SetPropertyStr(g_ctx, local_event, "buttons",  JS_NewInt32(g_ctx, event_type == 5 ? (1 << button) : 0));
+                JS_SetPropertyStr(g_ctx, local_event, "which",    JS_NewInt32(g_ctx, button + 1));
+                JS_SetPropertyStr(g_ctx, local_event, "preventDefault",  JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
+                JS_SetPropertyStr(g_ctx, local_event, "stopPropagation", JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
+                JS_SetPropertyStr(g_ctx, local_event, "target", JS_DupValue(g_ctx, global));
+                JS_SetPropertyStr(g_ctx, local_event, "currentTarget", JS_DupValue(g_ctx, global));
+                
+                JSValue ret = JS_Call(g_ctx, win_listeners[i], global, 1, &local_event);
+                JS_FreeValue(g_ctx, local_event);
                 if (JS_IsException(ret)) {
                     JSValue exc = JS_GetException(g_ctx);
                     const char *s = JS_ToCString(g_ctx, exc);
@@ -11644,7 +11666,9 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
         if (canvas_handler && JS_IsObject(canvas)) {
             JSValue handler = JS_GetPropertyStr(g_ctx, canvas, canvas_handler);
             if (JS_IsFunction(g_ctx, handler)) {
-                JSValue ret = JS_Call(g_ctx, handler, canvas, 1, &event);
+                JSValue event_arg = JS_DupValue(g_ctx, event);
+                JSValue ret = JS_Call(g_ctx, handler, canvas, 1, &event_arg);
+                JS_FreeValue(g_ctx, event_arg);
                 if (JS_IsException(ret)) JS_GetException(g_ctx);
                 JS_FreeValue(g_ctx, ret);
             }
@@ -11656,7 +11680,9 @@ static void jscore_qjs_dispatch_mouse(int event_type, int x, int y, int button) 
     if (event_type == 6) {
         JSValue handler = JS_GetPropertyStr(g_ctx, global, "onmouseup");
         if (JS_IsFunction(g_ctx, handler)) {
-            JSValue ret = JS_Call(g_ctx, handler, global, 1, &event);
+            JSValue event_arg = JS_DupValue(g_ctx, event);
+            JSValue ret = JS_Call(g_ctx, handler, global, 1, &event_arg);
+            JS_FreeValue(g_ctx, event_arg);
             if (JS_IsException(ret)) JS_GetException(g_ctx);
             JS_FreeValue(g_ctx, ret);
         }
