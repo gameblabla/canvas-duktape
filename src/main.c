@@ -393,6 +393,9 @@ static int g_show_fps = 0;
 /* Global screenshot delay in seconds (0 = disabled, uses frame-based screenshots) */
 static int g_screenshot_delay = 0;
 
+/* Global flag to enable input recording mode */
+static int g_record_mode = 0;
+
 /* ============================================================================
  * Input command system
  * ============================================================================ */
@@ -415,6 +418,71 @@ typedef struct {
 static InputCommand g_input_commands[MAX_INPUT_COMMANDS];
 static int          g_input_command_count = 0;
 static char         g_input_commands_raw[2048] = {0};
+
+/* ============================================================================
+ * Input recording (record mode)
+ * ============================================================================ */
+#define MAX_RECORDED_EVENTS 512
+
+typedef enum {
+    REC_KEY_DOWN,
+    REC_KEY_UP,
+    REC_MOUSE_DOWN,
+    REC_MOUSE_UP
+} RecEventType;
+
+typedef struct {
+    RecEventType type;
+    double       time_sec;
+    int          keycode;
+    int          mouse_x;
+    int          mouse_y;
+    int          button;
+} RecordedEvent;
+
+static RecordedEvent g_recorded_events[MAX_RECORDED_EVENTS];
+static int           g_recorded_count = 0;
+static double        g_record_start_time = 0.0;
+
+static void record_event(RecEventType type, double time_sec, int keycode, int mx, int my, int button) {
+    if (g_recorded_count >= MAX_RECORDED_EVENTS) return;
+    RecordedEvent* ev = &g_recorded_events[g_recorded_count++];
+    ev->type = type;
+    ev->time_sec = time_sec;
+    ev->keycode = keycode;
+    ev->mouse_x = mx;
+    ev->mouse_y = my;
+    ev->button = button;
+}
+
+static void print_recorded_commands(void) {
+    if (g_recorded_count == 0) {
+        fprintf(stderr, "[record] No events recorded.\n");
+        return;
+    }
+
+    fprintf(stderr, "\n========================================\n");
+    fprintf(stderr, "  Recorded Input Commands\n");
+    fprintf(stderr, "========================================\n");
+    fprintf(stderr, "--input-commands \"");
+
+    int first = 1;
+    for (int i = 0; i < g_recorded_count; i++) {
+        RecordedEvent* ev = &g_recorded_events[i];
+        if (!first) fprintf(stderr, ":");
+        first = 0;
+
+        if (ev->type == REC_KEY_DOWN) {
+            fprintf(stderr, "k%d,s%.2f", ev->keycode, ev->time_sec);
+        } else if (ev->type == REC_MOUSE_DOWN) {
+            fprintf(stderr, "m,s%.2f,%d,%d", ev->time_sec, ev->mouse_x, ev->mouse_y);
+        }
+        /* Only record keydown and mousedown for cleaner output */
+    }
+
+    fprintf(stderr, "\"\n");
+    fprintf(stderr, "========================================\n\n");
+}
 
 /* Parse a single command like "m,s10,400,350" or "k47,s10" */
 static int parse_input_command(const char* cmd_str, InputCommand* cmd) {
@@ -537,7 +605,7 @@ static void parse_input_commands_string(const char* str) {
 int main(int argc, char** argv) {
     /* Parse command-line arguments */
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] [--fps] [-s <seconds>] [--input-commands <cmds>] <file.html>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] [--fps] [-s <seconds>] [--input-commands <cmds>] [--record] <file.html>\n", argv[0]);
         return 1;
     }
 
@@ -570,6 +638,9 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "Error: --input-commands requires a value\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--record") == 0) {
+            g_record_mode = 1;
+            fprintf(stderr, "[main] Input recording mode enabled\n");
         } else {
             html_path = argv[i];
         }
@@ -687,6 +758,11 @@ int main(int argc, char** argv) {
     jscore.call_window_load_listeners();
     jscore.call_window_onload();
 
+    /* Start recording timer */
+    if (g_record_mode) {
+        g_record_start_time = renderer.get_time_ms();
+    }
+
     /* --- Main loop --- */
     int running = 1;
     int frame_count = 0;
@@ -710,12 +786,22 @@ int main(int argc, char** argv) {
                 /* Don't update canvas size - let game render at its native resolution */
             } else if (ev.type == INPUT_EVENT_KEYDOWN) {
                 jscore.dispatch_key(ev.keycode, 1);
+                if (g_record_mode) {
+                    double t = (renderer.get_time_ms() - g_record_start_time) / 1000.0;
+                    record_event(REC_KEY_DOWN, t, ev.keycode, 0, 0, 0);
+                }
             } else if (ev.type == INPUT_EVENT_KEYUP) {
                 jscore.dispatch_key(ev.keycode, 0);
             } else if (ev.type == INPUT_EVENT_MOUSEMOVE ||
                        ev.type == INPUT_EVENT_MOUSEDOWN ||
                        ev.type == INPUT_EVENT_MOUSEUP) {
                 jscore.dispatch_mouse(ev.type, ev.x, ev.y, ev.button);
+                if (g_record_mode) {
+                    double t = (renderer.get_time_ms() - g_record_start_time) / 1000.0;
+                    if (ev.type == INPUT_EVENT_MOUSEDOWN) {
+                        record_event(REC_MOUSE_DOWN, t, 0, ev.x, ev.y, ev.button);
+                    }
+                }
             } else if (ev.type == INPUT_EVENT_TOUCHMOVE ||
                        ev.type == INPUT_EVENT_TOUCHDOWN ||
                        ev.type == INPUT_EVENT_TOUCHUP) {
@@ -803,6 +889,11 @@ int main(int argc, char** argv) {
     input.quit();
     sound.quit();
     renderer.quit();
+
+    /* Print recorded commands if in record mode */
+    if (g_record_mode) {
+        print_recorded_commands();
+    }
 
     /* Free inline script memory */
     for (int i = 0; i < g_script_count; i++) {
