@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <limits.h>
+#include <ctype.h>
 
 #include "common/types.h"
 #include "renderer/sdl2/renderer_sdl2.h"
@@ -392,10 +393,151 @@ static int g_show_fps = 0;
 /* Global screenshot delay in seconds (0 = disabled, uses frame-based screenshots) */
 static int g_screenshot_delay = 0;
 
+/* ============================================================================
+ * Input command system
+ * ============================================================================ */
+#define MAX_INPUT_COMMANDS 64
+
+typedef enum {
+    INPUT_CMD_MOUSE,
+    INPUT_CMD_KEY
+} InputCmdType;
+
+typedef struct {
+    InputCmdType type;
+    double       delay_sec;
+    int          keycode;       /* For keyboard: virtual key code */
+    int          mouse_x;       /* For mouse: x coordinate */
+    int          mouse_y;       /* For mouse: y coordinate */
+    int          executed;
+} InputCommand;
+
+static InputCommand g_input_commands[MAX_INPUT_COMMANDS];
+static int          g_input_command_count = 0;
+static char         g_input_commands_raw[2048] = {0};
+
+/* Parse a single command like "m,s10,400,350" or "k47,s10" */
+static int parse_input_command(const char* cmd_str, InputCommand* cmd) {
+    const char* p = cmd_str;
+
+    /* Skip whitespace */
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!*p) return 0;
+
+    if (*p == 'm') {
+        cmd->type = INPUT_CMD_MOUSE;
+        p++;
+        /* Skip comma */
+        if (*p == ',') p++;
+    } else if (*p == 'k') {
+        cmd->type = INPUT_CMD_KEY;
+        p++;
+        /* Parse keycode */
+        cmd->keycode = 0;
+        while (*p && isdigit((unsigned char)*p)) {
+            cmd->keycode = cmd->keycode * 10 + (*p - '0');
+            p++;
+        }
+        if (*p == ',') p++;
+    } else {
+        fprintf(stderr, "[input-cmd] Unknown command type: '%c' in '%s'\n", *p, cmd_str);
+        return 0;
+    }
+
+    /* Parse delay: s<number> */
+    if (*p == 's') {
+        p++;
+        cmd->delay_sec = 0;
+        int has_decimal = 0;
+        double frac = 0.1;
+        while (*p && (isdigit((unsigned char)*p) || *p == '.')) {
+            if (*p == '.') {
+                has_decimal = 1;
+                p++;
+                continue;
+            }
+            int digit = *p - '0';
+            if (!has_decimal) {
+                cmd->delay_sec = cmd->delay_sec * 10 + digit;
+            } else {
+                cmd->delay_sec += digit * frac;
+                frac *= 0.1;
+            }
+            p++;
+        }
+        if (*p == ',') p++;
+    }
+
+    /* Parse mouse coordinates if mouse command */
+    if (cmd->type == INPUT_CMD_MOUSE) {
+        cmd->mouse_x = 0;
+        while (*p && isdigit((unsigned char)*p)) {
+            cmd->mouse_x = cmd->mouse_x * 10 + (*p - '0');
+            p++;
+        }
+        if (*p == ',') p++;
+        cmd->mouse_y = 0;
+        while (*p && isdigit((unsigned char)*p)) {
+            cmd->mouse_y = cmd->mouse_y * 10 + (*p - '0');
+            p++;
+        }
+    }
+
+    return 1;
+}
+
+static void parse_input_commands_string(const char* str) {
+    char buf[256];
+    const char* p = str;
+    const char* start = str;
+
+    g_input_command_count = 0;
+
+    while (*p) {
+        if (*p == ':') {
+            size_t len = (size_t)(p - start);
+            if (len > 0 && len < sizeof(buf)) {
+                strncpy(buf, start, len);
+                buf[len] = '\0';
+                if (g_input_command_count < MAX_INPUT_COMMANDS) {
+                    if (parse_input_command(buf, &g_input_commands[g_input_command_count])) {
+                        g_input_command_count++;
+                    }
+                }
+            }
+            start = p + 1;
+        }
+        p++;
+    }
+    /* Last command */
+    size_t len = (size_t)(p - start);
+    if (len > 0 && len < sizeof(buf)) {
+        strncpy(buf, start, len);
+        buf[len] = '\0';
+        if (g_input_command_count < MAX_INPUT_COMMANDS) {
+            if (parse_input_command(buf, &g_input_commands[g_input_command_count])) {
+                g_input_command_count++;
+            }
+        }
+    }
+
+    fprintf(stderr, "[input-cmd] Parsed %d input commands\n", g_input_command_count);
+    for (int i = 0; i < g_input_command_count; i++) {
+        if (g_input_commands[i].type == INPUT_CMD_MOUSE) {
+            fprintf(stderr, "[input-cmd]   [%d] MOUSE at (%d,%d) after %.1fs\n",
+                    i, g_input_commands[i].mouse_x, g_input_commands[i].mouse_y,
+                    g_input_commands[i].delay_sec);
+        } else {
+            fprintf(stderr, "[input-cmd]   [%d] KEY code=%d after %.1fs\n",
+                    i, g_input_commands[i].keycode, g_input_commands[i].delay_sec);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     /* Parse command-line arguments */
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] [--fps] [-s <seconds>] <file.html>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] [--fps] [-s <seconds>] [--input-commands <cmds>] <file.html>\n", argv[0]);
         return 1;
     }
 
@@ -417,6 +559,15 @@ int main(int argc, char** argv) {
                 i++;
             } else {
                 fprintf(stderr, "Error: -s requires a value (seconds)\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--input-commands") == 0) {
+            if (i + 1 < argc) {
+                strncpy(g_input_commands_raw, argv[i + 1], sizeof(g_input_commands_raw) - 1);
+                parse_input_commands_string(argv[i + 1]);
+                i++;
+            } else {
+                fprintf(stderr, "Error: --input-commands requires a value\n");
                 return 1;
             }
         } else {
@@ -539,18 +690,7 @@ int main(int argc, char** argv) {
     /* --- Main loop --- */
     int running = 1;
     int frame_count = 0;
-    int enter_pressed = 0;
-    int mouse_clicked = 0;
-    int arrow_keys_sent = 0;
-    int arrow_key_state = 0;  /* State machine for arrow key sequence */
-    int arrow_key_hold_start = 0;
-    int mouse_click_state = 0;  /* 0=none, 1=pressed, 2=held, 3=released */
     int time_screenshot_taken = 0;
-    const int ENTER_FRAME = 20;  /* Simulate ENTER keypress after N frames (delayed for game init) */
-    const int CLICK_FRAME = 40;  /* Simulate mouse click after N frames */
-    const int CLICK_HOLD_FRAMES = 10;  /* Hold mouse for N frames */
-    const int ARROW_KEY_FRAME = 60;  /* Simulate arrow keys for GameMaker games (after init) */
-    const int ARROW_KEY_HOLD_FRAMES = 3;  /* Hold each arrow key for N frames */
 
     /* FPS counter variables */
     int fps_frame_count = 0;
@@ -586,69 +726,36 @@ int main(int argc, char** argv) {
         frame_count++;
         fps_frame_count++;
 
-        /* Simulate ENTER keypress to start tests/games that require user input */
-        if (frame_count >= ENTER_FRAME && !enter_pressed) {
-            jscore.dispatch_key(13, 1);  /* VK_RETURN = 13 */
-            jscore.dispatch_key(13, 0);
-            enter_pressed = 1;
-            fprintf(stderr, "[main] Simulated ENTER keypress\n");
-        }
+        /* Execute input commands based on elapsed time */
+        if (g_input_command_count > 0) {
+            double elapsed_ms = renderer.get_time_ms();
+            for (int i = 0; i < g_input_command_count; i++) {
+                if (g_input_commands[i].executed) continue;
+                if (elapsed_ms < g_input_commands[i].delay_sec * 1000.0) continue;
 
-        /* Simulate mouse click for games that require click to start */
-        /* Hold mouse for multiple frames so game registers the click */
-        if (frame_count >= CLICK_FRAME && mouse_click_state == 0) {
-            /* Press mouse - set variables directly for games that don't use event handlers */
-            jscore.eval_string("if(typeof mousex!=='undefined'){mousex=400;mousey=200;mousse=1;}");
-            jscore.dispatch_mouse(INPUT_EVENT_MOUSEDOWN, 400, 200, 0);
-            mouse_click_state = 1;
-            fprintf(stderr, "[main] Mouse pressed at (400, 200)\n");
-        } else if (mouse_click_state == 1 && frame_count - CLICK_FRAME >= CLICK_HOLD_FRAMES) {
-            /* Release mouse */
-            jscore.dispatch_mouse(INPUT_EVENT_MOUSEUP, 400, 200, 0);
-            /* Keep mousse=1 for derp_puncher which checks it in game loop */
-            mouse_click_state = 3;
-            mouse_clicked = 1;
-            fprintf(stderr, "[main] Mouse released\n");
-        }
-
-        /* Simulate arrow keys for GameMaker games (speed/time adjustment) */
-        /* Hold keys for multiple frames so game registers them as pressed */
-        /* State machine: each state holds a key for ARROW_KEY_HOLD_FRAMES */
-        if (frame_count >= ARROW_KEY_FRAME && arrow_key_state < 10) {
-            if (arrow_key_state == 0) {
-                /* State 0: Press RIGHT */
-                jscore.dispatch_key(39, 1);
-                arrow_key_hold_start = frame_count;
-                arrow_key_state = 1;
-            } else if (arrow_key_state == 1 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
-                /* State 1: Release RIGHT, press RIGHT again */
-                jscore.dispatch_key(39, 0);
-                jscore.dispatch_key(39, 1);
-                arrow_key_hold_start = frame_count;
-                arrow_key_state = 2;
-            } else if (arrow_key_state == 2 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
-                /* State 2: Release RIGHT, press RIGHT again (3rd time) */
-                jscore.dispatch_key(39, 0);
-                jscore.dispatch_key(39, 1);
-                arrow_key_hold_start = frame_count;
-                arrow_key_state = 3;
-            } else if (arrow_key_state == 3 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
-                /* State 3: Release RIGHT, press DOWN */
-                jscore.dispatch_key(39, 0);
-                jscore.dispatch_key(40, 1);
-                arrow_key_hold_start = frame_count;
-                arrow_key_state = 4;
-            } else if (arrow_key_state == 4 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
-                /* State 4: Release DOWN, press DOWN again */
-                jscore.dispatch_key(40, 0);
-                jscore.dispatch_key(40, 1);
-                arrow_key_hold_start = frame_count;
-                arrow_key_state = 5;
-            } else if (arrow_key_state == 5 && frame_count - arrow_key_hold_start >= ARROW_KEY_HOLD_FRAMES) {
-                /* State 5: Release DOWN - done */
-                jscore.dispatch_key(40, 0);
-                arrow_key_state = 10;  /* Mark as complete */
-                fprintf(stderr, "[main] Arrow key sequence complete (RIGHT x3, DOWN x2)\n");
+                if (g_input_commands[i].type == INPUT_CMD_MOUSE) {
+                    char mouse_cmd[256];
+                    snprintf(mouse_cmd, sizeof(mouse_cmd),
+                             "if(typeof mousex!=='undefined'){mousex=%d;mousey=%d;mousse=1;}",
+                             g_input_commands[i].mouse_x, g_input_commands[i].mouse_y);
+                    jscore.eval_string(mouse_cmd);
+                    jscore.dispatch_mouse(INPUT_EVENT_MOUSEDOWN,
+                                          g_input_commands[i].mouse_x,
+                                          g_input_commands[i].mouse_y, 0);
+                    fprintf(stderr, "[input-cmd] Mouse pressed at (%d,%d)\n",
+                            g_input_commands[i].mouse_x, g_input_commands[i].mouse_y);
+                    /* Release after a short hold */
+                    jscore.dispatch_mouse(INPUT_EVENT_MOUSEUP,
+                                          g_input_commands[i].mouse_x,
+                                          g_input_commands[i].mouse_y, 0);
+                    fprintf(stderr, "[input-cmd] Mouse released\n");
+                } else {
+                    jscore.dispatch_key(g_input_commands[i].keycode, 1);
+                    jscore.dispatch_key(g_input_commands[i].keycode, 0);
+                    fprintf(stderr, "[input-cmd] Key %d pressed and released\n",
+                            g_input_commands[i].keycode);
+                }
+                g_input_commands[i].executed = 1;
             }
         }
 
