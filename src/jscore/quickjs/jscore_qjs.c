@@ -967,7 +967,8 @@ static int color_from_js_checked(JSValue v, double *out) {
         int valid = 1;
         double tmp[4] = {0, 0, 0, 1};
         if (strcmp(str, "red") == 0)       { tmp[0]=1; tmp[1]=0; tmp[2]=0; tmp[3]=1; }
-        else if (strcmp(str, "green") == 0) { tmp[0]=0; tmp[1]=1; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "green") == 0) { tmp[0]=0; tmp[1]=0.502; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "lime") == 0)  { tmp[0]=0; tmp[1]=1; tmp[2]=0; tmp[3]=1; }
         else if (strcmp(str, "blue") == 0)  { tmp[0]=0; tmp[1]=0; tmp[2]=1; tmp[3]=1; }
         else if (strcmp(str, "black") == 0) { tmp[0]=0; tmp[1]=0; tmp[2]=0; tmp[3]=1; }
         else if (strcmp(str, "white") == 0) { tmp[0]=1; tmp[1]=1; tmp[2]=1; tmp[3]=1; }
@@ -977,6 +978,14 @@ static int color_from_js_checked(JSValue v, double *out) {
         else if (strcmp(str, "transparent") == 0){ tmp[0]=0; tmp[1]=0; tmp[2]=0; tmp[3]=0; }
         else if (strcmp(str, "orange") == 0){ tmp[0]=1; tmp[1]=0.647; tmp[2]=0; tmp[3]=1; }
         else if (strcmp(str, "purple") == 0){ tmp[0]=0.502; tmp[1]=0; tmp[2]=0.502; tmp[3]=1; }
+        else if (strcmp(str, "gray") == 0 || strcmp(str, "grey") == 0) { tmp[0]=0.502; tmp[1]=0.502; tmp[2]=0.502; tmp[3]=1; }
+        else if (strcmp(str, "maroon") == 0){ tmp[0]=0.502; tmp[1]=0; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "navy") == 0)  { tmp[0]=0; tmp[1]=0; tmp[2]=0.502; tmp[3]=1; }
+        else if (strcmp(str, "olive") == 0) { tmp[0]=0.502; tmp[1]=0.502; tmp[2]=0; tmp[3]=1; }
+        else if (strcmp(str, "teal") == 0)  { tmp[0]=0; tmp[1]=0.502; tmp[2]=0.502; tmp[3]=1; }
+        else if (strcmp(str, "aqua") == 0)  { tmp[0]=0; tmp[1]=1; tmp[2]=1; tmp[3]=1; }
+        else if (strcmp(str, "fuchsia") == 0){ tmp[0]=1; tmp[1]=0; tmp[2]=1; tmp[3]=1; }
+        else if (strcmp(str, "silver") == 0){ tmp[0]=0.753; tmp[1]=0.753; tmp[2]=0.753; tmp[3]=1; }
         else if (str[0] == '#') {
             unsigned int r=0, g2=0, b=0, a=255;
             size_t len = strlen(str);
