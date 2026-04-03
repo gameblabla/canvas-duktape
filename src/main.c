@@ -389,10 +389,13 @@ static int g_broken_webgl = 0;
 /* Global flag to enable FPS counter display */
 static int g_show_fps = 0;
 
+/* Global screenshot delay in seconds (0 = disabled, uses frame-based screenshots) */
+static int g_screenshot_delay = 0;
+
 int main(int argc, char** argv) {
     /* Parse command-line arguments */
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] [--fps] <file.html>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] [--fps] [-s <seconds>] <file.html>\n", argv[0]);
         return 1;
     }
 
@@ -407,6 +410,15 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--fps") == 0) {
             g_show_fps = 1;
             fprintf(stderr, "[main] FPS counter enabled\n");
+        } else if (strcmp(argv[i], "-s") == 0) {
+            if (i + 1 < argc) {
+                g_screenshot_delay = atoi(argv[i + 1]);
+                fprintf(stderr, "[main] Screenshot scheduled after %d seconds\n", g_screenshot_delay);
+                i++;
+            } else {
+                fprintf(stderr, "Error: -s requires a value (seconds)\n");
+                return 1;
+            }
         } else {
             html_path = argv[i];
         }
@@ -527,16 +539,13 @@ int main(int argc, char** argv) {
     /* --- Main loop --- */
     int running = 1;
     int frame_count = 0;
-    int screenshot_taken = 0;
     int enter_pressed = 0;
     int mouse_clicked = 0;
     int arrow_keys_sent = 0;
     int arrow_key_state = 0;  /* State machine for arrow key sequence */
     int arrow_key_hold_start = 0;
     int mouse_click_state = 0;  /* 0=none, 1=pressed, 2=held, 3=released */
-    const int SCREENSHOT_FRAME = 30;  /* Take screenshot after N frames */
-    const int SCREENSHOT_FRAME2 = 100;  /* Take another screenshot later */
-    const int SCREENSHOT_FRAME3 = 300;  /* Take a third screenshot for slow-loading games */
+    int time_screenshot_taken = 0;
     const int ENTER_FRAME = 20;  /* Simulate ENTER keypress after N frames (delayed for game init) */
     const int CLICK_FRAME = 40;  /* Simulate mouse click after N frames */
     const int CLICK_HOLD_FRAMES = 10;  /* Hold mouse for N frames */
@@ -664,34 +673,19 @@ int main(int argc, char** argv) {
                               255, 255, 255, 255, 12, TEXT_ALIGN_LEFT, TEXT_BASELINE_TOP, "monospace");
         }
         
-        /* Auto-screenshot for testing - verify rendering is working */
-        /* Take screenshot AFTER present to capture rendered content */
-        if (frame_count >= SCREENSHOT_FRAME && screenshot_taken == 0) {
-            char screenshot_path[512];
-            snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_frame_%d.bmp", frame_count);
-            /* Take screenshot before present to capture offscreen content */
-            if (renderer.screenshot(screenshot_path) == 0) {
-                fprintf(stderr, "[screenshot] Saved %s (after present)\n", screenshot_path);
-            } else {
-                fprintf(stderr, "[screenshot] Failed to save %s\n", screenshot_path);
+        /* Time-based screenshot via -s flag */
+        if (g_screenshot_delay > 0 && !time_screenshot_taken) {
+            double elapsed_ms = renderer.get_time_ms();
+            if (elapsed_ms >= (double)g_screenshot_delay * 1000.0) {
+                char screenshot_path[512];
+                snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_%ds.bmp", g_screenshot_delay);
+                if (renderer.screenshot(screenshot_path) == 0) {
+                    fprintf(stderr, "[screenshot] Saved %s (after %d seconds)\n", screenshot_path, g_screenshot_delay);
+                } else {
+                    fprintf(stderr, "[screenshot] Failed to save %s\n", screenshot_path);
+                }
+                time_screenshot_taken = 1;
             }
-            screenshot_taken = 1;
-        }
-        if (frame_count >= SCREENSHOT_FRAME2 && screenshot_taken == 1) {
-            char screenshot_path[512];
-            snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_frame_%d.bmp", frame_count);
-            if (renderer.screenshot(screenshot_path) == 0) {
-                fprintf(stderr, "[screenshot] Saved %s (frame %d)\n", screenshot_path, frame_count);
-            }
-            screenshot_taken = 2;
-        }
-        if (frame_count >= SCREENSHOT_FRAME3 && screenshot_taken == 2) {
-            char screenshot_path[512];
-            snprintf(screenshot_path, sizeof(screenshot_path), "screenshot_frame_%d.bmp", frame_count);
-            if (renderer.screenshot(screenshot_path) == 0) {
-                fprintf(stderr, "[screenshot] Saved %s (late, frame %d)\n", screenshot_path, frame_count);
-            }
-            screenshot_taken = 3;
         }
 
         renderer.present();
