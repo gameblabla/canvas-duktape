@@ -20,8 +20,6 @@ static SDL_Renderer* g_sdl_renderer     = NULL;
 static SDL_Texture*  g_offscreen        = NULL;
 static int           g_win_w            = 120;
 static int           g_win_h            = 160;
-static int           g_offscreen_w      = 120;  /* Actual offscreen texture width */
-static int           g_offscreen_h      = 160;  /* Actual offscreen texture height */
 
 /* Resource directory for loading fonts and other assets */
 static char g_resource_dir[1024] = {0};
@@ -366,7 +364,7 @@ static int r_init(int w, int h, const char* title) {
 
     g_window = SDL_CreateWindow(title,
                                 SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                                w, h, SDL_WINDOW_RESIZABLE);
+                                w, h, 0);
     if (!g_window) {
         fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
         TTF_Quit(); IMG_Quit(); SDL_Quit(); return 0;
@@ -379,6 +377,7 @@ static int r_init(int w, int h, const char* title) {
         SDL_DestroyWindow(g_window);
         TTF_Quit(); IMG_Quit(); SDL_Quit(); return 0;
     }
+    SDL_RenderSetLogicalSize(g_sdl_renderer, w, h);
 
     g_offscreen = SDL_CreateTexture(g_sdl_renderer,
                                     SDL_PIXELFORMAT_RGBA8888,
@@ -389,8 +388,6 @@ static int r_init(int w, int h, const char* title) {
         SDL_DestroyWindow(g_window);
         TTF_Quit(); IMG_Quit(); SDL_Quit(); return 0;
     }
-    g_offscreen_w = w;
-    g_offscreen_h = h;
     SDL_SetTextureBlendMode(g_offscreen, get_premult_blend_mode());
     SDL_SetRenderTarget(g_sdl_renderer, g_offscreen);
     SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
@@ -411,51 +408,6 @@ static void r_quit(void) {
     TTF_Quit();
     IMG_Quit();
     SDL_Quit();
-}
-
-/* Resize the window and offscreen texture - called when main canvas size changes */
-static int r_resize_window(int w, int h) {
-    if (!g_window || !g_sdl_renderer) return 0;
-
-    fprintf(stderr, "[renderer] Resizing window from %dx%d to %dx%d\n", g_win_w, g_win_h, w, h);
-
-    /* Resize window */
-    SDL_SetWindowSize(g_window, w, h);
-
-    /* Recreate offscreen texture at new size */
-    if (g_offscreen) {
-        SDL_DestroyTexture(g_offscreen);
-    }
-
-    g_offscreen = SDL_CreateTexture(g_sdl_renderer,
-                                    SDL_PIXELFORMAT_RGBA8888,
-                                    SDL_TEXTUREACCESS_TARGET, w, h);
-    if (!g_offscreen) {
-        fprintf(stderr, "[renderer] Failed to recreate offscreen texture at %dx%d\n", w, h);
-        return 0;
-    }
-
-    g_offscreen_w = w;
-    g_offscreen_h = h;
-    SDL_SetTextureBlendMode(g_offscreen, get_premult_blend_mode());
-    g_win_w = w;
-    g_win_h = h;
-
-    fprintf(stderr, "[renderer] Window resized successfully to %dx%d\n", w, h);
-    return 1;
-}
-
-/* Handle window resize event from user dragging window edge */
-static int r_handle_window_resize(int new_w, int new_h) {
-    if (!g_window || !g_sdl_renderer) return 0;
-
-    fprintf(stderr, "[renderer] User resized window to %dx%d\n", new_w, new_h);
-
-    /* Store new window size for scaling during present */
-    g_win_w = new_w;
-    g_win_h = new_h;
-    
-    return 1;
 }
 
 static void* r_create_texture(int w, int h) {
@@ -1221,11 +1173,8 @@ static char* r_to_data_url(void* target, int w, int h) {
 static void r_present(void) {
     SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 255);
     SDL_RenderClear(g_sdl_renderer);
-    if (g_offscreen) {
-        /* Scale offscreen texture to window size */
-        SDL_Rect dst_rect = { 0, 0, g_win_w, g_win_h };
-        SDL_RenderCopy(g_sdl_renderer, g_offscreen, NULL, &dst_rect);
-    }
+    if (g_offscreen)
+        SDL_RenderCopy(g_sdl_renderer, g_offscreen, NULL, NULL);
     SDL_RenderPresent(g_sdl_renderer);
 }
 
@@ -1239,22 +1188,21 @@ static void   r_sleep_ms(int ms)  { SDL_Delay(ms); }
 /* Screenshot - save current frame to BMP file */
 static int r_screenshot(const char* filename) {
     if (!g_sdl_renderer) return -1;
-
+    
     /* Read pixels from the offscreen texture (where content is drawn) */
     SDL_Texture* target = g_offscreen ? g_offscreen : NULL;
     if (!target) return -1;
-
+    
     SDL_SetRenderTarget(g_sdl_renderer, target);
     SDL_RenderFlush(g_sdl_renderer);
-
-    /* Create surface at offscreen texture's actual resolution */
-    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(0, g_offscreen_w, g_offscreen_h, 24,
+    
+    SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(0, g_win_w, g_win_h, 24,
                                                       SDL_PIXELFORMAT_RGB24);
     if (!sf) {
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
         return -1;
     }
-
+    
     if (SDL_RenderReadPixels(g_sdl_renderer, NULL,
                              SDL_PIXELFORMAT_RGB24,
                              sf->pixels, sf->pitch) != 0) {
@@ -1262,14 +1210,14 @@ static int r_screenshot(const char* filename) {
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
         return -1;
     }
-
+    
     /* Save to BMP */
     int result = SDL_SaveBMP(sf, filename);
     SDL_FreeSurface(sf);
-
+    
     /* Reset render target */
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
-
+    
     return result;
 }
 
@@ -1277,14 +1225,12 @@ static int r_screenshot(const char* filename) {
  * Interface initializer
  * ============================================================================ */
 void renderer_sdl2_init_iface(RendererInterface* iface) {
-    iface->init                 = r_init;
-    iface->quit                 = r_quit;
-    iface->resize_window        = r_resize_window;
-    iface->handle_window_resize = r_handle_window_resize;
-    iface->create_texture       = r_create_texture;
-    iface->destroy_texture      = r_destroy_texture;
-    iface->get_main_texture     = r_get_main_texture;
-    iface->load_image_file      = r_load_image_file;
+    iface->init             = r_init;
+    iface->quit             = r_quit;
+    iface->create_texture   = r_create_texture;
+    iface->destroy_texture  = r_destroy_texture;
+    iface->get_main_texture = r_get_main_texture;
+    iface->load_image_file  = r_load_image_file;
     iface->load_image_mem   = r_load_image_mem;
     iface->destroy_image    = r_destroy_image;
     iface->get_image_size   = r_get_image_size;

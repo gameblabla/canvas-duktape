@@ -353,13 +353,10 @@ static int g_disable_webaudio = 0;
 /* Global flag to enable broken/incomplete WebGL support (for testing) */
 static int g_broken_webgl = 0;
 
-/* Global flag to enable FPS counter display */
-static int g_show_fps = 0;
-
 int main(int argc, char** argv) {
     /* Parse command-line arguments */
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] [--fps] <file.html>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] <file.html>\n", argv[0]);
         return 1;
     }
 
@@ -371,16 +368,13 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--broken-webgl") == 0) {
             g_broken_webgl = 1;
             fprintf(stderr, "[main] Broken WebGL support enabled via command line\n");
-        } else if (strcmp(argv[i], "--fps") == 0) {
-            g_show_fps = 1;
-            fprintf(stderr, "[main] FPS counter enabled\n");
         } else {
             html_path = argv[i];
         }
     }
 
     if (!html_path) {
-        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] [--fps] <file.html>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--no-webaudio] [--broken-webgl] <file.html>\n", argv[0]);
         return 1;
     }
 
@@ -504,22 +498,11 @@ int main(int argc, char** argv) {
     const int ARROW_KEY_FRAME = 60;  /* Simulate arrow keys for GameMaker games (after init) */
     const int ARROW_KEY_HOLD_FRAMES = 3;  /* Hold each arrow key for N frames */
 
-    /* FPS counter variables */
-    int fps_frame_count = 0;
-    double fps_last_time = renderer.get_time_ms();
-    int fps = 0;
-
     while (running) {
         InputEvent ev;
         while (input.poll(&ev)) {
             if (ev.type == INPUT_EVENT_QUIT) {
                 running = 0;
-            } else if (ev.type == INPUT_EVENT_WINDOW_RESIZE) {
-                /* Handle user resizing the window - just update logical size for scaling */
-                if (renderer.handle_window_resize) {
-                    renderer.handle_window_resize(ev.x, ev.y);
-                }
-                /* Don't update canvas size - let game render at its native resolution */
             } else if (ev.type == INPUT_EVENT_KEYDOWN) {
                 jscore.dispatch_key(ev.keycode, 1);
             } else if (ev.type == INPUT_EVENT_KEYUP) {
@@ -532,7 +515,6 @@ int main(int argc, char** argv) {
         }
 
         frame_count++;
-        fps_frame_count++;
 
         /* Simulate ENTER keypress to start tests/games that require user input */
         if (frame_count >= ENTER_FRAME && !enter_pressed) {
@@ -541,7 +523,7 @@ int main(int argc, char** argv) {
             enter_pressed = 1;
             fprintf(stderr, "[main] Simulated ENTER keypress\n");
         }
-
+        
         /* Simulate mouse click for games that require click to start */
         if (frame_count >= CLICK_FRAME && !mouse_clicked) {
             jscore.dispatch_mouse(INPUT_EVENT_MOUSEDOWN, 100, 100, 0);
@@ -594,25 +576,6 @@ int main(int argc, char** argv) {
         jscore.check_timers();
         renderer.present();
 
-        /* Calculate FPS every second */
-        double current_time = renderer.get_time_ms();
-        if (current_time - fps_last_time >= 1000.0) {
-            fps = fps_frame_count;
-            fps_frame_count = 0;
-            fps_last_time = current_time;
-        }
-
-        /* Render FPS counter if enabled */
-        if (g_show_fps && renderer.fill_text) {
-            char fps_text[32];
-            snprintf(fps_text, sizeof(fps_text), "FPS: %d", fps);
-            /* Draw FPS in top-left corner with white text, black outline */
-            renderer.fill_text(renderer.get_main_texture(), fps_text, 2, 14,
-                              0, 0, 0, 255, 12, "left", "top", "monospace");
-            renderer.fill_text(renderer.get_main_texture(), fps_text, 1, 13,
-                              255, 255, 255, 255, 12, "left", "top", "monospace");
-        }
-        
         /* Auto-screenshot for testing - verify rendering is working */
         /* Take screenshot AFTER present to capture rendered content */
         if (frame_count >= SCREENSHOT_FRAME && screenshot_taken == 0) {

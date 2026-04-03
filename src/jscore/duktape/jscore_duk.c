@@ -2632,11 +2632,6 @@ static void jsi_dispatch_key(int keycode, int is_down) {
 /* ============================================================================
  * Module entry point
  * ============================================================================ */
-
-/* Stub implementations for compatibility */
-static void jscore_duk_set_broken_webgl(int enable) { (void)enable; }
-static void jscore_duk_update_canvas_size(int width, int height) { (void)width; (void)height; }
-
 void jscore_duk_init_iface(JSCoreInterface* iface) {
     iface->init                      = jsi_init;
     iface->quit                      = jsi_quit;
@@ -2648,7 +2643,4 @@ void jscore_duk_init_iface(JSCoreInterface* iface) {
     iface->call_window_load_listeners= jsi_call_window_load_listeners;
     iface->check_timers              = jsi_check_timers;
     iface->dispatch_key              = jsi_dispatch_key;
-    iface->dispatch_mouse            = jsi_dispatch_mouse;
-    iface->set_broken_webgl          = jscore_duk_set_broken_webgl;
-    iface->update_canvas_size        = jscore_duk_update_canvas_size;
 }

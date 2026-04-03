@@ -55,12 +55,6 @@ static int i_poll(InputEvent* out) {
             out->keycode = 0;
             return 1;
         }
-        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_RESIZED) {
-            out->type = INPUT_EVENT_WINDOW_RESIZE;
-            out->x = e.window.data1;
-            out->y = e.window.data2;
-            return 1;
-        }
         if (e.type == SDL_KEYDOWN) {
             int kc = sdl_key_to_browser_keycode(e.key.keysym.sym);
             if (kc) {

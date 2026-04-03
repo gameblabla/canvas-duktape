@@ -1523,11 +1523,6 @@ static JSValue js_image_set_src(JSContext *ctx, JSValueConst this_val, JSValueCo
                     src_clean[sizeof(src_clean) - 1] = '\0';
                     char *qs = strchr(src_clean, '?');
                     if (qs) *qs = '\0';
-                    /* Trim trailing whitespace (some game JSON has spaces in src paths) */
-                    { size_t slen = strlen(src_clean);
-                      while (slen > 0 && (src_clean[slen-1] == ' ' || src_clean[slen-1] == '\t' ||
-                                          src_clean[slen-1] == '\r' || src_clean[slen-1] == '\n'))
-                          src_clean[--slen] = '\0'; }
                     /* Resolve path relative to HTML file directory */
                     char full_path[1024];
                     if (src_clean[0] == '/' || g_jscore_base_dir[0] == '\0') {
@@ -4082,7 +4077,6 @@ static JSValue js_canvas_set_width(JSContext *ctx, JSValueConst this_val,
                 }
             } else {
                 g_canvases[i].width = new_width;
-                /* Clear the resized canvas */
                 if (g_renderer && g_renderer->clear_rect) {
                     g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
@@ -4128,7 +4122,6 @@ static JSValue js_canvas_set_height(JSContext *ctx, JSValueConst this_val,
                 }
             } else {
                 g_canvases[i].height = new_height;
-                /* Clear the resized canvas */
                 if (g_renderer && g_renderer->clear_rect) {
                     g_renderer->clear_rect(g_renderer->get_main_texture(), 0, 0, g_canvases[i].width, g_canvases[i].height);
                 }
@@ -5212,18 +5205,18 @@ static JSValue js_setInterval(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_setTimeout(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
-    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
+    if (argc < 2 || !JS_IsFunction(ctx, argv[0])) {
         return JS_NewInt32(ctx, 0);
     }
-
+    
     int slot = find_free_timer_slot();
     if (slot < 0) {
         return JS_NewInt32(ctx, 0);
     }
-
-    int ms = 0;
+    
+    int ms = 16;
     if (argc >= 2) JS_ToInt32(ctx, &ms, argv[1]);
-    if (ms < 0) ms = 0;
+    if (ms < 1) ms = 16;
     
     int id = g_timer_next_id++;
     g_timers[slot].id = id;
@@ -7929,25 +7922,11 @@ void jscore_qjs_register_element(const char *id, const char *innerHTML) {
     g_element_registry_count++;
 }
 
-static void xhr_log_exception(JSContext *ctx, const char *where) {
-    JSValue exc = JS_GetException(ctx);
-    const char *msg = JS_ToCString(ctx, exc);
-    JSValue stack = JS_GetPropertyStr(ctx, exc, "stack");
-    const char *stk = JS_IsUndefined(stack) ? NULL : JS_ToCString(ctx, stack);
-    fprintf(stderr, "[xhr] exception in %s: %s%s%s\n", where,
-            msg ? msg : "?",
-            stk ? "\n  " : "", stk ? stk : "");
-    if (msg) JS_FreeCString(ctx, msg);
-    if (stk) JS_FreeCString(ctx, stk);
-    JS_FreeValue(ctx, stack);
-    JS_FreeValue(ctx, exc);
-}
-
 static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int success) {
     JSValue cb = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
     if (JS_IsFunction(ctx, cb)) {
         JSValue ret = JS_Call(ctx, cb, this_val, 0, NULL);
-        if (JS_IsException(ret)) xhr_log_exception(ctx, "onreadystatechange");
+        if (JS_IsException(ret)) JS_GetException(ctx);
         JS_FreeValue(ctx, ret);
     }
     JS_FreeValue(ctx, cb);
@@ -7963,7 +7942,7 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
              * (window), which has a removeEventListener no-op stub. Passing xhr would
              * cause TypeError since XHR objects don't carry removeEventListener. */
             JSValue ret = JS_Call(ctx, cb, JS_UNDEFINED, 1, &ev);
-            if (JS_IsException(ret)) xhr_log_exception(ctx, "onload");
+            if (JS_IsException(ret)) JS_GetException(ctx);
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, ev);
         }
@@ -7976,7 +7955,7 @@ static void xhr_fire_callbacks(JSContext *ctx, JSValueConst this_val, int succes
             JS_SetPropertyStr(ctx, ev, "target", JS_DupValue(ctx, this_val));
             JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, "error"));
             JSValue ret = JS_Call(ctx, cb, this_val, 1, &ev);
-            if (JS_IsException(ret)) xhr_log_exception(ctx, "onerror");
+            if (JS_IsException(ret)) JS_GetException(ctx);
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, ev);
         }
@@ -8026,35 +8005,6 @@ static JSValue xhr_deferred_success_cb(JSContext *ctx, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv; (void)magic;
     xhr_fire_callbacks(ctx, data[0], 1);
     return JS_UNDEFINED;
-}
-
-/* Deferred wrapper: fires xhr_fire_callbacks(ctx, data[0], 0) asynchronously.
- * Used so that async XHR error callbacks (onerror) fire on the next tick,
- * matching browser behaviour where onerror is always asynchronous. */
-static JSValue xhr_deferred_error_cb(JSContext *ctx, JSValueConst this_val,
-                                      int argc, JSValueConst *argv,
-                                      int magic, JSValue *data) {
-    (void)this_val; (void)argc; (void)argv; (void)magic;
-    xhr_fire_callbacks(ctx, data[0], 0);
-    return JS_UNDEFINED;
-}
-
-/* Fire or defer the error path depending on whether the XHR is async.
- * Async XHR: onerror must fire on the next tick (browser spec).
- * Sync XHR: fire immediately. */
-static void xhr_fire_or_defer_error(JSContext *ctx, JSValueConst xhr) {
-    JSValue async_v = JS_GetPropertyStr(ctx, xhr, "_async");
-    int is_async = JS_ToBool(ctx, async_v);
-    JS_FreeValue(ctx, async_v);
-    if (is_async) {
-        JSValue xhr_ref = JS_DupValue(ctx, xhr);
-        JSValue cb = JS_NewCFunctionData(ctx, xhr_deferred_error_cb, 0, 0, 1, &xhr_ref);
-        JS_FreeValue(ctx, xhr_ref);
-        schedule_deferred_call(ctx, cb);
-        JS_FreeValue(ctx, cb);
-    } else {
-        xhr_fire_callbacks(ctx, xhr, 0);
-    }
 }
 
 /* Shared completion helper: sets readyState/status, responseText, responseXML,
@@ -8166,7 +8116,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
             JS_FreeCString(ctx, url);
             JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
             JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 400));
-            xhr_fire_or_defer_error(ctx, this_val);
+            xhr_fire_callbacks(ctx, this_val, 0);
             return JS_UNDEFINED;
         }
         /* Parse header for MIME and base64 flag */
@@ -8237,10 +8187,10 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
             JS_FreeCString(ctx, url);
             JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
             JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 404));
-            xhr_fire_or_defer_error(ctx, this_val);
+            xhr_fire_callbacks(ctx, this_val, 0);
             return JS_UNDEFINED;
         }
-
+        
         /* Return blob data */
         xhr_complete_success(ctx, this_val, (const char *)blob->data, blob->size,
                              0, 0, blob->type ? blob->type : "application/octet-stream");
@@ -8254,7 +8204,7 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
         JS_FreeCString(ctx, url);
         JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
         JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 0));
-        xhr_fire_or_defer_error(ctx, this_val);
+        xhr_fire_callbacks(ctx, this_val, 0);
         return JS_UNDEFINED;
     }
 
@@ -8282,11 +8232,10 @@ static JSValue js_xhr_send(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     if (!fp) {
         fprintf(stderr, "[xhr] file not found: %s (tried from base_dir=%s)\n", url, g_jscore_base_dir);
         JS_FreeCString(ctx, url);
-        /* Browsers treat HTTP 404 as a successful XHR completion (onload fires, not onerror).
-         * We match that: complete with empty body, then override status to 404. */
-        xhr_complete_success(ctx, this_val, "", 0, is_arraybuffer, is_blob, NULL);
+        JS_SetPropertyStr(ctx, this_val, "_readyState", JS_NewInt32(ctx, 4));
         JS_SetPropertyStr(ctx, this_val, "status",     JS_NewInt32(ctx, 404));
         JS_SetPropertyStr(ctx, this_val, "statusText", JS_NewString(ctx, "Not Found"));
+        xhr_fire_callbacks(ctx, this_val, 0);
         return JS_UNDEFINED;
     }
 
@@ -8737,20 +8686,8 @@ static JSValue js_audiocontext_createBufferSource(JSContext *ctx, JSValueConst t
     (void)this_val; (void)argc;
     JSValue source = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, source, "buffer", JS_NULL);
-    /* playbackRate is an AudioParam (object with .value), not a plain number */
-    JSValue pb_param = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, pb_param, "value", JS_NewFloat64(ctx, 1.0));
-    JS_SetPropertyStr(ctx, pb_param, "defaultValue", JS_NewFloat64(ctx, 1.0));
-    JS_SetPropertyStr(ctx, pb_param, "setValueAtTime",
-        JS_NewCFunction(ctx, js_audiocontext_audioparam_setValueAtTime, "setValueAtTime", 2));
-    JS_SetPropertyStr(ctx, source, "playbackRate", pb_param);
-    /* detune is also an AudioParam */
-    JSValue dt_param = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, dt_param, "value", JS_NewFloat64(ctx, 0.0));
-    JS_SetPropertyStr(ctx, source, "detune", dt_param);
+    JS_SetPropertyStr(ctx, source, "playbackRate", JS_NewFloat64(ctx, 1.0));
     JS_SetPropertyStr(ctx, source, "loop", JS_NewBool(ctx, 0));
-    JS_SetPropertyStr(ctx, source, "loopStart", JS_NewFloat64(ctx, 0.0));
-    JS_SetPropertyStr(ctx, source, "loopEnd", JS_NewFloat64(ctx, 0.0));
     JS_SetPropertyStr(ctx, source, "connect", JS_NewCFunction(ctx, js_audiocontext_node_connect, "connect", 1));
     JS_SetPropertyStr(ctx, source, "disconnect", JS_NewCFunction(ctx, js_audiocontext_node_disconnect, "disconnect", 0));
     JS_SetPropertyStr(ctx, source, "start", JS_NewCFunction(ctx, js_audiocontext_source_start, "start", 1));
@@ -10088,39 +10025,16 @@ static void jscore_qjs_dispatch_key(int keycode, int is_down) {
     JSValue target = JS_NewObject(g_ctx);
     JS_SetPropertyStr(g_ctx, target, "tagName", JS_NewString(g_ctx, "BODY"));
 
-    /* Map keycode to key string for GameMaker */
-    const char *key_str = "";
-    if (keycode >= 65 && keycode <= 90) {
-        /* A-Z */
-        static char key_buf[2];
-        key_buf[0] = is_down ? (char)keycode : 0;
-        key_buf[1] = '\0';
-        key_str = key_buf;
-    } else if (keycode >= 48 && keycode <= 57) {
-        /* 0-9 */
-        static char key_buf[2];
-        key_buf[0] = is_down ? (char)keycode : 0;
-        key_buf[1] = '\0';
-        key_str = key_buf;
-    } else if (keycode == 37) key_str = "ArrowLeft";
-    else if (keycode == 38) key_str = "ArrowUp";
-    else if (keycode == 39) key_str = "ArrowRight";
-    else if (keycode == 40) key_str = "ArrowDown";
-    else if (keycode == 13) key_str = "Enter";
-    else if (keycode == 8) key_str = "Backspace";
-    else if (keycode == 32) key_str = " ";
-
-    /* Build event object matching what GameMaker yyKeyDownCallback expects */
+    /* Build event object matching what ig.Input.keydown/keyup expects */
     JSValue event = JS_NewObject(g_ctx);
     JS_SetPropertyStr(g_ctx, event, "type",             JS_NewString(g_ctx, evtype));
     JS_SetPropertyStr(g_ctx, event, "keyCode",          JS_NewInt32(g_ctx, keycode));
     JS_SetPropertyStr(g_ctx, event, "which",            JS_NewInt32(g_ctx, keycode));
-    JS_SetPropertyStr(g_ctx, event, "charCode",         JS_NewInt32(g_ctx, 0));
+    JS_SetPropertyStr(g_ctx, event, "charCode",         JS_NewInt32(g_ctx, keycode));
     JS_SetPropertyStr(g_ctx, event, "shiftKey",         JS_NewBool(g_ctx, 0));
     JS_SetPropertyStr(g_ctx, event, "ctrlKey",          JS_NewBool(g_ctx, 0));
     JS_SetPropertyStr(g_ctx, event, "altKey",           JS_NewBool(g_ctx, 0));
     JS_SetPropertyStr(g_ctx, event, "repeat",           JS_NewBool(g_ctx, 0));
-    JS_SetPropertyStr(g_ctx, event, "key",              JS_NewString(g_ctx, key_str));
     JS_SetPropertyStr(g_ctx, event, "target",           target);
     JS_SetPropertyStr(g_ctx, event, "preventDefault",   JS_NewCFunction(g_ctx, js_noop, "preventDefault", 0));
     JS_SetPropertyStr(g_ctx, event, "stopPropagation",  JS_NewCFunction(g_ctx, js_noop, "stopPropagation", 0));
