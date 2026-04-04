@@ -670,9 +670,9 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     } else if (blend_add == 11) { /* destination-atop: Src*(1-DstA) + Dst*SrcA */
         bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
-    } else if (blend_add == 12) { /* screen: Src + Dst*(1-SrcA) */
+    } else if (blend_add == 12) { /* screen: Src + Dst*(1-SrcColor) */
         bm = SDL_ComposeCustomBlendMode(
-            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_COLOR, SDL_BLENDOPERATION_ADD,
             SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 15) { /* clear: zero out all channels */
         bm = SDL_ComposeCustomBlendMode(

@@ -1006,9 +1006,9 @@ static int color_from_js_checked(JSValue v, double *out) {
             if (sscanf(str, "rgba(%d,%d,%d,%f)", &r2, &g3, &b2, &a2) == 4 ||
                 sscanf(str, "rgba( %d , %d , %d , %f )", &r2, &g3, &b2, &a2) == 4) {
                 tmp[0]=r2/255.0; tmp[1]=g3/255.0; tmp[2]=b2/255.0;
-                /* CSS rgba alpha is 0.0-1.0; values >1 are clamped to 1.0 (browser behavior).
+                /* CSS rgba alpha is 0.0-1.0; values >1 clamped to 1.0, <0 clamped to 0.0 (browser behavior).
                  * GameMaker's _BP emits 0-255 integers, so e.g. rgba(r,g,b,255) = fully opaque. */
-                tmp[3] = (a2 > 1.0f) ? 1.0 : (double)a2;
+                tmp[3] = (a2 > 1.0f) ? 1.0 : (a2 < 0.0f) ? 0.0 : (double)a2;
             } else valid = 0;
         } else if (strncmp(str, "rgb(", 4) == 0) {
             int r2, g3, b2;
@@ -1118,8 +1118,8 @@ static void color_from_js(JSValue v, double *out) {
                     out[0] = r / 255.0;
                     out[1] = g / 255.0;
                     out[2] = b / 255.0;
-                    /* CSS rgba alpha >1 is clamped to 1.0 (browser behavior) */
-                    out[3] = (a > 1.0f) ? 1.0 : (double)a;
+                    /* CSS rgba alpha clamped to [0.0, 1.0] (browser behavior) */
+                    out[3] = (a > 1.0f) ? 1.0 : (a < 0.0f) ? 0.0 : (double)a;
                 } else {
                     out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1;
                 }
@@ -3324,21 +3324,116 @@ static JSValue js_ctx2d_strokeRect(JSContext *ctx, JSValueConst this_val,
     if (argc >= 3) JS_ToFloat64(ctx, &w, argv[2]);
     if (argc >= 4) JS_ToFloat64(ctx, &h, argv[3]);
 
-    /* Zero width or height means no stroke */
-    if (w == 0 || h == 0) return JS_UNDEFINED;
+    /* Nonfinite args: no-op per spec */
+    if (isnan(x) || isinf(x) || isnan(y) || isinf(y) ||
+        isnan(w) || isinf(w) || isnan(h) || isinf(h)) {
+        return JS_UNDEFINED;
+    }
+
+    /* Both dimensions zero: no stroke */
+    if (w == 0 && h == 0) return JS_UNDEFINED;
 
     if (!g_renderer) return JS_UNDEFINED;
 
     uint8_t r = color_to_byte(g_ctx2d.stroke_color[0]);
-    uint8_t g = color_to_byte(g_ctx2d.stroke_color[1]);
+    uint8_t gv = color_to_byte(g_ctx2d.stroke_color[1]);
     uint8_t b = color_to_byte(g_ctx2d.stroke_color[2]);
-    uint8_t a = color_to_byte(g_ctx2d.stroke_color[3]);
+    uint8_t a = (uint8_t)(color_to_byte(g_ctx2d.stroke_color[3]) * g_ctx2d.global_alpha);
 
     void *target = get_current_canvas_texture(ctx, this_val);
     if (!target) return JS_UNDEFINED;
 
-    if (g_renderer->stroke_rect) {
-        g_renderer->stroke_rect(target, x, y, w, h, r, g, b, a, g_ctx2d.line_width, g_ctx2d.global_composite);
+    /* Apply current transform to coordinates */
+    double m[6];
+    memcpy(m, g_ctx2d.transform, sizeof(m));
+    double x1 = m[0]*x       + m[2]*y       + m[4];
+    double y1 = m[1]*x       + m[3]*y       + m[5];
+    double x2 = m[0]*(x+w)   + m[2]*y       + m[4];
+    double y2 = m[1]*(x+w)   + m[3]*y       + m[5];
+    double x3 = m[0]*(x+w)   + m[2]*(y+h)   + m[4];
+    double y3 = m[1]*(x+w)   + m[3]*(y+h)   + m[5];
+    double x4 = m[0]*x       + m[2]*(y+h)   + m[4];
+    double y4 = m[1]*x       + m[3]*(y+h)   + m[5];
+    double tx  = fmin(fmin(x1,x2), fmin(x3,x4));
+    double ty  = fmin(fmin(y1,y2), fmin(y3,y4));
+    double tx2 = fmax(fmax(x1,x2), fmax(x3,x4));
+    double ty2 = fmax(fmax(y1,y2), fmax(y3,y4));
+    double tw  = tx2 - tx;
+    double th  = ty2 - ty;
+
+    /* Scale lineWidth by the transform scale */
+    double scale = sqrt(m[0]*m[0] + m[1]*m[1]);
+    if (scale < 1e-9) scale = 1.0;
+    int lw = (int)(g_ctx2d.line_width * scale + 0.5);
+    if (lw < 1) lw = 1;
+
+    int composite = g_ctx2d.global_composite;
+    int has_shadow = (g_ctx2d.shadow_color[3] > 0 &&
+                      (g_ctx2d.shadow_offset_x != 0 || g_ctx2d.shadow_offset_y != 0 ||
+                       g_ctx2d.shadow_blur > 0));
+
+    if (h == 0) {
+        /* Degenerate horizontal line: fill rect + optional round joins */
+        if (has_shadow && g_renderer->fill_rect) {
+            uint8_t sr = color_to_byte(g_ctx2d.shadow_color[0]);
+            uint8_t sg = color_to_byte(g_ctx2d.shadow_color[1]);
+            uint8_t sb = color_to_byte(g_ctx2d.shadow_color[2]);
+            uint8_t sa = color_to_byte(g_ctx2d.shadow_color[3]);
+            double sox = tx + g_ctx2d.shadow_offset_x;
+            double soy = ty + g_ctx2d.shadow_offset_y;
+            g_renderer->fill_rect(target, (int)sox, (int)(soy - lw/2.0), (int)tw, lw,
+                                  sr, sg, sb, sa, composite, NULL);
+            if (strcmp(g_ctx2d.line_join, "round") == 0 && g_renderer->fill_circle) {
+                g_renderer->fill_circle(target, sox,      soy, lw/2, sr, sg, sb, sa, 0);
+                g_renderer->fill_circle(target, sox + tw, soy, lw/2, sr, sg, sb, sa, 0);
+            }
+        }
+        if (g_renderer->fill_rect) {
+            g_renderer->fill_rect(target, (int)tx, (int)(ty - lw/2.0), (int)tw, lw,
+                                  r, gv, b, a, composite, NULL);
+        }
+        if (strcmp(g_ctx2d.line_join, "round") == 0 && g_renderer->fill_circle) {
+            g_renderer->fill_circle(target, tx,      ty, lw/2, r, gv, b, a, 0);
+            g_renderer->fill_circle(target, tx + tw, ty, lw/2, r, gv, b, a, 0);
+        }
+    } else if (w == 0) {
+        /* Degenerate vertical line: fill rect + optional round joins */
+        if (has_shadow && g_renderer->fill_rect) {
+            uint8_t sr = color_to_byte(g_ctx2d.shadow_color[0]);
+            uint8_t sg = color_to_byte(g_ctx2d.shadow_color[1]);
+            uint8_t sb = color_to_byte(g_ctx2d.shadow_color[2]);
+            uint8_t sa = color_to_byte(g_ctx2d.shadow_color[3]);
+            double sox = tx + g_ctx2d.shadow_offset_x;
+            double soy = ty + g_ctx2d.shadow_offset_y;
+            g_renderer->fill_rect(target, (int)(sox - lw/2.0), (int)soy, lw, (int)th,
+                                  sr, sg, sb, sa, composite, NULL);
+            if (strcmp(g_ctx2d.line_join, "round") == 0 && g_renderer->fill_circle) {
+                g_renderer->fill_circle(target, sox, soy,      lw/2, sr, sg, sb, sa, 0);
+                g_renderer->fill_circle(target, sox, soy + th, lw/2, sr, sg, sb, sa, 0);
+            }
+        }
+        if (g_renderer->fill_rect) {
+            g_renderer->fill_rect(target, (int)(tx - lw/2.0), (int)ty, lw, (int)th,
+                                  r, gv, b, a, composite, NULL);
+        }
+        if (strcmp(g_ctx2d.line_join, "round") == 0 && g_renderer->fill_circle) {
+            g_renderer->fill_circle(target, tx, ty,      lw/2, r, gv, b, a, 0);
+            g_renderer->fill_circle(target, tx, ty + th, lw/2, r, gv, b, a, 0);
+        }
+    } else {
+        /* Normal rect stroke */
+        if (has_shadow && g_renderer->stroke_rect) {
+            uint8_t sr = color_to_byte(g_ctx2d.shadow_color[0]);
+            uint8_t sg = color_to_byte(g_ctx2d.shadow_color[1]);
+            uint8_t sb = color_to_byte(g_ctx2d.shadow_color[2]);
+            uint8_t sa = color_to_byte(g_ctx2d.shadow_color[3]);
+            g_renderer->stroke_rect(target,
+                tx + g_ctx2d.shadow_offset_x, ty + g_ctx2d.shadow_offset_y,
+                tw, th, sr, sg, sb, sa, lw, 0);
+        }
+        if (g_renderer->stroke_rect) {
+            g_renderer->stroke_rect(target, tx, ty, tw, th, r, gv, b, a, lw, composite);
+        }
     }
 
     return JS_UNDEFINED;
