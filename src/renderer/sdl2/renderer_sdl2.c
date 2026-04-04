@@ -620,7 +620,10 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     apply_clip_for_texture(tex);
     SDL_BlendMode bm;
     if (blend_add == 1) {
-        bm = SDL_BLENDMODE_ADD;
+        /* lighter: premultiplied Src + Dst for both RGB and A */
+        bm = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 2) {
         /* destination-over: new pixels go behind existing opaque pixels */
         bm = SDL_ComposeCustomBlendMode(
@@ -667,15 +670,29 @@ static void r_fill_rect(void* target, int x, int y, int w, int h,
     } else if (blend_add == 11) { /* destination-atop: Src*(1-DstA) + Dst*SrcA */
         bm = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                                         SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
-    } else if (blend_add == 12) { /* screen: Src + Dst*(1-SrcColor) */
+    } else if (blend_add == 12) { /* screen: Src + Dst*(1-SrcA) */
         bm = SDL_ComposeCustomBlendMode(
-            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_COLOR, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
             SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+    } else if (blend_add == 15) { /* clear: zero out all channels */
+        bm = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
     } else {
         bm = (a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     }
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, bm);
-    SDL_SetRenderDrawColor(g_sdl_renderer, r, g, b, a);
+    /* Premultiply source color for custom blend modes and ADD/NONE.
+     * SDL_BLENDMODE_BLEND and SDL_BLENDMODE_MOD already handle alpha correctly. */
+    uint8_t pr, pg, pb;
+    if (bm == SDL_BLENDMODE_BLEND || bm == SDL_BLENDMODE_MOD) {
+        pr = r; pg = g; pb = b;
+    } else {
+        pr = (uint8_t)((r * a + 127) / 255);
+        pg = (uint8_t)((g * a + 127) / 255);
+        pb = (uint8_t)((b * a + 127) / 255);
+    }
+    SDL_SetRenderDrawColor(g_sdl_renderer, pr, pg, pb, a);
 
     int is_identity = (!m || (m[0]==1 && m[1]==0 && m[2]==0 &&
                        m[3]==1 && m[4]==0 && m[5]==0));
@@ -764,8 +781,10 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
     if (SDL_SetRenderTarget(g_sdl_renderer, tex) != 0) return;
     /* Apply clip rect for this texture */
     apply_clip_for_texture(tex);
-    /* Set pattern alpha */
+    /* Scale all channels by globalAlpha: for premultiplied textures, both RGB
+     * and A must be scaled by the same factor so the blend is correct. */
     SDL_SetTextureAlphaMod(pat, alpha);
+    SDL_SetTextureColorMod(pat, alpha, alpha, alpha);
     /* Keep the pattern texture's natural blend mode (premultiplied for canvas
      * textures) so alpha is composited correctly. */
     /* Tile the pattern */
@@ -778,8 +797,9 @@ static void r_fill_rect_pattern(void* target, int x, int y, int w, int h,
             SDL_RenderCopy(g_sdl_renderer, pat, &src, &dst);
         }
     }
-    /* Reset pattern alpha */
+    /* Reset pattern alpha and color mod */
     SDL_SetTextureAlphaMod(pat, 255);
+    SDL_SetTextureColorMod(pat, 255, 255, 255);
     SDL_SetRenderTarget(g_sdl_renderer, NULL);
     SDL_RenderFlush(g_sdl_renderer);
 }
@@ -821,25 +841,107 @@ static void r_stroke_rect(void* target, double x, double y, double w, double h,
 static void r_draw_image(void* target, void* img,
                           int sx, int sy, int sw, int sh,
                           int dx, int dy, int dw, int dh,
-                          const double* m, uint8_t alpha) {
+                          const double* m, uint8_t alpha, int composite_mode) {
     SDL_Texture* dst = (SDL_Texture*)target;
     SDL_Texture* src = (SDL_Texture*)img;
     if (!dst || !src) return;
+
     SDL_Rect srcRect = {sx, sy, sw, sh};
     SDL_Rect dstRect;
     apply_transform_to_dst(dx, dy, dw, dh, m, &dstRect);
-    /* When globalAlpha < 1 (alpha_mod < 255), SDL's custom premultiplied
-     * blend mode incorrectly scales RGB channels by alpha_mod. Switch to
-     * SDL_BLENDMODE_BLEND which handles alpha_mod correctly in that case.
-     * When alpha == 255 keep the premultiplied blend mode so straight-stored
-     * semi-transparent source pixels composite with correct color. */
+
+    if (composite_mode == 15) {
+        SDL_SetRenderTarget(g_sdl_renderer, dst);
+        apply_clip_for_texture(dst);
+        SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderFillRect(g_sdl_renderer, &dstRect);
+        remove_clip_for_texture(dst);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderTarget(g_sdl_renderer, NULL);
+        SDL_RenderFlush(g_sdl_renderer);
+        return;
+    }
+
+    if (composite_mode == 3) {
+        SDL_SetRenderTarget(g_sdl_renderer, dst);
+        apply_clip_for_texture(dst);
+        SDL_SetRenderDrawColor(g_sdl_renderer, 0, 0, 0, 0);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderFillRect(g_sdl_renderer, &dstRect);
+        SDL_BlendMode saved_bm;
+        SDL_GetTextureBlendMode(src, &saved_bm);
+        SDL_SetTextureAlphaMod(src, alpha);
+        SDL_SetTextureBlendMode(src, SDL_BLENDMODE_NONE);
+        render_with_transform(src, &srcRect, &dstRect, m, alpha, dx, dy, dw, dh);
+        SDL_SetTextureAlphaMod(src, 255);
+        SDL_SetTextureBlendMode(src, saved_bm);
+        remove_clip_for_texture(dst);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderTarget(g_sdl_renderer, NULL);
+        SDL_RenderFlush(g_sdl_renderer);
+        return;
+    }
+
     SDL_BlendMode saved_bm;
     SDL_GetTextureBlendMode(src, &saved_bm);
-    if (alpha < 255)
-        SDL_SetTextureBlendMode(src, SDL_BLENDMODE_BLEND);
+
+    SDL_BlendMode bm;
+    switch (composite_mode) {
+        case 1:
+            /* lighter: premultiplied Src + Dst for both RGB and A */
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
+            break;
+        case 2:
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
+            break;
+        case 4:
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
+            break;
+        case 5:
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
+            break;
+        case 6:
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+            break;
+        case 7:
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+            break;
+        case 9:
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+            break;
+        case 10:
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+            break;
+        case 11:
+            bm = SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+            break;
+        default:
+            bm = get_premult_blend_mode();
+            break;
+    }
+
+    SDL_SetTextureBlendMode(src, bm);
     SDL_SetTextureAlphaMod(src, alpha);
     SDL_SetRenderTarget(g_sdl_renderer, dst);
-    /* Apply clip rect for the target texture */
     apply_clip_for_texture(dst);
     SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
     render_with_transform(src, &srcRect, &dstRect, m, alpha, dx, dy, dw, dh);
@@ -853,8 +955,8 @@ static void r_draw_image(void* target, void* img,
 static void r_draw_canvas(void* target, void* src_tex,
                            int sx, int sy, int sw, int sh,
                            int dx, int dy, int dw, int dh,
-                           const double* m, uint8_t alpha) {
-    r_draw_image(target, src_tex, sx, sy, sw, sh, dx, dy, dw, dh, m, alpha);
+                           const double* m, uint8_t alpha, int composite_mode) {
+    r_draw_image(target, src_tex, sx, sy, sw, sh, dx, dy, dw, dh, m, alpha, composite_mode);
 }
 
 static void r_fill_text(void* target, const char* text, double x, double y,
@@ -1112,7 +1214,10 @@ static void r_fill_polygon(void* target, const double* pts, int count,
     apply_clip_for_texture(tex);
     SDL_BlendMode bm;
     if (blend_add == 1) {
-        bm = SDL_BLENDMODE_ADD;
+        /* lighter: premultiplied Src + Dst for both RGB and A */
+        bm = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
     } else if (blend_add == 2) {
         bm = SDL_ComposeCustomBlendMode(
             SDL_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
@@ -1368,10 +1473,23 @@ static void r_get_pixels(void* target, int x, int y, int w, int h,
             Uint32* px = (Uint32*)sf->pixels;
             for (int i = 0; i < w*h; i++) {
                 Uint32 p = px[i];
-                rgba_out[i*4+0] =  p        & 0xff; /* R */
-                rgba_out[i*4+1] = (p >>  8) & 0xff; /* G */
-                rgba_out[i*4+2] = (p >> 16) & 0xff; /* B */
-                rgba_out[i*4+3] = (p >> 24) & 0xff; /* A */
+                Uint8 pr =  p        & 0xff;
+                Uint8 pg = (p >>  8) & 0xff;
+                Uint8 pb = (p >> 16) & 0xff;
+                Uint8 pa = (p >> 24) & 0xff;
+                if (pa > 0) {
+                    int r_u = (pr * 255 + pa/2) / pa;
+                    int g_u = (pg * 255 + pa/2) / pa;
+                    int b_u = (pb * 255 + pa/2) / pa;
+                    rgba_out[i*4+0] = (Uint8)(r_u > 255 ? 255 : r_u);
+                    rgba_out[i*4+1] = (Uint8)(g_u > 255 ? 255 : g_u);
+                    rgba_out[i*4+2] = (Uint8)(b_u > 255 ? 255 : b_u);
+                } else {
+                    rgba_out[i*4+0] = 0;
+                    rgba_out[i*4+1] = 0;
+                    rgba_out[i*4+2] = 0;
+                }
+                rgba_out[i*4+3] = pa;
             }
         }
         SDL_FreeSurface(sf);

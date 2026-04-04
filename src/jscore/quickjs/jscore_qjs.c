@@ -2113,6 +2113,7 @@ static JSValue js_ctx2d_set_globalCompositeOperation(JSContext *ctx, JSValueCons
         else if (strcmp(op, "screen") == 0)           g_ctx2d.global_composite = 12;
         else if (strcmp(op, "overlay") == 0)          g_ctx2d.global_composite = 13;
         else if (strcmp(op, "difference") == 0)       g_ctx2d.global_composite = 14;
+        else if (strcmp(op, "clear") == 0)            g_ctx2d.global_composite = 15;
         /* else: keep previous value (invalid op ignored) */
         JS_FreeCString(ctx, op);
     }
@@ -2136,6 +2137,7 @@ static JSValue js_ctx2d_get_globalCompositeOperation(JSContext *ctx, JSValueCons
         case 12: return JS_NewString(ctx, "screen");
         case 13: return JS_NewString(ctx, "overlay");
         case 14: return JS_NewString(ctx, "difference");
+        case 15: return JS_NewString(ctx, "clear");
         default: return JS_NewString(ctx, "source-over");
     }
 }
@@ -3531,7 +3533,8 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
         g_renderer->draw_image(target, img_handle,
                                sx, sy, sw, sh,
                                dx, dy, dw, dh,
-                               g_ctx2d.transform, (uint8_t)(255 * g_ctx2d.global_alpha));
+                               g_ctx2d.transform, (uint8_t)(255 * g_ctx2d.global_alpha),
+                               g_ctx2d.global_composite);
     }
 
     return JS_UNDEFINED;
@@ -3878,15 +3881,7 @@ static JSValue js_ctx2d_getImageData(JSContext *ctx, JSValueConst this_val,
     uint8_t *pixels = malloc(sw * sh * 4);
     if (g_renderer->get_pixels) {
         g_renderer->get_pixels(target, sx, sy, sw, sh, pixels);
-        /* SDL2 textures store premultiplied alpha; canvas spec requires straight alpha */
-        for (int i = 0; i < sw * sh; i++) {
-            uint8_t a = pixels[i*4+3];
-            if (a > 0 && a < 255) {
-                pixels[i*4+0] = (uint8_t)((pixels[i*4+0] * 255 + a/2) / a);
-                pixels[i*4+1] = (uint8_t)((pixels[i*4+1] * 255 + a/2) / a);
-                pixels[i*4+2] = (uint8_t)((pixels[i*4+2] * 255 + a/2) / a);
-            }
-        }
+        /* r_get_pixels already returns straight (un-premultiplied) alpha */
     }
 
     /* Update pixel data in the existing array */

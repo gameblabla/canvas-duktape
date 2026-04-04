@@ -92,11 +92,11 @@ typedef struct {
     void   (*draw_image)(void* target, void* img,
                          int sx, int sy, int sw, int sh,
                          int dx, int dy, int dw, int dh,
-                         const double* m, uint8_t alpha);
+                         const double* m, uint8_t alpha, int composite_mode);
     void   (*draw_canvas)(void* target, void* src_tex,
                           int sx, int sy, int sw, int sh,
                           int dx, int dy, int dw, int dh,
-                          const double* m, uint8_t alpha);
+                          const double* m, uint8_t alpha, int composite_mode);
 
     /* Text */
     void   (*fill_text)(void* target, const char* text, double x, double y,
