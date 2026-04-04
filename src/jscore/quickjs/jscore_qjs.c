@@ -3585,16 +3585,6 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
 
     void *target = get_current_canvas_texture(ctx, this_val);
     
-    /* Only switch display canvas if canvas 1 is never drawn to directly.
-     * Games like CrossCode draw to canvas 1 themselves; games like Pikachu
-     * Volleyball (PixiJS) create a dynamic canvas and never touch canvas 1. */
-    if (g_ctx2d.canvas_id > 1000 && !g_canvas1_from_getElementById) {
-        g_display_canvas_draw_count++;
-        if (g_display_canvas_draw_count >= 10 && g_display_canvas_id != g_ctx2d.canvas_id) {
-            update_display_canvas(g_ctx2d.canvas_id);
-        }
-    }
-    
     if (!target) {
         return JS_UNDEFINED;
     }
@@ -7475,8 +7465,14 @@ static JSValue js_document_createElement(JSContext *ctx, JSValueConst this_val,
     JSValue obj = JS_NULL;
 
     if (strcmp(tag, "canvas") == 0) {
-        /* First createElement("canvas") returns the main canvas so game renders to display */
-        if (!g_stage_canvas_claimed && g_canvases[0].id == 1) {
+        /* Only synthesize the stage canvas via createElement() when the page did
+         * not already declare a real <canvas>. Games like CrossCode have an
+         * actual DOM canvas and use createElement("canvas") for offscreen
+         * buffers; handing them canvas 1 here makes internal helper resizes
+         * mutate the display canvas. */
+        int has_declared_main_canvas =
+            (g_canvases_cap > 0 && g_canvases[0].id == 1 && g_canvases[0].style[0] != '\0');
+        if (!has_declared_main_canvas && !g_stage_canvas_claimed && g_canvases[0].id == 1) {
             g_stage_canvas_claimed = 1;
             obj = js_make_canvas_object(ctx, 1);
         } else {

@@ -886,12 +886,14 @@ static void r_draw_image(void* target, void* img,
     /* File-backed images are straight-alpha SDL textures. Keep the old
      * source-over path for them instead of forcing the premultiplied canvas
      * blend mode introduced for offscreen textures. */
+    SDL_BlendMode saved_bm;
+    SDL_GetTextureBlendMode(src, &saved_bm);
     if (composite_mode == 0) {
-        SDL_BlendMode saved_bm;
-        SDL_GetTextureBlendMode(src, &saved_bm);
         if (alpha < 255)
             SDL_SetTextureBlendMode(src, SDL_BLENDMODE_BLEND);
         SDL_SetTextureAlphaMod(src, alpha);
+        if (alpha < 255)
+            SDL_SetTextureColorMod(src, alpha, alpha, alpha);
         SDL_SetRenderTarget(g_sdl_renderer, dst);
         apply_clip_for_texture(dst);
         SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
@@ -900,12 +902,13 @@ static void r_draw_image(void* target, void* img,
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
         SDL_RenderFlush(g_sdl_renderer);
         SDL_SetTextureAlphaMod(src, 255);
+        if (alpha < 255)
+            SDL_SetTextureColorMod(src, 255, 255, 255);
+        if (alpha < 255)
+            SDL_SetTextureColorMod(src, 255, 255, 255);
         SDL_SetTextureBlendMode(src, saved_bm);
         return;
     }
-
-    SDL_BlendMode saved_bm;
-    SDL_GetTextureBlendMode(src, &saved_bm);
 
     SDL_BlendMode bm;
     switch (composite_mode) {
@@ -1022,6 +1025,35 @@ static void r_draw_canvas(void* target, void* src_tex,
 
     SDL_BlendMode saved_bm;
     SDL_GetTextureBlendMode(src, &saved_bm);
+
+    /* For plain source-over, keep full-canvas blits on the premultiplied path,
+     * but treat subrect blits like regular sprite draws. CrossCode's ingame
+     * bitmap text is packed into larger offscreen canvas atlases and is drawn
+     * back out via subrect copies. */
+    if (composite_mode == 0) {
+        int tex_w = 0, tex_h = 0;
+        int use_regular_blend = (alpha < 255);
+        SDL_QueryTexture(src, NULL, NULL, &tex_w, &tex_h);
+        if (sx != 0 || sy != 0 || sw != tex_w || sh != tex_h)
+            use_regular_blend = 1;
+        if (use_regular_blend)
+            SDL_SetTextureBlendMode(src, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureAlphaMod(src, alpha);
+        if (alpha < 255)
+            SDL_SetTextureColorMod(src, alpha, alpha, alpha);
+        SDL_SetRenderTarget(g_sdl_renderer, dst);
+        apply_clip_for_texture(dst);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
+        render_with_transform(src, &srcRect, &dstRect, m, alpha, dx, dy, dw, dh);
+        SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderTarget(g_sdl_renderer, NULL);
+        SDL_RenderFlush(g_sdl_renderer);
+        SDL_SetTextureAlphaMod(src, 255);
+        if (alpha < 255)
+            SDL_SetTextureColorMod(src, 255, 255, 255);
+        SDL_SetTextureBlendMode(src, saved_bm);
+        return;
+    }
 
     SDL_BlendMode bm;
     switch (composite_mode) {
