@@ -3614,18 +3614,27 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
         JS_ToInt32(ctx, &dy, argv[2]);
     }
 
+    int composite_mode = g_ctx2d.global_composite;
+    /* CrossCode's bitmap fonts come from media/font/*.png atlases and are
+     * expected to render as plain source-over sprite blits even when gameplay
+     * code leaves a different composite op active on the current context. */
+    if (img_idx >= 0 && g_images[img_idx].src[0] &&
+        strstr(g_images[img_idx].src, "media/font/")) {
+        composite_mode = 0;
+    }
+
     if (canvas_id > 0 && g_renderer->draw_canvas) {
         g_renderer->draw_canvas(target, img_handle,
                                 sx, sy, sw, sh,
                                 dx, dy, dw, dh,
                                 g_ctx2d.transform, (uint8_t)(255 * g_ctx2d.global_alpha),
-                                g_ctx2d.global_composite);
+                                composite_mode);
     } else if (g_renderer->draw_image) {
         g_renderer->draw_image(target, img_handle,
                                sx, sy, sw, sh,
                                dx, dy, dw, dh,
                                g_ctx2d.transform, (uint8_t)(255 * g_ctx2d.global_alpha),
-                               g_ctx2d.global_composite);
+                               composite_mode);
     }
 
     return JS_UNDEFINED;

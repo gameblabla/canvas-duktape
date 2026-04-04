@@ -886,14 +886,12 @@ static void r_draw_image(void* target, void* img,
     /* File-backed images are straight-alpha SDL textures. Keep the old
      * source-over path for them instead of forcing the premultiplied canvas
      * blend mode introduced for offscreen textures. */
-    SDL_BlendMode saved_bm;
-    SDL_GetTextureBlendMode(src, &saved_bm);
     if (composite_mode == 0) {
+        SDL_BlendMode saved_bm;
+        SDL_GetTextureBlendMode(src, &saved_bm);
         if (alpha < 255)
             SDL_SetTextureBlendMode(src, SDL_BLENDMODE_BLEND);
         SDL_SetTextureAlphaMod(src, alpha);
-        if (alpha < 255)
-            SDL_SetTextureColorMod(src, alpha, alpha, alpha);
         SDL_SetRenderTarget(g_sdl_renderer, dst);
         apply_clip_for_texture(dst);
         SDL_SetRenderDrawBlendMode(g_sdl_renderer, SDL_BLENDMODE_BLEND);
@@ -902,13 +900,12 @@ static void r_draw_image(void* target, void* img,
         SDL_SetRenderTarget(g_sdl_renderer, NULL);
         SDL_RenderFlush(g_sdl_renderer);
         SDL_SetTextureAlphaMod(src, 255);
-        if (alpha < 255)
-            SDL_SetTextureColorMod(src, 255, 255, 255);
-        if (alpha < 255)
-            SDL_SetTextureColorMod(src, 255, 255, 255);
         SDL_SetTextureBlendMode(src, saved_bm);
         return;
     }
+
+    SDL_BlendMode saved_bm;
+    SDL_GetTextureBlendMode(src, &saved_bm);
 
     SDL_BlendMode bm;
     switch (composite_mode) {
