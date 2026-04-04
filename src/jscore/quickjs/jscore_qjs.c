@@ -3624,7 +3624,13 @@ static JSValue js_ctx2d_drawImage(JSContext *ctx, JSValueConst this_val,
         JS_ToInt32(ctx, &dy, argv[2]);
     }
 
-    if (g_renderer->draw_image) {
+    if (canvas_id > 0 && g_renderer->draw_canvas) {
+        g_renderer->draw_canvas(target, img_handle,
+                                sx, sy, sw, sh,
+                                dx, dy, dw, dh,
+                                g_ctx2d.transform, (uint8_t)(255 * g_ctx2d.global_alpha),
+                                g_ctx2d.global_composite);
+    } else if (g_renderer->draw_image) {
         g_renderer->draw_image(target, img_handle,
                                sx, sy, sw, sh,
                                dx, dy, dw, dh,
